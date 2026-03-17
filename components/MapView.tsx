@@ -2,55 +2,59 @@
 import { useEffect, useRef } from "react";
 
 const CITY_COORDS: Record<string, [number, number]> = {
-  "Fort Worth": [32.7555, -97.3308],
   "Dallas": [32.7767, -96.7970],
-  "Arlington": [32.7357, -97.1081],
-  "Colleyville": [32.8890, -97.1503],
-  "Lake Worth": [32.8021, -97.4378],
-  "Grapevine": [32.9343, -97.0781],
-  "Southlake": [32.9412, -97.1336],
-  "Keller": [32.9343, -97.2294],
-  "Mansfield": [32.5632, -97.1417],
-  "Euless": [32.8371, -97.0819],
+  "Fort Worth": [32.7555, -97.3308],
   "Irving": [32.8140, -96.9489],
-  "Plano": [33.0198, -96.6989],
-  "Frisco": [33.1507, -96.8236],
-  "Denton": [33.2148, -97.1331],
-  "Lewisville": [33.0462, -97.0641],
-  "Carrollton": [32.9537, -96.8903],
-  "Mesquite": [32.7668, -96.5992],
+  "Arlington": [32.7357, -97.1081],
   "Grand Prairie": [32.7460, -97.0228],
-  "McKinney": [33.1972, -96.6397],
-  "Allen": [33.1032, -96.6706],
-  "Flower Mound": [33.0145, -97.0964],
-  "North Richland Hills": [32.8343, -97.2289],
-  "Haltom City": [32.7993, -97.2697],
-  "Hurst": [32.8232, -97.1883],
-  "Bedford": [32.8440, -97.1430],
-  "Watauga": [32.8582, -97.2550],
-  "Saginaw": [32.8596, -97.3619],
-  "Azle": [32.8957, -97.5467],
-  "Benbrook": [32.6818, -97.4625],
-  "Burleson": [32.5421, -97.3208],
-  "Crowley": [32.5793, -97.3622],
-  "Cleburne": [32.3479, -97.3886],
-  "Cedar Hill": [32.5885, -96.9561],
-  "Duncanville": [32.6518, -96.9083],
-  "DeSoto": [32.5896, -96.8572],
-  "Lancaster": [32.5921, -96.7561],
-  "Rowlett": [32.9029, -96.5638],
-  "Sachse": [32.9751, -96.5802],
-  "Wylie": [33.0151, -96.5388],
-  "Rockwall": [32.9290, -96.4597],
-  "Weatherford": [32.7596, -97.7975],
-  "Midlothian": [32.4821, -97.0050],
-  "Waxahachie": [32.3868, -96.8489],
-  "Coppell": [32.9543, -97.0150],
-  "Farmers Branch": [32.9268, -96.8961],
-  "Addison": [32.9612, -96.8291],
-  "Richardson": [32.9483, -96.7299],
+  "Plano": [33.0198, -96.6989],
   "Garland": [32.9126, -96.6389],
+  "Mesquite": [32.7668, -96.5992],
+  "Denton": [33.2148, -97.1331],
+  "McKinney": [33.1972, -96.6397],
+  "Houston": [29.7604, -95.3698],
+  "Austin": [30.2672, -97.7431],
+  "Cleburne": [32.3479, -97.3886],
+  "Ferris": [32.5335, -96.6644],
+  "Midlothian": [32.4821, -97.0050],
+  "Azle": [32.8957, -97.5467],
+  "Cedar Hill": [32.5885, -96.9561],
+  "Mansfield": [32.5632, -97.1417],
+  "Colleyville": [32.8890, -97.1503],
+  "Haslet": [32.9657, -97.3467],
+  "Justin": [33.0851, -97.2947],
+  "Lake Worth": [32.8021, -97.4378],
+  "Everman": [32.6312, -97.2895],
+  "Venus": [32.4307, -97.1003],
+  "Princeton": [33.1776, -96.4997],
+  "Little Elm": [33.1629, -96.9375],
+  "Godley": [32.4457, -97.5267],
+  "Joshua": [32.4618, -97.3886],
+  "Terrell": [32.7362, -96.2752],
+  "Denison": [33.7557, -96.5364],
+  "Mabank": [32.3668, -96.1044],
+  "Alvarado": [32.4068, -97.2142],
+  "Kaufman": [32.5893, -96.3058],
+  "Carthage": [32.1571, -94.3391],
+  "DeSoto": [32.5896, -96.8572],
+  "Covington": [32.1746, -97.2561],
+  "Hillsboro": [32.0126, -97.1267],
+  "Hutchins": [32.6418, -96.7133],
+  "Ponder": [33.1918, -97.2869],
+  "Gordonville": [33.8074, -96.8536],
+  "Matador": [34.0112, -100.8237],
+  "Rockwall": [32.9290, -96.4597],
+  "Hutto": [30.5427, -97.5491],
+  "Bonham": [33.5762, -96.1769],
+  "Carrollton": [32.9537, -96.8903],
+  "Jimmy": [32.7555, -97.3308],
 };
+
+function addFuzz(coords: [number, number]): [number, number] {
+  const angle = Math.random() * 2 * Math.PI;
+  const radius = Math.random() * 0.055;
+  return [coords[0] + radius * Math.cos(angle), coords[1] + radius * Math.sin(angle)];
+}
 
 function getCoords(cityName: string): [number, number] {
   if (!cityName) return addFuzz([32.78, -97.05]);
@@ -58,13 +62,6 @@ function getCoords(cityName: string): [number, number] {
     if (cityName.toLowerCase().includes(key.toLowerCase())) return addFuzz(coords);
   }
   return addFuzz([32.78, -97.05]);
-}
-
-function addFuzz(coords: [number, number]): [number, number] {
-  // ~5 mile radius fuzz (0.072 degrees ≈ 5 miles)
-  const angle = Math.random() * 2 * Math.PI;
-  const radius = Math.random() * 0.055;
-  return [coords[0] + radius * Math.cos(angle), coords[1] + radius * Math.sin(angle)];
 }
 
 interface Job {
@@ -92,7 +89,7 @@ export default function MapView({ jobs, onSubmitInterest }: Props) {
         iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
         shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
       });
-      const map = L.map(elRef.current!).setView([32.82, -97.1], 10);
+      const map = L.map(elRef.current!).setView([32.82, -97.1], 9);
       mapRef.current = map;
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap contributors",
