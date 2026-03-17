@@ -1,4 +1,6 @@
 'use client'
+import dynamic from 'next/dynamic'
+const MapView = dynamic(() => import('@/components/MapView'), { ssr: false })
 import { useState, useEffect, useRef } from 'react'
 import { createBrowserSupabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
@@ -195,7 +197,7 @@ export default function DriverDashboard() {
       )}
 
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
-        {[['jobs','🏗️ Available Jobs'],['loads','🚚 My Loads']].map(([tab,label])=>(
+        {[['jobs','🏗️ Available Jobs'],['loads','🚚 My Loads'],['map','🗺️ Map View']].map(([tab,label])=>(
           <button key={tab} onClick={()=>setActiveTab(tab)} style={{padding:'13px 24px',background:'transparent',border:'none',borderBottom:activeTab===tab?'2px solid #F5A623':'2px solid transparent',color:activeTab===tab?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>{label}</button>
         ))}
       </div>
@@ -303,6 +305,25 @@ export default function DriverDashboard() {
           </div>
         )}
 
+                {activeTab==='map'&&(
+          <div style={{paddingTop:'20px'}}>
+            <MapView
+              jobs={jobs}
+              onSubmitInterest={async (jobId: string) => {
+                const supabase = createBrowserSupabase()
+                const { data: { user } } = await supabase.auth.getUser()
+                if (!user) { alert('Please sign in'); return }
+                const { error } = await supabase.from('load_requests').insert({
+                  driver_id: user.id,
+                  dispatch_order_id: jobId,
+                  status: 'pending'
+                })
+                if (error) { alert('Error submitting. Try again.'); return }
+                alert('Interest submitted! We will reach out shortly.')
+              }}
+            />
+          </div>
+        )}
         {activeTab==='loads'&&(
           <div>
             <input ref={completionFileRef} type="file" accept="image/*" onChange={handleCompletionPhoto} style={{display:'none'}}/>
