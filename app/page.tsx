@@ -40,8 +40,8 @@ export default function Home() {
           DUMPSITE<span style={{color:'#F5A623'}}>.IO</span>
         </span>
         <div style={{display:'flex',gap:'12px',alignItems:'center'}}>
-          <Link href="/login" style={{color:'#888',textDecoration:'none',fontSize:'13px',letterSpacing:'0.05em'}}>SIGN IN</Link>
-          <Link href="/signup" style={{background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'700',letterSpacing:'0.08em',padding:'10px 18px',borderRadius:'4px'}}>GET STARTED</Link>
+          <Link href="/signup" style={{color:'#888',textDecoration:'none',fontSize:'13px',letterSpacing:'0.05em'}}>GET STARTED</Link>
+          <Link href="/login" style={{background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'700',letterSpacing:'0.08em',padding:'10px 18px',borderRadius:'4px'}}>SIGN IN</Link>
         </div>
       </nav>
 

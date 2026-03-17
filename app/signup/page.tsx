@@ -23,6 +23,7 @@ export default function SignupPage() {
     try {
       const supabase = createBrowserSupabase()
       const { data, error: signUpError } = await supabase.auth.signUp({
+        emailRedirectTo: `${window.location.origin}/login`,
         email: form.email,
         password: form.password,
         options: {
