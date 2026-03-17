@@ -62,7 +62,7 @@ export default function SignupPage() {
       <div style={{ textAlign: 'center', maxWidth: '400px', padding: '20px' }}>
         <div style={{ fontSize: '48px', marginBottom: '16px' }}>✅</div>
         <h2 style={{ color: '#27AE60', fontWeight: '800', fontSize: '24px', marginBottom: '8px' }}>Account Created!</h2>
-        <p style={{ color: '#606670', fontSize: '14px', lineHeight: '1.6', marginBottom: '20px' }}>Check your email to verify your account, then sign in to access active dump sites and start earning.</p>
+        <p style={{ color: '#606670', fontSize: '14px', lineHeight: '1.6', marginBottom: '20px' }}>⚠️ IMPORTANT: Check your email and click the verification link before signing in. You will not be able to access your account until your email is confirmed.</p>
         <a href="/login" style={{ background: '#F5A623', color: '#111', padding: '12px 24px', borderRadius: '9px', textDecoration: 'none', fontWeight: '800', fontSize: '14px' }}>Sign In Now</a>
       </div>
     </div>
