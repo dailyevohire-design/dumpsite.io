@@ -102,7 +102,7 @@ export default function AdminDashboard() {
 
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
         {['pending','approved','rejected','completed','orders'].map(tab=>(
-          <button key={tab} onClick={()=>setActiveTab(tab); if(tab==='orders') fetchActiveOrders()} style={{padding:'12px 20px',background:'transparent',border:'none',borderBottom:activeTab===tab?'2px solid #F5A623':'2px solid transparent',color:activeTab===tab?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>
+          <button key={tab} onClick={()=>{setActiveTab(tab); if(tab==='orders') fetchActiveOrders()}} style={{padding:'12px 20px',background:'transparent',border:'none',borderBottom:activeTab===tab?'2px solid #F5A623':'2px solid transparent',color:activeTab===tab?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>
             {tab}
           </button>
         ))}
