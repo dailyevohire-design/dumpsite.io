@@ -33,7 +33,7 @@ export default function DriverDashboard() {
       if (!data.user) { router.push('/login'); return }
       setUser(data.user)
       supabase.from('driver_profiles').select('*, tiers(name,slug,pay_boost_pct,trial_load_limit)').eq('user_id', data.user.id).single().then(({data:p}) => setProfile(p))
-      supabase.from('dispatch_orders').select('*, cities(name)').eq('status','dispatching').order('created_at',{ascending:false}).then(({data:s}) => { const seen = new Set(); setJobs((s||[]).filter((j:any) => { if(seen.has(j.id)) return false; seen.add(j.id); return true; })) })
+      supabase.from('dispatch_orders').select('*, cities(name)').eq('status','dispatching').order('created_at',{ascending:false}).then(({data:s}) => { const seen = new Set(); setJobs((s||[]).filter((j:any) => { const key = j.client_address||j.id; if(seen.has(key)) return false; seen.add(key); return true; })) })
       supabase.from('load_requests').select('*, dispatch_orders(client_address,yards_needed,price_quoted_cents,driver_pay_cents,cities(name))').eq('driver_id',data.user.id).order('submitted_at',{ascending:false}).limit(20).then(({data:l}) => setLoads(l||[]))
     })
   }, [])
