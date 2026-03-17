@@ -18,7 +18,6 @@ const CITY_COORDS: Record<string, [number, number]> = {
   "Denton": [33.2148, -97.1331],
   "Lewisville": [33.0462, -97.0641],
   "Carrollton": [32.9537, -96.8903],
-  "Garland": [32.9126, -96.6389],
   "Mesquite": [32.7668, -96.5992],
   "Grand Prairie": [32.7460, -97.0228],
   "McKinney": [33.1972, -96.6397],
