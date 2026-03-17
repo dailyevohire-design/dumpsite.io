@@ -72,7 +72,7 @@ export default function SignupPage() {
     <div style={{ background: '#0A0C0F', minHeight: '100vh', color: '#E8E3DC', fontFamily: 'system-ui,sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
       <div style={{ width: '100%', maxWidth: '480px' }}>
         <div style={{ textAlign: 'center', marginBottom: '28px' }}>
-          <div style={{ width: '48px', height: '48px', background: '#F5A623', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px', fontSize: '22px' }}>🚛</div>
+          <div style={{textAlign:'center',marginBottom:'12px'}}><span style={{fontFamily:'Georgia,serif',fontSize:'22px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span></div>
           <h1 style={{ fontWeight: '900', fontSize: '28px', marginBottom: '4px' }}>Create Driver Account</h1>
           <p style={{ color: '#606670', fontSize: '13px' }}>Free 30-day trial — no credit card required</p>
         </div>
