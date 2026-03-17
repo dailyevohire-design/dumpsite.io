@@ -110,7 +110,52 @@ export default function AdminDashboard() {
       </div>
 
       <div style={{padding:'16px 20px',maxWidth:'1000px',margin:'0 auto'}}>
-        {loading?(
+        {activeTab==='orders'?(
+          <div style={{paddingTop:'20px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
+              <p style={{color:'#606670',fontSize:'14px',margin:0}}>All active dispatches on the map.</p>
+              <div style={{display:'flex',gap:'8px'}}>
+                <a href="/admin/dispatch" style={{background:'#F5A623',color:'#111',padding:'8px 16px',borderRadius:'6px',textDecoration:'none',fontWeight:'800',fontSize:'12px',textTransform:'uppercase'}}>+ New Dispatch</a>
+                <button onClick={fetchActiveOrders} style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'6px',cursor:'pointer',fontSize:'12px'}}>Refresh</button>
+              </div>
+            </div>
+            {ordersLoading&&<div style={{textAlign:'center',padding:'40px',color:'#606670'}}>Loading...</div>}
+            {!ordersLoading&&activeOrders.length===0&&(
+              <div style={{textAlign:'center',padding:'60px',color:'#606670'}}>No active orders. <a href="/admin/dispatch" style={{color:'#F5A623'}}>Create one</a></div>
+            )}
+            {!ordersLoading&&activeOrders.map((order:any)=>(
+              <div key={order.id} style={{background:'#111316',border:'1px solid #272B33',borderRadius:'10px',padding:'18px 20px',marginBottom:'10px'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'12px'}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:'700',fontSize:'16px',marginBottom:'4px'}}>{order.client_name}</div>
+                    <div style={{fontSize:'13px',color:'#F5A623',marginBottom:'6px'}}>{order.client_address}</div>
+                    <div style={{display:'flex',gap:'12px',flexWrap:'wrap',marginBottom:'6px'}}>
+                      <span style={{fontSize:'12px',color:'#606670'}}>City: <span style={{color:'#F0EDE8'}}>{(order.cities as any)?.name}</span></span>
+                      <span style={{fontSize:'12px',color:'#606670'}}>Yards: <span style={{color:'#F0EDE8'}}>{order.yards_needed}</span></span>
+                      <span style={{fontSize:'12px',color:'#606670'}}>Date: <span style={{color:'#F0EDE8'}}>{new Date(order.created_at).toLocaleDateString()}</span></span>
+                      {order.created_by&&<span style={{fontSize:'12px',color:'#606670'}}>Rep: <span style={{color:'#F5A623',fontWeight:'700'}}>{order.created_by}</span></span>}
+                    </div>
+                    <div style={{fontSize:'12px',color:'#27AE60',fontWeight:'700'}}>{order.drivers_notified||0} drivers notified</div>
+                  </div>
+                  <div style={{display:'flex',gap:'8px'}}>
+                    <button onClick={async()=>{
+                      if(!confirm('Mark complete? Removes from map and available jobs.')) return
+                      const {createBrowserSupabase} = await import('@/lib/supabase')
+                      await createBrowserSupabase().from('dispatch_orders').update({status:'completed'}).eq('id',order.id)
+                      fetchActiveOrders()
+                    }} style={{background:'rgba(39,174,96,0.1)',border:'1px solid rgba(39,174,96,0.3)',color:'#27AE60',padding:'8px 16px',borderRadius:'6px',cursor:'pointer',fontSize:'12px',fontWeight:'800'}}>Mark Complete</button>
+                    <button onClick={async()=>{
+                      if(!confirm('Delete permanently?')) return
+                      const {createBrowserSupabase} = await import('@/lib/supabase')
+                      await createBrowserSupabase().from('dispatch_orders').delete().eq('id',order.id)
+                      fetchActiveOrders()
+                    }} style={{background:'rgba(231,76,60,0.1)',border:'1px solid rgba(231,76,60,0.3)',color:'#E74C3C',padding:'8px 16px',borderRadius:'6px',cursor:'pointer',fontSize:'12px',fontWeight:'800'}}>Delete</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ):loading?(
           <div style={{textAlign:'center',padding:'60px',color:'#606670'}}>
             <div style={{fontSize:'32px',marginBottom:'12px'}}>⏳</div>
             <div style={{fontWeight:'700'}}>Loading requests...</div>
