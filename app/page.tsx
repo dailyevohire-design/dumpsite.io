@@ -29,7 +29,25 @@ export default function Home() {
             </div>
           ))}
         </div>
-        <div><Link href="/admin" style={{fontSize:'11px',color:'#1a1a1a',textDecoration:'none'}}>Admin</Link></div>
+        
+        <div style={{marginBottom:'48px'}}>
+          <h2 style={{fontSize:'22px',fontWeight:'800',color:'#E8E3DC',textAlign:'center',marginBottom:'8px'}}>How It Works</h2>
+          <p style={{fontSize:'13px',color:'#606670',textAlign:'center',marginBottom:'28px'}}>Three simple steps to start getting paid</p>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px'}}>
+            {[
+              ['1','Sign Up Free','Create your driver account in under 2 minutes. No fees, no commitments.'],
+              ['2','Confirm Your Email','Check your inbox for a confirmation email from DumpSite.io and verify your account.'],
+              ['3','View Active Dumpsites','Log in to your dashboard and browse available dump jobs near you in the DFW area.']
+            ].map(([step,title,desc])=>(
+              <div key={step} style={{background:'#111316',border:'1px solid #272B33',borderRadius:'10px',padding:'18px',textAlign:'left'}}>
+                <div style={{width:'28px',height:'28px',borderRadius:'50%',background:'#F5A623',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:'900',fontSize:'13px',color:'#111',marginBottom:'10px'}}>{step}</div>
+                <div style={{fontWeight:'700',fontSize:'13px',color:'#E8E3DC',marginBottom:'6px'}}>{title}</div>
+                <div style={{fontSize:'11px',color:'#606670',lineHeight:'1.5'}}>{desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+<div><Link href="/admin" style={{fontSize:'11px',color:'#1a1a1a',textDecoration:'none'}}>Admin</Link></div>
       </div>
     </main>
   )
