@@ -39,7 +39,7 @@ export default function LoginPage() {
       <div style={{ width: '100%', maxWidth: '400px' }}>
         <div style={{ textAlign: 'center', marginBottom: '28px' }}>
           <a href="/" style={{ textDecoration: 'none' }}>
-            <div style={{ width: '48px', height: '48px', background: '#F5A623', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px', fontSize: '22px' }}>🚛</div>
+            <div style={{textAlign:'center',marginBottom:'12px'}}><span style={{fontFamily:'Georgia,serif',fontSize:'22px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span></div>
           </a>
           <h1 style={{ fontWeight: '900', fontSize: '28px', marginBottom: '4px' }}>Welcome Back</h1>
           <p style={{ color: '#606670', fontSize: '13px' }}>Sign in to your DumpSite.io account</p>
