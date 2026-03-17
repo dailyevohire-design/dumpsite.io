@@ -309,17 +309,9 @@ export default function DriverDashboard() {
           <div style={{paddingTop:'20px'}}>
             <MapView
               jobs={jobs}
-              onSubmitInterest={async (jobId: string) => {
-                const supabase = createBrowserSupabase()
-                const { data: { user } } = await supabase.auth.getUser()
-                if (!user) { alert('Please sign in'); return }
-                const { error } = await supabase.from('load_requests').insert({
-                  driver_id: user.id,
-                  dispatch_order_id: jobId,
-                  status: 'pending'
-                })
-                if (error) { alert('Error submitting. Try again.'); return }
-                alert('Interest submitted! We will reach out shortly.')
+              onSubmitInterest={(jobId: string) => {
+                const job = jobs.find((j:any) => j.id === jobId)
+                if (job) { setSelectedJob(job); setActiveTab('jobs') }
               }}
             />
           </div>
