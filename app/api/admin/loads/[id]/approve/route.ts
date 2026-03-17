@@ -10,16 +10,32 @@ const supabase = createClient(
 export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params
 
+  // Step 1: Get the load request by id
   const { data: load, error: loadError } = await supabase
     .from('load_requests')
-    .select('*, driver_profiles(phone_number, first_name), dispatch_orders(client_address, cities(name))')
+    .select('id, driver_id, dispatch_order_id, status')
     .eq('id', id)
     .single()
 
   if (loadError || !load) {
-    return NextResponse.json({ error: 'Load not found' }, { status: 404 })
+    return NextResponse.json({ error: `Load not found: ${loadError?.message}` }, { status: 404 })
   }
 
+  // Step 2: Get driver profile separately
+  const { data: driver } = await supabase
+    .from('driver_profiles')
+    .select('user_id, first_name, phone')
+    .eq('user_id', load.driver_id)
+    .single()
+
+  // Step 3: Get dispatch order separately
+  const { data: order } = await supabase
+    .from('dispatch_orders')
+    .select('id, client_address, city_id, cities(name)')
+    .eq('id', load.dispatch_order_id)
+    .single()
+
+  // Step 4: Update status to approved
   const { error: updateError } = await supabase
     .from('load_requests')
     .update({ status: 'approved' })
@@ -29,10 +45,11 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     return NextResponse.json({ error: updateError.message }, { status: 500 })
   }
 
-  const phone = load.driver_profiles?.phone_number
-  const firstName = load.driver_profiles?.first_name || 'Driver'
-  const address = load.dispatch_orders?.client_address || 'See dashboard for details'
-  const city = load.dispatch_orders?.cities?.name || ''
+  // Step 5: Send SMS
+  const phone = driver?.phone
+  const firstName = driver?.first_name || 'Driver'
+  const address = order?.client_address || 'See dashboard'
+  const city = (order?.cities as any)?.name || ''
 
   if (phone) {
     try {
@@ -46,9 +63,10 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
         to: normalizedPhone
       })
     } catch (smsError: any) {
-      console.error('SMS failed:', smsError.message)
       return NextResponse.json({ success: true, smsError: smsError.message })
     }
+  } else {
+    return NextResponse.json({ success: true, smsError: 'No phone number on file for driver' })
   }
 
   return NextResponse.json({ success: true })
