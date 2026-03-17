@@ -177,7 +177,7 @@ export default function DriverDashboard() {
         </div>
         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
           {tier&&<span style={{background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}33`,padding:'4px 12px',borderRadius:'6px',fontSize:'11px',fontWeight:'800',textTransform:'uppercase'}}>{tier.name}</span>}
-          <a href="/account" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',textDecoration:'none',fontSize:'13px',marginRight:'8px'}}>My Account</a><a href="/account" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',textDecoration:'none',fontSize:'13px',marginRight:'8px'}}>My Account</a><button onClick={signOut} style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',cursor:'pointer',fontSize:'13px'}}>Sign Out</button>
+          <a href="/account" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',textDecoration:'none',fontSize:'13px',marginRight:'8px'}}>My Account</a><button onClick={signOut} style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',cursor:'pointer',fontSize:'13px'}}>Sign Out</button>
         </div>
       </div>
 
