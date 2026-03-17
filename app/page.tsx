@@ -21,7 +21,7 @@ export default function Home() {
           ))}
         </div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px',marginBottom:'40px'}}>
-          {[['🚛','Need a dumpsite but don't see one listed?','Submit a dumpsite request form'],['📱','Get address by SMS','We approve and send location'],['💰','Deliver and get paid','$20-$35 per load delivered']].map(([icon,title,desc])=>(
+          {[['🚛',"Need a dumpsite? Don't see one listed?",'Submit a dumpsite request form'],['📱','Get address by SMS','We approve and send location'],['💰','Deliver and get paid','$20-$35 per load delivered']].map(([icon,title,desc])=>(
             <div key={title as string} style={{background:'#111316',border:'1px solid #272B33',borderRadius:'10px',padding:'14px',textAlign:'left'}}>
               <div style={{fontSize:'24px',marginBottom:'8px'}}>{icon}</div>
               <div style={{fontWeight:'700',fontSize:'13px',marginBottom:'4px'}}>{title}</div>
