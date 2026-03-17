@@ -3,6 +3,8 @@ import { useState, useEffect } from 'react'
 
 export default function AdminDashboard() {
   const [loads, setLoads] = useState<any[]>([])
+  const [activeOrders, setActiveOrders] = useState<any[]>([])
+  const [ordersLoading, setOrdersLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('pending')
   const [rejectReason, setRejectReason] = useState('')
@@ -25,6 +27,16 @@ export default function AdminDashboard() {
       setLoads([])
     }
     setLoading(false)
+  }
+
+  async function fetchActiveOrders() {
+    setOrdersLoading(true)
+    try {
+      const res = await fetch('/api/admin/dispatch')
+      const data = await res.json()
+      setActiveOrders(data.orders || [])
+    } catch(e) { console.error(e) }
+    setOrdersLoading(false)
   }
 
   async function approve(id: string) {
@@ -89,8 +101,8 @@ export default function AdminDashboard() {
       )}
 
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
-        {['pending','approved','rejected','completed'].map(tab=>(
-          <button key={tab} onClick={()=>setActiveTab(tab)} style={{padding:'12px 20px',background:'transparent',border:'none',borderBottom:activeTab===tab?'2px solid #F5A623':'2px solid transparent',color:activeTab===tab?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>
+        {['pending','approved','rejected','completed','orders'].map(tab=>(
+          <button key={tab} onClick={()=>setActiveTab(tab); if(tab==='orders') fetchActiveOrders()} style={{padding:'12px 20px',background:'transparent',border:'none',borderBottom:activeTab===tab?'2px solid #F5A623':'2px solid transparent',color:activeTab===tab?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>
             {tab}
           </button>
         ))}
