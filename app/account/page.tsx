@@ -116,7 +116,7 @@ export default function AccountPage() {
     <div style={{background:'#0A0C0F',minHeight:'100vh',color:'#E8E3DC',fontFamily:'system-ui,sans-serif'}}>
       <div style={{background:'#080A0C',borderBottom:'1px solid #272B33',padding:'14px 20px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
-          <div style={{width:'30px',height:'30px',background:'#F5A623',borderRadius:'7px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'16px'}}>🚛</div>
+          <span style={{fontFamily:'Georgia,serif',fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
           <span style={{fontWeight:'800',fontSize:'17px',color:'#F5A623'}}>DumpSite.io</span>
         </div>
         <a href="/dashboard" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',textDecoration:'none',fontSize:'13px'}}>← Back to Dashboard</a>
