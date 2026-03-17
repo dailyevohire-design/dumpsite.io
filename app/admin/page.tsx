@@ -36,7 +36,7 @@ export default function AdminDashboard() {
         setMessage({ text: '✅ Approved! SMS sent to driver with delivery address.', type: 'success' })
         fetchLoads()
       } else {
-        setMessage({ text: data.message || 'Failed to approve', type: 'error' })
+        setMessage({ text: data.error || data.message || 'Failed to approve', type: 'error' })
       }
     } catch { setMessage({ text: 'Network error — try again', type: 'error' }) }
     setProcessing(null)
