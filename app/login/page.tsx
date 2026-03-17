@@ -1,0 +1,73 @@
+'use client'
+import { useState } from 'react'
+import { createBrowserSupabase } from '@/lib/supabase'
+import { useRouter } from 'next/navigation'
+
+export default function LoginPage() {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const router = useRouter()
+
+  async function submit(e: any) {
+    e.preventDefault()
+    setError('')
+    if (!email || !password) { setError('Please enter your email and password'); return }
+    setLoading(true)
+    try {
+      const supabase = createBrowserSupabase()
+      const { data, error: loginError } = await supabase.auth.signInWithPassword({ email, password })
+      if (loginError) { setError('Invalid email or password'); setLoading(false); return }
+      if (data.user) {
+        const role = data.user.user_metadata?.role
+        if (role === 'admin' || role === 'superadmin') {
+          router.push('/admin')
+        } else {
+          router.push('/dashboard')
+        }
+      }
+    } catch { setError('Something went wrong. Please try again.') }
+    setLoading(false)
+  }
+
+  const inp = { background: '#1C1F24', border: '1px solid #272B33', color: '#E8E3DC', padding: '12px 14px', borderRadius: '9px', fontSize: '14px', width: '100%', outline: 'none', marginTop: '5px' }
+  const lbl = { fontSize: '11px', fontWeight: '700' as const, letterSpacing: '0.07em', textTransform: 'uppercase' as const, color: '#606670' }
+
+  return (
+    <div style={{ background: '#0A0C0F', minHeight: '100vh', color: '#E8E3DC', fontFamily: 'system-ui,sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+      <div style={{ width: '100%', maxWidth: '400px' }}>
+        <div style={{ textAlign: 'center', marginBottom: '28px' }}>
+          <a href="/" style={{ textDecoration: 'none' }}>
+            <div style={{ width: '48px', height: '48px', background: '#F5A623', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px', fontSize: '22px' }}>🚛</div>
+          </a>
+          <h1 style={{ fontWeight: '900', fontSize: '28px', marginBottom: '4px' }}>Welcome Back</h1>
+          <p style={{ color: '#606670', fontSize: '13px' }}>Sign in to your DumpSite.io account</p>
+        </div>
+
+        {error && (
+          <div style={{ background: 'rgba(231,76,60,0.12)', border: '1px solid rgba(231,76,60,0.3)', borderRadius: '8px', padding: '10px 14px', marginBottom: '16px', color: '#E74C3C', fontSize: '13px', fontWeight: '600' }}>
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={submit} style={{ background: '#111316', border: '1px solid #272B33', borderRadius: '12px', padding: '24px' }}>
+          <div style={{ marginBottom: '14px' }}>
+            <label style={lbl}>Email</label>
+            <input style={inp} type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="mike@hauling.com" autoComplete="email" />
+          </div>
+          <div style={{ marginBottom: '20px' }}>
+            <label style={lbl}>Password</label>
+            <input style={inp} type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" autoComplete="current-password" />
+          </div>
+          <button type="submit" disabled={loading} style={{ width: '100%', background: '#F5A623', color: '#111', border: 'none', padding: '13px', borderRadius: '9px', fontWeight: '800', fontSize: '15px', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            {loading ? 'Signing In...' : 'Sign In'}
+          </button>
+          <p style={{ textAlign: 'center', marginTop: '14px', fontSize: '12px', color: '#606670' }}>
+            No account yet? <a href="/signup" style={{ color: '#F5A623', textDecoration: 'none', fontWeight: '700' }}>Sign up free</a>
+          </p>
+        </form>
+      </div>
+    </div>
+  )
+}
