@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
   const page = parseInt(searchParams.get('page') || '1')
   const statusFilter = searchParams.get('status') || 'dispatching'
-  const limit = 20
+  const limit = 200
   const offset = (page - 1) * limit
 
   const { data: orders, count } = await supabase
