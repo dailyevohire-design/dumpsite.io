@@ -74,7 +74,7 @@ export default function AdminDashboard() {
       <div style={{background:'#080A0C',borderBottom:'1px solid #272B33',padding:'14px 20px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
           <span style={{fontFamily:'Georgia,serif',fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
-          <span style={{fontWeight:'800',fontSize:'17px',color:'#F5A623'}}>DumpSite.io Admin</span>
+          <span style={{fontWeight:'400',fontSize:'13px',color:'#606670',letterSpacing:'0.05em',fontFamily:'system-ui,sans-serif'}}>ADMIN</span>
         </div>
         <div style={{display:'flex',gap:'10px',alignItems:'center'}}>
           <span style={{fontSize:'12px',color:'#606670'}}>{total} {activeTab} requests</span>
