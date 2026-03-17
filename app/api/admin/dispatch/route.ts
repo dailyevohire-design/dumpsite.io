@@ -33,6 +33,7 @@ export async function GET(req: NextRequest) {
   const supabase = createAdminSupabase()
   const { searchParams } = new URL(req.url)
   const page = parseInt(searchParams.get('page') || '1')
+  const statusFilter = searchParams.get('status') || 'dispatching'
   const limit = 20
   const offset = (page - 1) * limit
 
@@ -43,6 +44,7 @@ export async function GET(req: NextRequest) {
       price_quoted_cents, status, urgency, drivers_notified,
       created_at, source, cities(name)
     `, { count: 'exact' })
+    .eq('status', statusFilter)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1)
 

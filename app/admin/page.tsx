@@ -32,7 +32,7 @@ export default function AdminDashboard() {
   async function fetchActiveOrders() {
     setOrdersLoading(true)
     try {
-      const res = await fetch('/api/admin/dispatch')
+      const res = await fetch('/api/admin/dispatch?status=dispatching')
       const data = await res.json()
       setActiveOrders(data.orders || [])
     } catch(e) { console.error(e) }

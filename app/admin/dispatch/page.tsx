@@ -54,7 +54,7 @@ export default function NewDispatch() {
   const [form, setForm] = useState({
     clientName:'', clientPhone:'', clientAddress:'', cityId:'',
     yardsNeeded:'', priceQuoted:'', truckTypeNeeded:'tandem_axle',
-    urgency:'standard', notes:''
+    urgency:'standard', notes:'', salesRep:''
   })
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<any>(null)
@@ -81,13 +81,14 @@ export default function NewDispatch() {
           truckTypeNeeded: form.truckTypeNeeded,
           urgency: form.urgency,
           notes: form.notes,
-          source: 'manual'
+          source: 'manual',
+          createdBy: form.salesRep
         })
       })
       const data = await res.json()
       if (data.success) {
         setResult(data)
-        setForm({clientName:'',clientPhone:'',clientAddress:'',cityId:'',yardsNeeded:'',priceQuoted:'',truckTypeNeeded:'tandem_axle',urgency:'standard',notes:''})
+        setForm({clientName:'',clientPhone:'',clientAddress:'',cityId:'',yardsNeeded:'',priceQuoted:'',truckTypeNeeded:'tandem_axle',urgency:'standard',notes:'',salesRep:''})
       } else {
         setError(data.error || 'Failed to create dispatch')
       }
@@ -149,6 +150,7 @@ export default function NewDispatch() {
               </select>
             </div>
           </div>
+          <div><label style={lbl}>Sales Rep Name</label><input style={inp} value={form.salesRep} onChange={e=>set('salesRep',e.target.value)} placeholder="e.g. Marcus, Sarah" /></div>
           <div><label style={lbl}>Internal Notes</label><textarea style={{...inp,resize:'none',height:'80px'}} value={form.notes} onChange={e=>set('notes',e.target.value)} placeholder="Any special instructions..." /></div>
           <button onClick={submit} disabled={loading} style={{background:'#F5A623',color:'#111',border:'none',padding:'16px',borderRadius:'6px',fontWeight:'800',fontSize:'14px',letterSpacing:'0.08em',textTransform:'uppercase',cursor:loading?'not-allowed':'pointer',opacity:loading?0.7:1,width:'100%'}}>
             {loading ? 'Creating Dispatch...' : '+ Create Dispatch - Notify Drivers'}
