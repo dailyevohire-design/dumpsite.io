@@ -6,8 +6,8 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-export async function PATCH(req: Request, { params }: { params: { id: string } }) {
-  const { id } = params
+export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
+  const { id } = await context.params
   const { error } = await supabase
     .from('load_requests')
     .update({ status: 'rejected' })
