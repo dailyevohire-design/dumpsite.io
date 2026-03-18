@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react'
 
 export default function AdminDashboard() {
-  const ADMIN_EMAILS = ['dailyevohire@gmail.com','micah.robbins1@icloud.com','micah.robbins@icloud.com']
+  const ADMIN_EMAILS = ['dailyevohire@gmail.com','micah.robbins1@icloud.com','micah.robbins@icloud.com','micahrobbins1@icloud.com']
   const [loads, setLoads] = useState<any[]>([])
   const [activeOrders, setActiveOrders] = useState<any[]>([])
   const [ordersLoading, setOrdersLoading] = useState(false)
@@ -19,7 +19,7 @@ export default function AdminDashboard() {
       const {createBrowserSupabase} = await import('@/lib/supabase')
       const sb = createBrowserSupabase()
       const {data:{user}} = await sb.auth.getUser()
-      if (!user || !ADMIN_EMAILS.includes(user.email||'')) {
+      if (!user || !ADMIN_EMAILS.includes((user.email||'').toLowerCase())) {
         window.location.href = '/login'
         return
       }
