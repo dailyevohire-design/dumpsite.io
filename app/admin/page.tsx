@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react'
 
 export default function AdminDashboard() {
+  const ADMIN_EMAILS = ['dailyevohire@gmail.com','micah.robbins1@icloud.com']
   const [loads, setLoads] = useState<any[]>([])
   const [activeOrders, setActiveOrders] = useState<any[]>([])
   const [ordersLoading, setOrdersLoading] = useState(false)
@@ -13,7 +14,19 @@ export default function AdminDashboard() {
   const [message, setMessage] = useState<{text:string;type:'success'|'error'}|null>(null)
   const [total, setTotal] = useState(0)
 
-  useEffect(() => { fetchLoads() }, [activeTab])
+  useEffect(() => {
+    const checkAdmin = async () => {
+      const {createBrowserSupabase} = await import('@/lib/supabase')
+      const sb = createBrowserSupabase()
+      const {data:{user}} = await sb.auth.getUser()
+      if (!user || !ADMIN_EMAILS.includes(user.email||'')) {
+        window.location.href = '/login'
+        return
+      }
+      fetchLoads()
+    }
+    checkAdmin()
+  }, [activeTab])
 
   async function fetchLoads() {
     setLoading(true)
