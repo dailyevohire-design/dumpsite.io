@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react'
 
 export default function AdminDashboard() {
-  const ADMIN_EMAILS = ['dailyevohire@gmail.com','micah.robbins1@icloud.com']
+  const ADMIN_EMAILS = ['dailyevohire@gmail.com','micah.robbins1@icloud.com','micah.robbins@icloud.com']
   const [loads, setLoads] = useState<any[]>([])
   const [activeOrders, setActiveOrders] = useState<any[]>([])
   const [ordersLoading, setOrdersLoading] = useState(false)
