@@ -14,19 +14,7 @@ export default function AdminDashboard() {
   const [message, setMessage] = useState<{text:string;type:'success'|'error'}|null>(null)
   const [total, setTotal] = useState(0)
 
-  useEffect(() => {
-    const checkAdmin = async () => {
-      const {createBrowserSupabase} = await import('@/lib/supabase')
-      const sb = createBrowserSupabase()
-      const {data:{user}} = await sb.auth.getUser()
-      if (!user || !ADMIN_EMAILS.includes((user.email||'').toLowerCase())) {
-        window.location.href = '/login'
-        return
-      }
-      fetchLoads()
-    }
-    checkAdmin()
-  }, [activeTab])
+  useEffect(() => { fetchLoads() }, [activeTab])
 
   async function fetchLoads() {
     setLoading(true)
