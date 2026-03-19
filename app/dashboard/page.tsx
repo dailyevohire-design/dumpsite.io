@@ -287,7 +287,7 @@ export default function DriverDashboard() {
           <div style={{fontSize:'12px',color:'#606670'}}>Completed: <span style={{color:'#F5A623',fontWeight:'700'}}>{loads.filter((l: any) => l.status === 'completed').length} loads</span></div>
           {tier?.slug === 'trial' && (
             <div style={{marginLeft:'auto',background:'rgba(245,166,35,0.08)',border:'1px solid rgba(245,166,35,0.2)',borderRadius:'6px',padding:'4px 12px',fontSize:'11px',color:'#F5A623'}}>
-              Trial: {profile.trial_loads_used}/{tier.trial_load_limit} loads
+              Trial: {profile.trial_loads_used}/{tier.trial_load_limit} loads used
             </div>
           )}
         </div>

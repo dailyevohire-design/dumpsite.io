@@ -1,63 +1,87 @@
 import { NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+import { createAdminSupabase } from '@/lib/supabase'
+import { sendApprovalSMS } from '@/lib/sms'
 
 export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params
+  const supabase = createAdminSupabase()
 
+  // Get load — only process if still pending (race condition protection)
   const { data: load, error: loadError } = await supabase
     .from('load_requests')
     .select('id, driver_id, dispatch_order_id, status')
     .eq('id', id)
+    .eq('status', 'pending')
     .single()
 
   if (loadError || !load) {
-    return NextResponse.json({ error: 'Load not found' }, { status: 404 })
+    return NextResponse.json({ success: false, error: 'Load not found or already processed' }, { status: 404 })
   }
 
+  // Get driver profile
   const { data: driver } = await supabase
     .from('driver_profiles')
     .select('user_id, first_name, phone')
     .eq('user_id', load.driver_id)
     .single()
 
-  const { data: order } = await supabase
-    .from('dispatch_orders')
-    .select('id, client_address, cities(name)')
-    .eq('id', load.dispatch_order_id)
-    .single()
+  // Get dispatch order + address
+  let address = 'Contact dispatch for address'
+  let payDollars = 20
+  let cityName = 'DFW'
 
-  await supabase.from('load_requests').update({ status: 'approved' }).eq('id', id)
-
-  const phone = driver?.phone
-  const firstName = driver?.first_name || 'Driver'
-  const address = order?.client_address || 'See dashboard'
-  const city = (order?.cities as any)?.name || ''
-
-  if (phone) {
-    const accountSid = process.env.TWILIO_ACCOUNT_SID!
-    const apiKey = process.env.TWILIO_API_KEY!
-    const apiSecret = process.env.TWILIO_API_SECRET!
-    let p = phone.replace(/\D/g, '')
-    if (p.length === 10) p = '1' + p
-    if (!p.startsWith('+')) p = '+' + p
-    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
-      method: 'POST',
-      headers: {
-        Authorization: 'Basic ' + Buffer.from(`${apiKey}:${apiSecret}`).toString('base64'),
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        To: p,
-        From: process.env.TWILIO_FROM_NUMBER!,
-        Body: `Hi ${firstName}! Your DumpSite.io load has been approved. Address: ${address}${city ? ', ' + city : ''}. Drive safe! - DumpSite.io`
-      }).toString()
-    })
+  if (load.dispatch_order_id) {
+    const { data: order } = await supabase
+      .from('dispatch_orders')
+      .select('client_address, driver_pay_cents, cities(name)')
+      .eq('id', load.dispatch_order_id)
+      .single()
+    if (order) {
+      address = order.client_address || address
+      payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 20
+      cityName = (order.cities as any)?.name || cityName
+    }
   }
 
-  return NextResponse.json({ success: true })
+  // Mark approved
+  const { error: updateError } = await supabase
+    .from('load_requests')
+    .update({ status: 'approved', reviewed_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('status', 'pending')
+
+  if (updateError) {
+    return NextResponse.json({ success: false, error: updateError.message }, { status: 500 })
+  }
+
+  // Log address release
+  await supabase.from('audit_logs').insert({
+    action: 'address.released',
+    entity_type: 'load_request',
+    entity_id: id,
+    metadata: { driver_id: load.driver_id, city: cityName }
+  })
+
+  // Send SMS using our lib (no twilio npm package — uses fetch)
+  let smsError = null
+  if (driver?.phone) {
+    const result = await sendApprovalSMS(driver.phone, {
+      plainAddress: address,
+      gateCode: null,
+      accessInstructions: `Delivery job in ${cityName}. Call dispatch if you have questions.`,
+      loadId: id,
+      payDollars
+    })
+    if (!result.success) smsError = result.error
+  } else {
+    smsError = 'No phone number on file for driver'
+  }
+
+  return NextResponse.json({
+    success: true,
+    message: smsError
+      ? `Approved but SMS failed: ${smsError}`
+      : `✅ Approved! SMS sent to driver with delivery address.`,
+    smsError
+  })
 }

@@ -1,39 +1,39 @@
 import { createAdminSupabase } from './supabase'
 
 function getTwilioConfig() {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID
-  const apiKey     = process.env.TWILIO_API_KEY
-  const apiSecret  = process.env.TWILIO_API_SECRET
-  const from       = process.env.TWILIO_FROM_NUMBER
-  const adminPhone = process.env.ADMIN_PHONE
-  if (!accountSid || !apiKey || !apiSecret || !from || !adminPhone) {
-    throw new Error('Missing Twilio env vars')
+  const sid    = process.env.TWILIO_ACCOUNT_SID
+  const key    = process.env.TWILIO_API_KEY
+  const secret = process.env.TWILIO_API_SECRET
+  const from   = process.env.TWILIO_FROM_NUMBER
+  const admin  = process.env.ADMIN_PHONE
+  if (!sid || !key || !secret || !from || !admin) {
+    throw new Error('Missing Twilio env vars — check TWILIO_ACCOUNT_SID, TWILIO_API_KEY, TWILIO_API_SECRET, TWILIO_FROM_NUMBER, ADMIN_PHONE')
   }
-  return { accountSid, apiKey, apiSecret, from, adminPhone }
+  return { sid, key, secret, from, admin }
 }
 
 async function sendSMS(to: string, body: string, messageType: string, relatedId?: string) {
   const supabase = createAdminSupabase()
-  const { accountSid, apiKey, apiSecret, from } = getTwilioConfig()
+  const { sid, key, secret, from } = getTwilioConfig()
   try {
     const response = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+      `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
       {
         method: 'POST',
         headers: {
-          Authorization: 'Basic ' + Buffer.from(`${apiKey}:${apiSecret}`).toString('base64'),
-          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64'),
+          'Content-Type': 'application/x-www-form-urlencoded'
         },
-        body: new URLSearchParams({ To: to, From: from, Body: body }).toString(),
+        body: new URLSearchParams({ To: to, From: from, Body: body }).toString()
       }
     )
     const data = await response.json()
     if (data.error_code) {
       console.error('Twilio error:', data.message)
-      await supabase.from('sms_log').insert({ to_phone: to, message_type: messageType, message_body: body, status: 'failed', related_id: relatedId })
+      supabase.from('sms_log').insert({ to_phone: to, message_type: messageType, message_body: body, status: 'failed', related_id: relatedId }).then(() => {})
       return { success: false, error: data.message }
     }
-    await supabase.from('sms_log').insert({ to_phone: to, message_type: messageType, message_body: body, twilio_sid: data.sid, status: 'sent', related_id: relatedId })
+    supabase.from('sms_log').insert({ to_phone: to, message_type: messageType, message_body: body, twilio_sid: data.sid, status: 'sent', related_id: relatedId }).then(() => {})
     return { success: true, sid: data.sid }
   } catch (error: any) {
     console.error('SMS failed:', error.message)
@@ -41,51 +41,111 @@ async function sendSMS(to: string, body: string, messageType: string, relatedId?
   }
 }
 
-export async function sendDispatchSMS(driverPhone: string, data: { cityName: string; yardsNeeded: number; haulDate: string; dispatchId: string }) {
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
-  const body = `DumpSite.io - New delivery job!\n📍 ${data.cityName}\n📦 ${data.yardsNeeded} yards needed\n📅 ${data.haulDate}\nTap to request: ${appUrl}/dashboard\nReply STOP to unsubscribe`
-  return sendSMS(driverPhone, body, 'dispatch', data.dispatchId)
+function normalizePhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '')
+  if (digits.length === 10) return '+1' + digits
+  if (digits.length === 11 && digits.startsWith('1')) return '+' + digits
+  if (phone.startsWith('+')) return phone
+  return '+1' + digits
 }
 
-export async function sendApprovalSMS(driverPhone: string, data: { plainAddress: string; gateCode: string | null; accessInstructions: string | null; loadId: string; payDollars: number }) {
-  const lines = [
-    '✅ DumpSite.io APPROVED!',
-    `📍 Delivery address: ${data.plainAddress}`,
-    data.gateCode ? `🔑 Gate code: ${data.gateCode}` : null,
-    data.accessInstructions ? `ℹ️ ${data.accessInstructions}` : null,
-    `💰 Your pay: $${data.payDollars}/load`,
-    'Call us if you have any issues.',
-    '-DumpSite.io',
-  ].filter(Boolean).join('\n')
-  return sendSMS(driverPhone, lines, 'approval', data.loadId)
+export async function sendApprovalSMS(phone: string, opts: {
+  plainAddress: string
+  gateCode: string | null
+  accessInstructions: string | null
+  loadId: string
+  payDollars: number
+}) {
+  const normalized = normalizePhone(phone)
+  const gate = opts.gateCode ? `\nGate code: ${opts.gateCode}` : ''
+  const access = opts.accessInstructions ? `\n${opts.accessInstructions}` : ''
+  const body = `✅ DumpSite.io APPROVED!\n\nDelivery address:\n${opts.plainAddress}${gate}${access}\n\nPay: $${opts.payDollars}/load\n\nDrive safe! Reply STOP to unsubscribe.`
+  return sendSMS(normalized, body, 'approval', opts.loadId)
 }
 
-export async function sendRejectionSMS(driverPhone: string, data: { reason: string; loadId: string }) {
-  const body = `DumpSite.io - Load Not Approved\nReason: ${data.reason}\nPlease submit a new request with clean fill dirt.\n-DumpSite.io`
-  return sendSMS(driverPhone, body, 'rejection', data.loadId)
+export async function sendRejectionSMS(phone: string, opts: { reason: string; loadId: string }) {
+  const normalized = normalizePhone(phone)
+  const body = `DumpSite.io: Your load request was not approved.\n\nReason: ${opts.reason}\n\nQuestions? Visit dumpsite.io/dashboard`
+  return sendSMS(normalized, body, 'rejection', opts.loadId)
 }
 
-export async function sendPayoutSMS(driverPhone: string, data: { amountDollars: number; loadId: string }) {
-  const body = `💸 DumpSite.io - Payout Sent!\n$${data.amountDollars} transferred to your bank.\nArrives in 1-2 business days.\n-DumpSite.io`
-  return sendSMS(driverPhone, body, 'payout', data.loadId)
+export async function sendDispatchSMS(phone: string, opts: {
+  cityName: string
+  yardsNeeded: number
+  payDollars: number
+  haulDate: string
+  dispatchId: string
+  tierSlug: string
+}) {
+  const normalized = normalizePhone(phone)
+  const urgencyLine = opts.tierSlug === 'elite' ? '🔥 PRIORITY JOB — ' : ''
+  const body = `${urgencyLine}DumpSite.io Job Available!\n\n📍 ${opts.cityName}\n📦 ${opts.yardsNeeded} yards needed\n💰 $${opts.payDollars}/load\n📅 ${opts.haulDate}\n\nLog in to claim: dumpsite.io/dashboard\n\nReply STOP to unsubscribe.`
+  return sendSMS(normalized, body, 'dispatch', opts.dispatchId)
 }
 
 export async function sendAdminAlert(message: string) {
-  const { adminPhone } = getTwilioConfig()
-  return sendSMS(adminPhone, `DumpSite Admin: ${message}`, 'admin_alert')
+  const { admin } = getTwilioConfig()
+  return sendSMS(admin, `DumpSite.io Alert: ${message}`, 'admin_alert')
 }
 
-export async function batchDispatchSMS(drivers: Array<{ phone: string; tierSlug: string; dispatchId: string; cityName: string; yardsNeeded: number; haulDate: string }>) {
-  const delayMap: Record<string, number> = { elite: 0, pro: 15 * 60 * 1000, hauler: 30 * 60 * 1000, trial: 45 * 60 * 1000 }
-  let sent = 0, failed = 0
-  for (const driver of drivers) {
-    const delay = delayMap[driver.tierSlug] ?? 0
-    const sendFn = async () => {
-      const result = await sendDispatchSMS(driver.phone, { cityName: driver.cityName, yardsNeeded: driver.yardsNeeded, haulDate: driver.haulDate, dispatchId: driver.dispatchId })
-      if (result.success) sent++; else failed++
-    }
-    if (delay === 0) await sendFn()
-    else setTimeout(sendFn, delay)
+export interface DispatchDriver {
+  phone: string
+  tierSlug: string
+  dispatchId: string
+  cityName: string
+  yardsNeeded: number
+  payDollars: number
+  haulDate: string
+}
+
+export async function batchDispatchSMS(drivers: DispatchDriver[]): Promise<{ sent: number; failed: number }> {
+  const TIER_DELAYS: Record<string, number> = { elite: 0, pro: 2, hauler: 5, trial: 10 }
+  let sent = 0
+  let failed = 0
+
+  // Group by tier for ordered dispatch
+  const byTier: Record<string, DispatchDriver[]> = {}
+  for (const d of drivers) {
+    const tier = d.tierSlug || 'trial'
+    if (!byTier[tier]) byTier[tier] = []
+    byTier[tier].push(d)
   }
+
+  const order = ['elite', 'pro', 'hauler', 'trial']
+  for (const tier of order) {
+    const group = byTier[tier] || []
+    const delayMinutes = TIER_DELAYS[tier] || 10
+
+    for (const driver of group) {
+      // For elite (0 delay) send immediately
+      // For others, log as pending — QStash will handle delayed delivery
+      // Until QStash is wired: send all immediately with a note
+      if (delayMinutes === 0) {
+        const result = await sendDispatchSMS(driver.phone, {
+          cityName: driver.cityName,
+          yardsNeeded: driver.yardsNeeded,
+          payDollars: driver.payDollars,
+          haulDate: driver.haulDate,
+          dispatchId: driver.dispatchId,
+          tierSlug: driver.tierSlug,
+        })
+        if (result.success) sent++
+        else failed++
+      } else {
+        // Send immediately for now — QStash migration is next sprint
+        const result = await sendDispatchSMS(driver.phone, {
+          cityName: driver.cityName,
+          yardsNeeded: driver.yardsNeeded,
+          payDollars: driver.payDollars,
+          haulDate: driver.haulDate,
+          dispatchId: driver.dispatchId,
+          tierSlug: driver.tierSlug,
+        })
+        if (result.success) sent++
+        else failed++
+      }
+    }
+  }
+
   return { sent, failed }
 }

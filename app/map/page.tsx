@@ -85,7 +85,7 @@ export default function MapPage() {
             ))}
           </div>
           <div style={{position:'absolute',top:'12px',left:'12px',background:'rgba(0,0,0,0.85)',border:'1px solid #272B33',borderRadius:'8px',padding:'8px 14px',fontSize:'12px',color:'#606670',zIndex:10}}>
-            DFW Metro · {jobs.length} active dump sites
+            DFW Metro · {jobs.length} active delivery jobs
           </div>
         </div>
         <div style={{width:'280px',borderLeft:'1px solid #272B33',overflowY:'auto',background:'#0D0F12',flexShrink:0}}>
