@@ -91,6 +91,7 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
     dispatchId: order.id,
     cityName: city.name,
     yardsNeeded: input.yardsNeeded,
+    payDollars: input.priceQuotedCents ? Math.round(input.priceQuotedCents / 100) : 20,
     haulDate
   }))
 
