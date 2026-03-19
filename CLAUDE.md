@@ -32,10 +32,19 @@ Every decision must be production-grade:
 - `lib/supabase.ts` — browser and admin clients ONLY (no next/headers)
 - `lib/supabase.server.ts` — server client using next/headers (API routes only)
 - `lib/sms.ts` — all Twilio SMS logic
+- `lib/email.ts` — all Resend email logic
 - `lib/crypto.ts` — AES-256-GCM encryption for addresses and banking
 - `lib/services/` — business logic services
 - `app/api/` — all API routes, always verify auth first
 - Middleware handles RBAC for /admin, /dashboard, /account, /map routes
+
+## Vercel Serverless Rules — Never Break These
+- NEVER fire-and-forget async calls in API routes (e.g. `sendEmail().catch(...)` without await)
+- Vercel kills the function the instant the response is sent — any unawaited promise is abandoned
+- ALL async work (email, SMS, DB writes, logging) MUST be awaited before returning the response
+- If a side-effect must not block the response, use Vercel's `waitUntil()` — never a dangling promise
+- Every notification call (email/SMS) in an API route must be wrapped in its own try/catch so it never crashes the route
+- `lib/email.ts` and `lib/sms.ts` functions must catch all errors internally and return `{ success, error }` — never throw
 
 ## Security Rules — Never Break These
 - Dump site addresses are NEVER returned in any API response to drivers
