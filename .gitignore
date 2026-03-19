@@ -43,3 +43,8 @@ next-env.d.ts
 env-vercel/
 env-vercel.txt
 .env*
+
+# Local zip files
+full_app.zip
+dumpsite_part_*
+part_aa

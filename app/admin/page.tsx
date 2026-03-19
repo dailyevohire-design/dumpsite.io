@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react'
 
 export default function AdminDashboard() {
-  const ADMIN_EMAILS = ['dailyevohire@gmail.com','micah.robbins1@icloud.com','micah.robbins@icloud.com','micahrobbins1@icloud.com']
+  // Auth enforced by middleware — RBAC handled server-side
   const [loads, setLoads] = useState<any[]>([])
   const [activeOrders, setActiveOrders] = useState<any[]>([])
   const [ordersLoading, setOrdersLoading] = useState(false)
