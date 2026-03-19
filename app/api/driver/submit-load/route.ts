@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabase, createAdminSupabase } from '@/lib/supabase'
+import { sendLoadSubmissionEmail } from '@/lib/email'
 
 export async function POST(req: NextRequest) {
   const supabase = createServerSupabase(req)
@@ -69,6 +70,32 @@ export async function POST(req: NextRequest) {
   if (tier?.slug === 'trial') {
     await admin.from('driver_profiles').update({ trial_loads_used: profile.trial_loads_used + 1 }).eq('user_id', user.id)
   }
+
+  // Get driver profile for notification
+  const { data: driverProfile } = await admin
+    .from('driver_profiles')
+    .select('first_name, last_name, phone')
+    .eq('user_id', user.id)
+    .single()
+
+  const driverName = driverProfile
+    ? `${driverProfile.first_name || ''} ${driverProfile.last_name || ''}`.trim() || 'Unknown Driver'
+    : 'Unknown Driver'
+
+  // Send admin email notification (non-blocking)
+  sendLoadSubmissionEmail({
+    driverName,
+    driverPhone: driverProfile?.phone || 'N/A',
+    dirtType,
+    truckType,
+    truckCount: truckCountNum,
+    yardsEstimated: yardsNum,
+    haulDate,
+    locationText: String(locationText).slice(0, 500),
+    loadId: loadReq.id,
+    requiresExtraReview,
+    submittedAt: new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }),
+  }).catch((err) => console.error('Load submission email failed:', err.message))
 
   return NextResponse.json({
     success: true, loadId: loadReq.id, status: 'pending',
