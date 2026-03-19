@@ -97,13 +97,13 @@ export default function AccountPage() {
     const supabase = createBrowserSupabase()
     const ext = file.name.split('.').pop() || 'pdf'
     const path = `${user.id}/w9/${Date.now()}.${ext}`
-    const { error } = await supabase.storage.from('dirt-photos').upload(path, file, { upsert: true })
+    const { error } = await supabase.storage.from('w9-documents').upload(path, file, { upsert: true })
     if (error) {
       setResult({success:false,message:'W9 upload failed. Please try again.'})
       setUploadingW9(false)
       return
     }
-    const { data: urlData } = supabase.storage.from('dirt-photos').getPublicUrl(path)
+    const { data: urlData } = supabase.storage.from('w9-documents').getPublicUrl(path)
     const w9Url = urlData.publicUrl
     await supabase.from('driver_profiles').update({ w9_url: w9Url }).eq('user_id', user.id)
     setForm(f => ({...f, w9Url}))
