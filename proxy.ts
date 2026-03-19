@@ -3,7 +3,7 @@ import { createServerClient } from '@supabase/ssr'
 
 const ADMIN_ROLES = new Set(['admin', 'superadmin'])
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
   let response = NextResponse.next({ request })
 
