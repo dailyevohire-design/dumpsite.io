@@ -33,8 +33,8 @@ export default function DriverDashboard() {
       if (!data.user) { router.push('/login'); return }
       setUser(data.user)
       supabase.from('driver_profiles').select('*, tiers(name,slug,pay_boost_pct,trial_load_limit)').eq('user_id', data.user.id).single().then(({data:p}) => setProfile(p))
-      supabase.from('dispatch_orders').select('*, cities(name)').eq('status','dispatching').order('driver_pay_cents',{ascending:false}).then(({data:s}) => { const seen = new Set(); const unique = (s||[]).filter((j:any) => { const key = j.client_address||j.id; if(seen.has(key)) return false; seen.add(key); return true; }); const top3 = unique.slice(0,3); const rest = unique.slice(3).sort((a:any,b:any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()); setJobs([...top3,...rest]) })
-      supabase.from('load_requests').select('*, dispatch_orders(client_address,yards_needed,price_quoted_cents,driver_pay_cents,cities(name))').eq('driver_id',data.user.id).order('submitted_at',{ascending:false}).limit(20).then(({data:l}) => setLoads(l||[]))
+      supabase.from('dispatch_orders').select('id,city_id,yards_needed,driver_pay_cents,urgency,created_at,cities(name)').eq('status','dispatching').order('driver_pay_cents',{ascending:false}).then(({data:s}) => { const seen = new Set(); const unique = (s||[]).filter((j:any) => { if(seen.has(j.id)) return false; seen.add(j.id); return true; }); const top3 = unique.slice(0,3); const rest = unique.slice(3).sort((a:any,b:any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()); setJobs([...top3,...rest]) })
+      supabase.from('load_requests').select('id,status,dirt_type,photo_url,truck_type,truck_count,yards_estimated,haul_date,submitted_at,rejected_reason,payout_cents,completion_photo_url,dispatch_orders(yards_needed,driver_pay_cents,cities(name))').eq('driver_id',data.user.id).order('submitted_at',{ascending:false}).limit(20).then(({data:l}) => setLoads(l||[]))
     })
   }, [])
 
@@ -80,29 +80,32 @@ export default function DriverDashboard() {
     const photoUrl = await uploadPhoto(user.id, photoFile, 'dirt')
     setUploadingPhoto(false)
     if (!photoUrl) { setSubmitResult({success:false,message:'Photo upload failed — please try again'}); setSubmitting(false); return }
-    const supabase = createBrowserSupabase()
-    const {error} = await supabase.from('load_requests').insert({
-      idempotency_key: crypto.randomUUID(),
-      driver_id: user.id,
-      dirt_type: form.dirtType,
-      photo_url: photoUrl,
-      location_text: form.locationText,
-      truck_type: form.truckType,
-      truck_count: parseInt(form.truckCount),
-      yards_estimated: parseInt(form.yardsEstimated),
-      haul_date: form.haulDate,
-      status: 'pending',
-      dispatch_order_id: selectedJob.id
+    const res = await fetch('/api/driver/submit-load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idempotencyKey: crypto.randomUUID(),
+        dirtType: form.dirtType,
+        photoUrl,
+        locationText: form.locationText,
+        truckType: form.truckType,
+        truckCount: form.truckCount,
+        yardsEstimated: form.yardsEstimated,
+        haulDate: form.haulDate,
+        dispatchOrderId: selectedJob.id,
+      })
     })
-    if (error) {
-      setSubmitResult({success:false,message:'Failed to submit. Please try again.'})
+    const result = await res.json()
+    if (!result.success) {
+      setSubmitResult({success:false,message:result.message || result.error || 'Failed to submit. Please try again.'})
     } else {
       setSubmitResult({success:true,message:'✅ Submitted! You will get an SMS with the delivery address once approved.'})
       setSelectedJob(null)
       setPhotoFile(null)
       setPhotoPreview(null)
       setForm({dirtType:'clean_fill',locationText:'',truckType:'tandem_axle',truckCount:'1',yardsEstimated:'',haulDate:''})
-      const {data:l} = await supabase.from('load_requests').select('*, dispatch_orders(client_address,yards_needed,driver_pay_cents,cities(name))').eq('driver_id',user.id).order('submitted_at',{ascending:false}).limit(20)
+      const supabase = createBrowserSupabase()
+      const {data:l} = await supabase.from('load_requests').select('id,status,dirt_type,photo_url,truck_type,truck_count,yards_estimated,haul_date,submitted_at,rejected_reason,payout_cents,completion_photo_url,dispatch_orders(yards_needed,driver_pay_cents,cities(name))').eq('driver_id',user.id).order('submitted_at',{ascending:false}).limit(20)
       setLoads(l||[])
       setActiveTab('loads')
     }
@@ -129,27 +132,22 @@ export default function DriverDashboard() {
       return
     }
     const numLoads = parseInt(loadsDelivered)
-    const totalPay = Math.round((driverPayCents * numLoads) / 100)
-    const supabase = createBrowserSupabase()
-    const { error } = await supabase
-      .from('load_requests')
-      .update({
-        status: 'completed',
-        completion_photo_url: photoUrl,
-        truck_count: numLoads,
-        payout_cents: driverPayCents * numLoads
-      })
-      .eq('id', loadId)
-      .eq('driver_id', user.id)
-    if (error) {
-      setSubmitResult({success:false,message:'Failed to mark complete. Please try again.'})
+    const res = await fetch('/api/driver/complete-load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ loadId, completionPhotoUrl: photoUrl, loadsDelivered: numLoads })
+    })
+    const result = await res.json()
+    if (!result.success) {
+      setSubmitResult({success:false,message:result.error || 'Failed to mark complete. Please try again.'})
     } else {
-      setSubmitResult({success:true,message:`🎉 Job complete! You delivered ${numLoads} load${numLoads>1?'s':''} — total pay: $${totalPay}. Payment processed shortly.`})
+      setSubmitResult({success:true,message:`🎉 Job complete! You delivered ${numLoads} load${numLoads>1?'s':''} — total pay: $${result.totalPayDollars}. Payment processed shortly.`})
       setCompletingId(null)
       setCompletionPhoto(null)
       setCompletionPreview(null)
       setLoadsDelivered('1')
-      const {data:l} = await supabase.from('load_requests').select('*, dispatch_orders(client_address,yards_needed,driver_pay_cents,cities(name))').eq('driver_id',user.id).order('submitted_at',{ascending:false}).limit(20)
+      const supabase = createBrowserSupabase()
+      const {data:l} = await supabase.from('load_requests').select('id,status,dirt_type,photo_url,truck_type,truck_count,yards_estimated,haul_date,submitted_at,rejected_reason,payout_cents,completion_photo_url,dispatch_orders(yards_needed,driver_pay_cents,cities(name))').eq('driver_id',user.id).order('submitted_at',{ascending:false}).limit(20)
       setLoads(l||[])
     }
     setCompleting(false)

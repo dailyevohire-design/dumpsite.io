@@ -57,28 +57,33 @@ export default function AccountPage() {
 
   async function saveProfile() {
     setSaving(true)
-    const supabase = createBrowserSupabase()
-    const { error } = await supabase
-      .from('driver_profiles')
-      .update({
-        first_name: form.firstName,
-        last_name: form.lastName,
-        company_name: form.companyName,
-        phone: form.phone,
-        truck_count: parseInt(form.truckCount),
-        truck_type: form.truckType,
-        bank_name: form.bankName,
-        account_holder_name: form.accountHolderName,
-        routing_number: form.routingNumber,
-        account_number: form.accountNumber,
-        account_type: form.accountType,
-        payment_method: form.paymentMethod
+    try {
+      const res = await fetch('/api/driver/update-profile', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          first_name: form.firstName,
+          last_name: form.lastName,
+          company_name: form.companyName,
+          phone: form.phone,
+          truck_count: form.truckCount,
+          truck_type: form.truckType,
+          bank_name: form.bankName,
+          account_holder_name: form.accountHolderName,
+          routing_number: form.routingNumber,
+          account_number: form.accountNumber,
+          account_type: form.accountType,
+          payment_method: form.paymentMethod
+        })
       })
-      .eq('user_id', user.id)
-    if (error) {
-      setResult({success:false,message:'Failed to save. Please try again.'})
-    } else {
-      setResult({success:true,message:'✅ Profile saved successfully!'})
+      const data = await res.json()
+      if (!res.ok || !data.success) {
+        setResult({success:false,message:data.error || 'Failed to save. Please try again.'})
+      } else {
+        setResult({success:true,message:'✅ Profile saved successfully!'})
+      }
+    } catch {
+      setResult({success:false,message:'Network error. Please try again.'})
     }
     setSaving(false)
     setTimeout(()=>setResult(null),4000)
