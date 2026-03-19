@@ -1,19 +1,12 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { createBrowserSupabase } from '@/lib/supabase'
 
 export default function SignupPage() {
-  const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle', cityId: '' })
-  const [cities, setCities] = useState<{id:string;name:string}[]>([])
+  const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle', userType: '', monthlyYardage: '' })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
-
-  useEffect(() => {
-    createBrowserSupabase()
-      .from('cities').select('id, name').eq('is_active', true).order('name')
-      .then(({ data }) => { if (data) setCities(data) })
-  }, [])
 
   function normalizePhone(raw: string): string {
     const digits = raw.replace(/\D/g, '')
@@ -26,7 +19,7 @@ export default function SignupPage() {
   async function submit(e: any) {
     e.preventDefault()
     setError('')
-    if (!form.firstName || !form.lastName || !form.phone || !form.email || !form.password || !form.cityId) {
+    if (!form.firstName || !form.lastName || !form.phone || !form.email || !form.password || !form.userType || !form.monthlyYardage) {
       setError('Please fill in all required fields')
       return
     }
@@ -49,7 +42,7 @@ export default function SignupPage() {
         password: form.password,
         options: {
           emailRedirectTo: `${window.location.origin}/login`,
-          data: { first_name: form.firstName, last_name: form.lastName, role: 'driver' }
+          data: { first_name: form.firstName, last_name: form.lastName, role: 'driver', user_type: form.userType, monthly_yardage: form.monthlyYardage }
         }
       })
 
@@ -66,7 +59,7 @@ export default function SignupPage() {
           company_name: form.company || null,
           phone: normalizedPhone,
           phone_verified: true,       // ✅ enables dispatch SMS
-          city_id: form.cityId || null,  // ✅ driver selects their city at signup
+          city_id: null,
           truck_count: parseInt(form.truckCount) || 1,
           truck_type: form.truckType,
           tier_id: tier?.id || null,
@@ -144,10 +137,25 @@ export default function SignupPage() {
             <input style={inp} type="tel" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="(214) 555-0100" />
           </div>
           <div style={{ marginBottom: '12px' }}>
-            <label style={lbl}>Your City * (for job matching)</label>
-            <select style={inp} value={form.cityId} onChange={e => setForm({ ...form, cityId: e.target.value })}>
-              <option value="">Select your city...</option>
-              {cities.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            <label style={lbl}>I am a... *</label>
+            <select style={inp} value={form.userType} onChange={e => setForm({ ...form, userType: e.target.value })}>
+              <option value="">Select your role...</option>
+              <option value="driver">Driver</option>
+              <option value="contractor">Contractor</option>
+              <option value="excavator">Excavator</option>
+              <option value="homeowner">Home Owner</option>
+            </select>
+          </div>
+          <div style={{ marginBottom: '12px' }}>
+            <label style={lbl}>Estimated Monthly Cubic Yardage *</label>
+            <select style={inp} value={form.monthlyYardage} onChange={e => setForm({ ...form, monthlyYardage: e.target.value })}>
+              <option value="">Select range...</option>
+              <option value="0-100">0 – 100</option>
+              <option value="100-500">100 – 500</option>
+              <option value="500-1000">500 – 1,000</option>
+              <option value="1000-5000">1,000 – 5,000</option>
+              <option value="5000-10000">5,000 – 10,000</option>
+              <option value="10000+">10,000+</option>
             </select>
           </div>
           <div style={{ marginBottom: '12px' }}>
