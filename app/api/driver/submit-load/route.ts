@@ -82,20 +82,24 @@ export async function POST(req: NextRequest) {
     ? `${driverProfile.first_name || ''} ${driverProfile.last_name || ''}`.trim() || 'Unknown Driver'
     : 'Unknown Driver'
 
-  // Send admin email notification (non-blocking)
-  sendLoadSubmissionEmail({
-    driverName,
-    driverPhone: driverProfile?.phone || 'N/A',
-    dirtType,
-    truckType,
-    truckCount: truckCountNum,
-    yardsEstimated: yardsNum,
-    haulDate,
-    locationText: String(locationText).slice(0, 500),
-    loadId: loadReq.id,
-    requiresExtraReview,
-    submittedAt: new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }),
-  }).catch((err) => console.error('Load submission email failed:', err.message))
+  // Send admin email notification — must await before response or Vercel kills the function
+  try {
+    await sendLoadSubmissionEmail({
+      driverName,
+      driverPhone: driverProfile?.phone || 'N/A',
+      dirtType,
+      truckType,
+      truckCount: truckCountNum,
+      yardsEstimated: yardsNum,
+      haulDate,
+      locationText: String(locationText).slice(0, 500),
+      loadId: loadReq.id,
+      requiresExtraReview,
+      submittedAt: new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }),
+    })
+  } catch (emailErr: any) {
+    console.error('Load submission email failed:', emailErr.message)
+  }
 
   return NextResponse.json({
     success: true, loadId: loadReq.id, status: 'pending',
