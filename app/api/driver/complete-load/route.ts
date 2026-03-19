@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabase, createAdminSupabase } from '@/lib/supabase'
 
 export async function POST(req: NextRequest) {
-  const supabase = await createServerSupabase()
+  const supabase = createServerSupabase(req)
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
@@ -13,10 +13,9 @@ export async function POST(req: NextRequest) {
   if (!loadId || !completionPhotoUrl || !loadsDelivered) return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
 
   const numLoads = parseInt(loadsDelivered)
-  if (isNaN(numLoads) || numLoads < 1 || numLoads > 200) return NextResponse.json({ error: 'Loads delivered must be between 1 and 200' }, { status: 400 })
+  if (isNaN(numLoads) || numLoads < 1 || numLoads > 200) return NextResponse.json({ error: 'Invalid loads count' }, { status: 400 })
 
   const admin = createAdminSupabase()
-
   const { data: load, error: loadError } = await admin.from('load_requests').select('id, driver_id, status, dispatch_order_id').eq('id', loadId).single()
   if (loadError || !load) return NextResponse.json({ error: 'Load not found' }, { status: 404 })
   if (load.driver_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
@@ -29,7 +28,6 @@ export async function POST(req: NextRequest) {
   }
 
   const payoutCents = payPerLoadCents * numLoads
-
   const { error: updateError } = await admin.from('load_requests').update({
     status: 'completed',
     completion_photo_url: completionPhotoUrl,
@@ -43,7 +41,6 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     success: true,
     loadsDelivered: numLoads,
-    totalPayDollars: Math.round(payoutCents / 100),
-    message: `Job complete! ${numLoads} load${numLoads > 1 ? 's' : ''} delivered — total pay: $${Math.round(payoutCents / 100)}.`
+    totalPayDollars: Math.round(payoutCents / 100)
   })
 }

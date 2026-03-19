@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabase, createAdminSupabase } from '@/lib/supabase'
 
 export async function POST(req: NextRequest) {
-  const supabase = await createServerSupabase()
+  const supabase = createServerSupabase(req)
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
@@ -18,7 +18,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
-  // ✅ Server-side numeric validation — no NaN in DB
   const truckCountNum = parseInt(truckCount)
   const yardsNum = parseInt(yardsEstimated)
   if (isNaN(truckCountNum) || truckCountNum < 1 || truckCountNum > 50) {
@@ -28,7 +27,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Yards must be a positive number' }, { status: 400 })
   }
 
-  // ✅ Server-side haul date validation — no past dates
   const today = new Date().toISOString().split('T')[0]
   if (haulDate < today) {
     return NextResponse.json({ error: 'Haul date cannot be in the past' }, { status: 400 })
@@ -49,8 +47,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, code: 'TOO_MANY_PENDING', message: 'You have 5 pending requests. Wait for approval before submitting more.' }, { status: 429 })
   }
 
-  const HIGH_REJECTION_MATERIALS = ['caliche']
-  const requiresExtraReview = HIGH_REJECTION_MATERIALS.includes(dirtType)
+  const requiresExtraReview = dirtType === 'caliche'
 
   const { data: loadReq, error } = await admin.from('load_requests').upsert({
     idempotency_key: idempotencyKey,
@@ -75,6 +72,6 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     success: true, loadId: loadReq.id, status: 'pending',
-    message: requiresExtraReview ? '⏳ Caliche requires manual review - usually within 2 hours.' : '⏳ Under review. You will get an SMS with the address within 2 hours.'
+    message: requiresExtraReview ? '⏳ Caliche requires manual review.' : '⏳ Under review. SMS with address coming once approved.'
   }, { status: 201 })
 }

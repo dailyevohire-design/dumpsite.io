@@ -5,7 +5,7 @@ const ALLOWED = new Set(['first_name','last_name','company_name','phone','truck_
 const FORBIDDEN = new Set(['user_id','tier_id','status','gps_score','rating','trial_loads_used','phone_verified','city_id','w9_url'])
 
 export async function PATCH(req: NextRequest) {
-  const supabase = await createServerSupabase()
+  const supabase = createServerSupabase(req)
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
