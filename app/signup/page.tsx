@@ -1,12 +1,19 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { createBrowserSupabase } from '@/lib/supabase'
 
 export default function SignupPage() {
-  const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle' })
+  const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle', cityId: '' })
+  const [cities, setCities] = useState<{id:string;name:string}[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
+
+  useEffect(() => {
+    createBrowserSupabase()
+      .from('cities').select('id, name').eq('is_active', true).order('name')
+      .then(({ data }) => { if (data) setCities(data) })
+  }, [])
 
   function normalizePhone(raw: string): string {
     const digits = raw.replace(/\D/g, '')
@@ -19,7 +26,7 @@ export default function SignupPage() {
   async function submit(e: any) {
     e.preventDefault()
     setError('')
-    if (!form.firstName || !form.lastName || !form.phone || !form.email || !form.password) {
+    if (!form.firstName || !form.lastName || !form.phone || !form.email || !form.password || !form.cityId) {
       setError('Please fill in all required fields')
       return
     }
@@ -52,9 +59,6 @@ export default function SignupPage() {
         // Get tier ID
         const { data: tier } = await supabase.from('tiers').select('id').eq('slug', 'trial').single()
 
-        // Get Dallas city ID as default — drivers can update city later
-        const { data: city } = await supabase.from('cities').select('id').ilike('name', '%Dallas%').eq('is_active', true).maybeSingle()
-
         const { error: profileError } = await supabase.from('driver_profiles').insert({
           user_id: data.user.id,
           first_name: form.firstName,
@@ -62,7 +66,7 @@ export default function SignupPage() {
           company_name: form.company || null,
           phone: normalizedPhone,
           phone_verified: true,       // ✅ enables dispatch SMS
-          city_id: city?.id || null,  // ✅ enables city-based dispatch matching
+          city_id: form.cityId || null,  // ✅ driver selects their city at signup
           truck_count: parseInt(form.truckCount) || 1,
           truck_type: form.truckType,
           tier_id: tier?.id || null,
@@ -138,6 +142,13 @@ export default function SignupPage() {
           <div style={{ marginBottom: '12px' }}>
             <label style={lbl}>Phone Number * (for job SMS notifications)</label>
             <input style={inp} type="tel" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="(214) 555-0100" />
+          </div>
+          <div style={{ marginBottom: '12px' }}>
+            <label style={lbl}>Your City * (for job matching)</label>
+            <select style={inp} value={form.cityId} onChange={e => setForm({ ...form, cityId: e.target.value })}>
+              <option value="">Select your city...</option>
+              {cities.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
           </div>
           <div style={{ marginBottom: '12px' }}>
             <label style={lbl}>Email *</label>

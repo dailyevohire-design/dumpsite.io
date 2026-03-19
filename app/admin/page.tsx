@@ -1,8 +1,9 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { createBrowserSupabase } from '@/lib/supabase'
 
 export default function AdminDashboard() {
-  // Auth enforced by middleware — RBAC handled server-side
+  // Auth enforced by proxy — RBAC handled server-side
   const [loads, setLoads] = useState<any[]>([])
   const [activeOrders, setActiveOrders] = useState<any[]>([])
   const [ordersLoading, setOrdersLoading] = useState(false)
@@ -13,8 +14,28 @@ export default function AdminDashboard() {
   const [processing, setProcessing] = useState<string|null>(null)
   const [message, setMessage] = useState<{text:string;type:'success'|'error'}|null>(null)
   const [total, setTotal] = useState(0)
+  const [newCount, setNewCount] = useState(0)
+  const activeTabRef = useRef(activeTab)
+  activeTabRef.current = activeTab
 
   useEffect(() => { fetchLoads() }, [activeTab])
+
+  // Realtime subscription for new load submissions
+  useEffect(() => {
+    const supabase = createBrowserSupabase()
+    const channel = supabase
+      .channel('admin-load-inserts')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'load_requests' }, () => {
+        if (activeTabRef.current === 'pending') {
+          fetchLoads()
+        } else {
+          setNewCount(c => c + 1)
+        }
+      })
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [])
 
   async function fetchLoads() {
     setLoading(true)
@@ -101,10 +122,20 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {newCount > 0 && activeTab !== 'pending' && (
+        <div onClick={() => { setActiveTab('pending'); setNewCount(0) }} style={{margin:'10px 20px',padding:'10px 16px',borderRadius:'9px',background:'rgba(245,166,35,0.12)',border:'1px solid rgba(245,166,35,0.3)',color:'#F5A623',fontWeight:'700',fontSize:'13px',cursor:'pointer',display:'flex',alignItems:'center',gap:'8px'}}>
+          <span style={{background:'#F5A623',color:'#111',borderRadius:'50%',width:'22px',height:'22px',display:'inline-flex',alignItems:'center',justifyContent:'center',fontWeight:'800',fontSize:'12px'}}>{newCount}</span>
+          New load {newCount === 1 ? 'submission' : 'submissions'} — click to view
+        </div>
+      )}
+
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
         {['pending','approved','rejected','completed','orders'].map(tab=>(
-          <button key={tab} onClick={()=>{setActiveTab(tab); if(tab==='orders') fetchActiveOrders()}} style={{padding:'12px 20px',background:'transparent',border:'none',borderBottom:activeTab===tab?'2px solid #F5A623':'2px solid transparent',color:activeTab===tab?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>
+          <button key={tab} onClick={()=>{setActiveTab(tab); if(tab==='orders') fetchActiveOrders(); if(tab==='pending') setNewCount(0)}} style={{position:'relative',padding:'12px 20px',background:'transparent',border:'none',borderBottom:activeTab===tab?'2px solid #F5A623':'2px solid transparent',color:activeTab===tab?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>
             {tab}
+            {tab==='pending'&&newCount>0&&activeTab!=='pending'&&(
+              <span style={{position:'absolute',top:'6px',right:'4px',background:'#E74C3C',color:'#fff',borderRadius:'50%',width:'18px',height:'18px',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:'10px',fontWeight:'800'}}>{newCount}</span>
+            )}
           </button>
         ))}
         <button onClick={fetchLoads} style={{marginLeft:'auto',padding:'12px 16px',background:'transparent',border:'none',color:'#606670',cursor:'pointer',fontSize:'18px'}}>↻</button>
