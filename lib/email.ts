@@ -6,8 +6,8 @@ function getResend() {
   return new Resend(key)
 }
 
-const NOTIFY_TO = 'support@filldirtnearme.net'
-const FROM = process.env.RESEND_FROM_EMAIL || 'DumpSite.io <notifications@filldirtnearme.net>'
+const NOTIFY_TO = 'support@dumpsite.io'
+const FROM = process.env.RESEND_FROM_EMAIL || 'DumpSite.io <notifications@dumpsite.io>'
 
 export async function sendDumpsiteInterestEmail(data: {
   name: string
