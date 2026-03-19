@@ -13,8 +13,25 @@ export async function POST(req: NextRequest) {
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
 
   const { dirtType, photoUrl, locationText, truckType, truckCount, yardsEstimated, haulDate, idempotencyKey, dispatchOrderId } = body
+
   if (!dirtType || !photoUrl || !locationText || !truckType || !truckCount || !yardsEstimated || !haulDate || !idempotencyKey || !dispatchOrderId) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+  }
+
+  // ✅ Server-side numeric validation — no NaN in DB
+  const truckCountNum = parseInt(truckCount)
+  const yardsNum = parseInt(yardsEstimated)
+  if (isNaN(truckCountNum) || truckCountNum < 1 || truckCountNum > 50) {
+    return NextResponse.json({ error: 'Truck count must be between 1 and 50' }, { status: 400 })
+  }
+  if (isNaN(yardsNum) || yardsNum < 1) {
+    return NextResponse.json({ error: 'Yards must be a positive number' }, { status: 400 })
+  }
+
+  // ✅ Server-side haul date validation — no past dates
+  const today = new Date().toISOString().split('T')[0]
+  if (haulDate < today) {
+    return NextResponse.json({ error: 'Haul date cannot be in the past' }, { status: 400 })
   }
 
   const admin = createAdminSupabase()
@@ -24,7 +41,7 @@ export async function POST(req: NextRequest) {
 
   const tier = profile.tiers as any
   if (tier?.slug === 'trial' && tier?.trial_load_limit && profile.trial_loads_used >= tier.trial_load_limit) {
-    return NextResponse.json({ success: false, code: 'TRIAL_LIMIT_REACHED', message: 'You have used all your free trial loads. Upgrade to keep earning.' }, { status: 403 })
+    return NextResponse.json({ success: false, code: 'TRIAL_LIMIT_REACHED', message: 'You have used all your free trial loads.' }, { status: 403 })
   }
 
   const { count: pendingCount } = await admin.from('load_requests').select('id', { count: 'exact', head: true }).eq('driver_id', user.id).eq('status', 'pending')
@@ -41,10 +58,10 @@ export async function POST(req: NextRequest) {
     dispatch_order_id: dispatchOrderId,
     dirt_type: dirtType,
     photo_url: photoUrl,
-    location_text: locationText,
+    location_text: String(locationText).slice(0, 500),
     truck_type: truckType,
-    truck_count: parseInt(truckCount),
-    yards_estimated: parseInt(yardsEstimated),
+    truck_count: truckCountNum,
+    yards_estimated: yardsNum,
     haul_date: haulDate,
     status: 'pending',
     requires_extra_review: requiresExtraReview,
@@ -57,9 +74,7 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({
-    success: true,
-    loadId: loadReq.id,
-    status: 'pending',
+    success: true, loadId: loadReq.id, status: 'pending',
     message: requiresExtraReview ? '⏳ Caliche requires manual review - usually within 2 hours.' : '⏳ Under review. You will get an SMS with the address within 2 hours.'
   }, { status: 201 })
 }

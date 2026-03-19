@@ -50,3 +50,40 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({ orders, total: count, page, limit })
 }
+
+export async function DELETE(req: NextRequest) {
+  const { searchParams } = new URL(req.url)
+  const orderId = searchParams.get('id')
+  if (!orderId) return NextResponse.json({ error: 'Missing order id' }, { status: 400 })
+
+  const supabase = createAdminSupabase()
+
+  // Check for related load_requests
+  const { count } = await supabase
+    .from('load_requests')
+    .select('id', { count: 'exact', head: true })
+    .eq('dispatch_order_id', orderId)
+
+  if ((count || 0) > 0) {
+    return NextResponse.json({
+      error: `Cannot delete — this order has ${count} load request(s) attached. Cancel them first.`
+    }, { status: 409 })
+  }
+
+  // Soft delete — preserves audit trail
+  const { error } = await supabase
+    .from('dispatch_orders')
+    .update({ status: 'cancelled' })
+    .eq('id', orderId)
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+  await supabase.from('audit_logs').insert({
+    action: 'dispatch_order.cancelled',
+    entity_type: 'dispatch_order',
+    entity_id: orderId,
+    metadata: { cancelled_via: 'admin_dashboard' }
+  })
+
+  return NextResponse.json({ success: true })
+}
