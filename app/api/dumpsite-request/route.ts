@@ -53,27 +53,30 @@ export async function POST(req: Request) {
       // Still attempt to send email even if DB fails — don't lose the lead
     }
 
-    // Send email notification (non-blocking — don't fail the request if email fails)
-    const emailResult = await sendDumpsiteInterestEmail({
-      name,
-      phone,
-      city,
-      address,
-      material,
-      yards,
-      notes,
-      requestId: record?.id,
-      submittedAt: new Date(submittedAt).toLocaleString('en-US', { timeZone: 'America/Chicago' }),
-    })
+    // Send email notification (non-blocking — never crash the route)
+    try {
+      const emailResult = await sendDumpsiteInterestEmail({
+        name,
+        phone,
+        city,
+        address,
+        material,
+        yards,
+        notes,
+        requestId: record?.id,
+        submittedAt: new Date(submittedAt).toLocaleString('en-US', { timeZone: 'America/Chicago' }),
+      })
 
-    if (!emailResult.success) {
-      console.error('Email notification failed:', emailResult.error)
-      // Fallback: send SMS alert so the lead isn't lost
-      try {
-        await sendAdminAlert(`New dumpsite interest from ${name} in ${city} — ${yards} yards ${material}. Email notification failed, check logs.`)
-      } catch (smsErr) {
-        console.error('SMS fallback also failed:', smsErr)
+      if (!emailResult.success) {
+        console.error('Email notification failed:', emailResult.error)
+        try {
+          await sendAdminAlert(`New dumpsite interest from ${name} in ${city} — ${yards} yards ${material}. Email notification failed, check logs.`)
+        } catch (smsErr) {
+          console.error('SMS fallback also failed:', smsErr)
+        }
       }
+    } catch (emailErr: any) {
+      console.error('Email call crashed:', emailErr.message)
     }
 
     return NextResponse.json({ success: true })
