@@ -13,6 +13,7 @@ function CompletionForm({ load, user, onComplete }: {
   const [photo, setPhoto] = useState<File|null>(null)
   const [preview, setPreview] = useState<string|null>(null)
   const [loadsDelivered, setLoadsDelivered] = useState('1')
+  const [completionCode, setCompletionCode] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string|null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -45,6 +46,7 @@ function CompletionForm({ load, user, onComplete }: {
     if (!photo) { setError('Please upload a completion photo'); return }
     const numLoads = parseInt(loadsDelivered)
     if (isNaN(numLoads) || numLoads < 1) { setError('Please enter a valid number of loads'); return }
+    if (!completionCode.trim()) { setError('Please enter the completion code given at the job site'); return }
 
     setSubmitting(true)
     setError(null)
@@ -55,7 +57,7 @@ function CompletionForm({ load, user, onComplete }: {
       const res = await fetch('/api/driver/complete-load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ loadId: load.id, completionPhotoUrl: photoUrl, loadsDelivered: numLoads })
+        body: JSON.stringify({ loadId: load.id, completionPhotoUrl: photoUrl, loadsDelivered: numLoads, completionCode: completionCode.trim() })
       })
       const data = await res.json()
       if (!data.success) {
@@ -99,7 +101,14 @@ function CompletionForm({ load, user, onComplete }: {
         </div>
       </div>
 
-      <button onClick={submit} disabled={submitting || !photo} style={{width:'100%',background:photo ? 'rgba(39,174,96,0.15)' : '#1C1F24',color:photo ? '#27AE60' : '#606670',border:`1px solid ${photo ? 'rgba(39,174,96,0.3)' : '#272B33'}`,padding:'12px',borderRadius:'8px',cursor:submitting || !photo ? 'not-allowed' : 'pointer',fontWeight:'800',fontSize:'14px'}}>
+      <div style={{marginBottom:'14px'}}>
+        <label style={{fontSize:'11px',textTransform:'uppercase' as const,letterSpacing:'0.07em',color:'#606670',fontWeight:'700',display:'block',marginBottom:'6px'}}>Completion code *</label>
+        <input type="text" inputMode="numeric" maxLength={4} value={completionCode}
+          onChange={e => setCompletionCode(e.target.value.replace(/\D/g, '').slice(0, 6))} style={inp} placeholder="6-digit code from job site" />
+        <div style={{fontSize:'11px',color:'#606670',marginTop:'4px'}}>Enter the code provided at the delivery site</div>
+      </div>
+
+      <button onClick={submit} disabled={submitting || !photo || !completionCode.trim()} style={{width:'100%',background:(photo && completionCode.trim()) ? 'rgba(39,174,96,0.15)' : '#1C1F24',color:(photo && completionCode.trim()) ? '#27AE60' : '#606670',border:`1px solid ${(photo && completionCode.trim()) ? 'rgba(39,174,96,0.3)' : '#272B33'}`,padding:'12px',borderRadius:'8px',cursor:(submitting || !photo || !completionCode.trim()) ? 'not-allowed' : 'pointer',fontWeight:'800',fontSize:'14px'}}>
         {submitting ? 'Submitting...' : '✓ Mark Job Complete'}
       </button>
     </div>
@@ -133,31 +142,30 @@ export default function DriverDashboard() {
     submitResultTimer.current = setTimeout(() => setSubmitResult(null), duration)
   }
 
-  const fetchJobs = useCallback(async (supabase: any) => {
+  const fetchJobs = useCallback(async (_supabase?: any) => {
     setLoadingJobs(true)
-    const { data } = await supabase
-      .from('dispatch_orders')
-      // ✅ No client_address, no price_quoted_cents, explicit columns, limited to 50
-      .select('id,city_id,yards_needed,driver_pay_cents,urgency,created_at,cities(name)')
-      .eq('status', 'dispatching')
-      .order('driver_pay_cents', { ascending: false })
-      .limit(50)
-    const seen = new Set()
-    const unique = (data || []).filter((j: any) => { if (seen.has(j.id)) return false; seen.add(j.id); return true })
-    setJobs([...unique.slice(0, 3), ...unique.slice(3).sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())])
+    try {
+      const res = await fetch('/api/driver/jobs')
+      const payload = await res.json()
+      const data = payload.jobs || []
+      const seen = new Set()
+      const unique = data.filter((j: any) => { if (seen.has(j.id)) return false; seen.add(j.id); return true })
+      setJobs([...unique.slice(0, 3), ...unique.slice(3).sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())])
+    } catch {
+      setJobs([])
+    }
     setLoadingJobs(false)
   }, [])
 
-  const fetchLoads = useCallback(async (supabase: any, userId: string) => {
+  const fetchLoads = useCallback(async (_supabase?: any, _userId?: string) => {
     setLoadingLoads(true)
-    const { data } = await supabase
-      .from('load_requests')
-      // ✅ No client_address anywhere — address is SMS-only
-      .select('id,status,dirt_type,photo_url,truck_type,truck_count,yards_estimated,haul_date,submitted_at,rejected_reason,payout_cents,completion_photo_url,dispatch_orders(yards_needed,driver_pay_cents,cities(name))')
-      .eq('driver_id', userId)
-      .order('submitted_at', { ascending: false })
-      .limit(20)
-    setLoads(data || [])
+    try {
+      const res = await fetch('/api/driver/my-loads')
+      const payload = await res.json()
+      setLoads(payload.loads || [])
+    } catch {
+      setLoads([])
+    }
     setLoadingLoads(false)
   }, [])
 
@@ -173,8 +181,7 @@ export default function DriverDashboard() {
 
     // ✅ Refresh jobs every 60 seconds so stale jobs don't show as available
     const interval = setInterval(() => {
-      const s = createBrowserSupabase()
-      fetchJobs(s)
+      fetchJobs()
     }, 60000)
 
     return () => {

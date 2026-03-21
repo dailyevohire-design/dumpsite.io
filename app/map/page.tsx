@@ -45,7 +45,10 @@ export default function MapPage() {
     supabase.auth.getUser().then(({data}) => {
       if (!data.user) { router.push('/login'); return }
       setUser(data.user)
-      supabase.from('dispatch_orders').select('*, cities(name)').eq('status','dispatching').order('created_at',{ascending:false}).then(({data:j}) => { setJobs(j||[]); setLoading(false) })
+      fetch('/api/driver/jobs')
+        .then(r => r.json())
+        .then(payload => { setJobs(payload.jobs || []); setLoading(false) })
+        .catch(() => setLoading(false))
     })
   }, [])
 

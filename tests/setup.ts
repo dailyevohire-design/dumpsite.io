@@ -60,6 +60,9 @@ export const mockSupabase = {
 vi.mock('@/lib/supabase', () => ({
   createBrowserSupabase: vi.fn(() => mockSupabase),
   createAdminSupabase: vi.fn(() => mockSupabase),
+}))
+
+vi.mock('@/lib/supabase.server', () => ({
   createServerSupabase: vi.fn(async () => mockSupabase),
 }))
 

@@ -1,0 +1,97 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { createAdminSupabase } from '@/lib/supabase'
+import { createServerSupabase } from '@/lib/supabase.server'
+import crypto from 'crypto'
+
+function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex')
+}
+
+export async function GET(
+  _req: NextRequest,
+  context: { params: Promise<{ token: string }> }
+) {
+  const { token } = await context.params
+
+  const supabase = await createServerSupabase()
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+
+  if (authError || !user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const admin = createAdminSupabase()
+  const tokenHash = hashToken(token)
+
+  const { data: accessToken, error: tokenError } = await admin
+    .from('job_access_tokens')
+    .select('id, load_request_id, driver_id, expires_at, used_at')
+    .eq('token_hash', tokenHash)
+    .single()
+
+  if (tokenError || !accessToken) {
+    return NextResponse.json({ error: 'Invalid or expired link' }, { status: 404 })
+  }
+
+  if (accessToken.driver_id !== user.id) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  if (new Date(accessToken.expires_at) < new Date()) {
+    return NextResponse.json({ error: 'This link has expired' }, { status: 410 })
+  }
+
+  // Load load_request + dispatch_order for safe fields only
+  const { data: load } = await admin
+    .from('load_requests')
+    .select('id, dispatch_order_id')
+    .eq('id', accessToken.load_request_id)
+    .single()
+
+  if (!load) {
+    return NextResponse.json({ error: 'Job not found' }, { status: 404 })
+  }
+
+  let cityName = 'DFW'
+  let payDollars = 20
+
+  if (load.dispatch_order_id) {
+    const { data: order } = await admin
+      .from('dispatch_orders')
+      .select('driver_pay_cents, cities(name)')
+      .eq('id', load.dispatch_order_id)
+      .single()
+    if (order) {
+      payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 20
+      cityName = (order.cities as any)?.name || cityName
+    }
+  }
+
+  // Check if job was already started (token used)
+  let address = null
+  let instructions = null
+
+  if (accessToken.used_at) {
+    // Token was already used — reveal address
+    if (load.dispatch_order_id) {
+      const { data: order } = await admin
+        .from('dispatch_orders')
+        .select('client_address, notes')
+        .eq('id', load.dispatch_order_id)
+        .single()
+      if (order) {
+        address = order.client_address
+        instructions = order.notes
+      }
+    }
+  }
+
+  return NextResponse.json({
+    loadId: load.id,
+    cityName,
+    payDollars,
+    address,
+    instructions,
+    alreadyStarted: !!accessToken.used_at,
+  })
+}

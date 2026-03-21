@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerSupabase, createAdminSupabase } from '@/lib/supabase'
+import { createAdminSupabase } from '@/lib/supabase'
+import { createServerSupabase } from '@/lib/supabase.server'
 import { sendLoadSubmissionEmail } from '@/lib/email'
 
 export async function POST(req: NextRequest) {
-  const supabase = createServerSupabase(req)
+  const supabase = await createServerSupabase()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
@@ -82,7 +83,7 @@ export async function POST(req: NextRequest) {
     ? `${driverProfile.first_name || ''} ${driverProfile.last_name || ''}`.trim() || 'Unknown Driver'
     : 'Unknown Driver'
 
-  // Send admin email notification — must await before response or Vercel kills the function
+  // Send admin email notification
   try {
     await sendLoadSubmissionEmail({
       driverName,
@@ -103,6 +104,6 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     success: true, loadId: loadReq.id, status: 'pending',
-    message: requiresExtraReview ? '⏳ Caliche requires manual review.' : '⏳ Under review. SMS with address coming once approved.'
+    message: requiresExtraReview ? '⏳ Caliche requires manual review.' : '⏳ Under review. SMS with secure job link coming once approved.'
   }, { status: 201 })
 }

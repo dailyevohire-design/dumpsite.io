@@ -58,7 +58,7 @@ export default function SignupPage() {
           last_name: form.lastName,
           company_name: form.company || null,
           phone: normalizedPhone,
-          phone_verified: true,       // ✅ enables dispatch SMS
+          phone_verified: false,      // phone must be verified before dispatch SMS
           city_id: null,
           truck_count: parseInt(form.truckCount) || 1,
           truck_type: form.truckType,

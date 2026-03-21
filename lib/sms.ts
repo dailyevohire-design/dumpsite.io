@@ -2,12 +2,13 @@ import { createAdminSupabase } from './supabase'
 
 function getTwilioConfig() {
   const sid    = process.env.TWILIO_ACCOUNT_SID
-  const key    = process.env.TWILIO_API_KEY
-  const secret = process.env.TWILIO_API_SECRET
+  // Support both API Key auth and Auth Token auth
+  const key    = process.env.TWILIO_API_KEY || sid
+  const secret = process.env.TWILIO_API_SECRET || process.env.TWILIO_AUTH_TOKEN
   const from   = process.env.TWILIO_FROM_NUMBER
   const admin  = process.env.ADMIN_PHONE
   if (!sid || !key || !secret || !from || !admin) {
-    throw new Error('Missing Twilio env vars — check TWILIO_ACCOUNT_SID, TWILIO_API_KEY, TWILIO_API_SECRET, TWILIO_FROM_NUMBER, ADMIN_PHONE')
+    throw new Error('Missing Twilio env vars — check TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN (or TWILIO_API_KEY+TWILIO_API_SECRET), TWILIO_FROM_NUMBER, ADMIN_PHONE')
   }
   return { sid, key, secret, from, admin }
 }
@@ -50,16 +51,13 @@ function normalizePhone(phone: string): string {
 }
 
 export async function sendApprovalSMS(phone: string, opts: {
-  plainAddress: string
-  gateCode: string | null
-  accessInstructions: string | null
+  accessUrl: string
   loadId: string
   payDollars: number
+  cityName: string
 }) {
   const normalized = normalizePhone(phone)
-  const gate = opts.gateCode ? `\nGate code: ${opts.gateCode}` : ''
-  const access = opts.accessInstructions ? `\n${opts.accessInstructions}` : ''
-  const body = `✅ DumpSite.io APPROVED!\n\nDelivery address:\n${opts.plainAddress}${gate}${access}\n\nPay: $${opts.payDollars}/load\n\nDrive safe! Reply STOP to unsubscribe.`
+  const body = `✅ DumpSite.io APPROVED!\n\nJob area: ${opts.cityName}\nPay: $${opts.payDollars}/load\n\nOpen your secure job link:\n${opts.accessUrl}\n\nThis link is required to start the job and unlock site details.\n\nReply STOP to unsubscribe.`
   return sendSMS(normalized, body, 'approval', opts.loadId)
 }
 
@@ -117,9 +115,6 @@ export async function batchDispatchSMS(drivers: DispatchDriver[]): Promise<{ sen
     const delayMinutes = TIER_DELAYS[tier] || 10
 
     for (const driver of group) {
-      // For elite (0 delay) send immediately
-      // For others, log as pending — QStash will handle delayed delivery
-      // Until QStash is wired: send all immediately with a note
       if (delayMinutes === 0) {
         const result = await sendDispatchSMS(driver.phone, {
           cityName: driver.cityName,

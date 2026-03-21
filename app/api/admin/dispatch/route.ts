@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createDispatchOrder } from '@/lib/services/dispatch.service'
+import { requireAdmin } from '@/lib/admin-auth'
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAdmin()
+  if (auth.error) return auth.error
+
   let body: any
   try { body = await req.json() } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
@@ -23,13 +27,16 @@ export async function POST(req: NextRequest) {
     notes: body.notes,
     urgency: body.urgency || 'standard',
     source: 'manual',
-    createdBy: body.createdBy
+    createdBy: auth.user.id
   })
 
   return NextResponse.json(result, { status: result.success ? 201 : 400 })
 }
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAdmin()
+  if (auth.error) return auth.error
+
   const supabase = createAdminSupabase()
   const { searchParams } = new URL(req.url)
   const page = parseInt(searchParams.get('page') || '1')
@@ -52,13 +59,15 @@ export async function GET(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const auth = await requireAdmin()
+  if (auth.error) return auth.error
+
   const { searchParams } = new URL(req.url)
   const orderId = searchParams.get('id')
   if (!orderId) return NextResponse.json({ error: 'Missing order id' }, { status: 400 })
 
   const supabase = createAdminSupabase()
 
-  // Check for related load_requests
   const { count } = await supabase
     .from('load_requests')
     .select('id', { count: 'exact', head: true })
@@ -70,15 +79,15 @@ export async function DELETE(req: NextRequest) {
     }, { status: 409 })
   }
 
-  // Soft delete — preserves audit trail
   const { error } = await supabase
     .from('dispatch_orders')
     .update({ status: 'cancelled' })
     .eq('id', orderId)
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return NextResponse.json({ error: 'Failed to cancel order' }, { status: 500 })
 
   await supabase.from('audit_logs').insert({
+    actor_id: auth.user.id,
     action: 'dispatch_order.cancelled',
     entity_type: 'dispatch_order',
     entity_id: orderId,

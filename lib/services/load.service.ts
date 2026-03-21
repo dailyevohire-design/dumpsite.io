@@ -1,8 +1,16 @@
 import { createAdminSupabase } from '../supabase'
-import { decryptAddress } from '../crypto'
 import { sendApprovalSMS, sendRejectionSMS, sendAdminAlert } from '../sms'
+import crypto from 'crypto'
 
 const HIGH_REJECTION_MATERIALS = ['caliche']
+
+function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex')
+}
+
+function makeCode(): string {
+  return String(Math.floor(100000 + Math.random() * 900000))
+}
 
 export async function submitLoadRequest(driverId: string, input: {
   siteId: string, dispatchOrderId?: string, dirtType: string,
@@ -76,8 +84,8 @@ export async function submitLoadRequest(driverId: string, input: {
   }
 
   if (autoApprove) {
-    await triggerApprovalFlow(loadReq.id, driverId, input.siteId)
-    return { success: true, loadId: loadReq.id, status: 'approved', autoApproved: true, message: '✅ Approved! Check your SMS for the site address.' }
+    await triggerApprovalFlow(loadReq.id, driverId)
+    return { success: true, loadId: loadReq.id, status: 'approved', autoApproved: true, message: '✅ Approved! Check your SMS for a secure job link.' }
   }
 
   await sendAdminAlert(
@@ -88,7 +96,7 @@ export async function submitLoadRequest(driverId: string, input: {
     success: true, loadId: loadReq.id, status: 'pending', autoApproved: false,
     message: requiresExtraReview
       ? '⏳ Caliche requires manual review - usually within 2 hours.'
-      : '⏳ Under review. You will get an SMS with the address within 2 hours.'
+      : '⏳ Under review. You will get an SMS with a secure job link within 2 hours.'
   }
 }
 
@@ -126,7 +134,7 @@ async function checkTrustedDriver(driverId: string, siteId: string): Promise<boo
   )
 }
 
-export async function triggerApprovalFlow(loadId: string, driverId: string, siteId: string) {
+export async function triggerApprovalFlow(loadId: string, driverId: string) {
   const supabase = createAdminSupabase()
 
   const { data: profile } = await supabase
@@ -135,33 +143,70 @@ export async function triggerApprovalFlow(loadId: string, driverId: string, site
     .eq('user_id', driverId)
     .single()
 
-  const { data: site } = await supabase
-    .from('dump_sites')
-    .select('address_encrypted, address_iv, address_auth_tag, gate_code, access_instructions, pay_rate_cents, name')
-    .eq('id', siteId)
+  if (!profile) return
+
+  // Get pay and city from load_request -> dispatch_order
+  const { data: load } = await supabase
+    .from('load_requests')
+    .select('dispatch_order_id')
+    .eq('id', loadId)
     .single()
 
-  if (!profile || !site) return
+  let payDollars = 20
+  let cityName = 'DFW'
 
-  const plainAddress = decryptAddress({
-    encrypted: site.address_encrypted,
-    iv: site.address_iv,
-    authTag: site.address_auth_tag
+  if (load?.dispatch_order_id) {
+    const { data: order } = await supabase
+      .from('dispatch_orders')
+      .select('driver_pay_cents, cities(name)')
+      .eq('id', load.dispatch_order_id)
+      .single()
+    if (order) {
+      payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 20
+      cityName = (order.cities as any)?.name || cityName
+    }
+  }
+
+  // Generate secure token
+  const rawToken = crypto.randomBytes(32).toString('hex')
+  const tokenHash = hashToken(rawToken)
+
+  // Store token
+  await supabase.from('job_access_tokens').insert({
+    load_request_id: loadId,
+    driver_id: driverId,
+    token_hash: tokenHash,
+    expires_at: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
   })
 
+  // Create tracking session
+  await supabase.from('job_tracking_sessions').insert({
+    load_request_id: loadId,
+    driver_id: driverId,
+  })
+
+  // Create completion code
+  const code = makeCode()
+  await supabase.from('job_completion_codes').upsert({
+    load_request_id: loadId,
+    code,
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+  }, { onConflict: 'load_request_id' })
+
+  // Send SMS with secure link — NO address
+  const accessUrl = `${process.env.NEXT_PUBLIC_APP_URL}/job-access/${rawToken}`
   await sendApprovalSMS(profile.phone, {
-    plainAddress,
-    gateCode: site.gate_code,
-    accessInstructions: site.access_instructions,
+    accessUrl,
     loadId,
-    payDollars: Math.round(site.pay_rate_cents / 100)
+    payDollars,
+    cityName,
   })
 
   await supabase.from('audit_logs').insert({
-    action: 'address.sent_via_sms',
+    action: 'job.approved_secure_link_issued',
     entity_type: 'load_request',
     entity_id: loadId,
-    metadata: { driver_id: driverId, site_id: siteId }
+    metadata: { driver_id: driverId, city: cityName }
   })
 }
 
@@ -173,19 +218,19 @@ export async function adminApproveLoad(loadId: string, adminUserId: string) {
     .update({ status: 'approved', reviewed_by: adminUserId, reviewed_at: new Date().toISOString() })
     .eq('id', loadId)
     .eq('status', 'pending')
-    .select('driver_id, site_id')
+    .select('driver_id')
     .single()
 
   if (error || !data) return { success: false, message: 'Load already processed or not found' }
 
-  await triggerApprovalFlow(loadId, data.driver_id, data.site_id)
+  await triggerApprovalFlow(loadId, data.driver_id)
 
   await supabase.from('audit_logs').insert({
     actor_id: adminUserId, action: 'load_request.approved',
     entity_type: 'load_request', entity_id: loadId
   })
 
-  return { success: true, message: 'Approved. Driver notified via SMS.' }
+  return { success: true, message: 'Approved. Secure job link sent to driver via SMS.' }
 }
 
 export async function adminRejectLoad(loadId: string, adminUserId: string, reason: string) {

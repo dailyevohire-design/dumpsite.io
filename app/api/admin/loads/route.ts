@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
+import { requireAdmin } from '@/lib/admin-auth'
 
 export async function GET(req: NextRequest) {
+  const auth = await requireAdmin()
+  if (auth.error) return auth.error
+
   const supabase = createAdminSupabase()
   const { searchParams } = new URL(req.url)
   const status = searchParams.get('status') || 'pending'
@@ -21,8 +25,7 @@ export async function GET(req: NextRequest) {
     .range(offset, offset + limit - 1)
 
   if (error) {
-    console.error('Admin loads error:', error)
-    return NextResponse.json({ loads: [], total: 0, error: error.message })
+    return NextResponse.json({ loads: [], total: 0, error: 'Failed to load' })
   }
 
   if (!loads || loads.length === 0) {
