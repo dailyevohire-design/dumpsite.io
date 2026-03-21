@@ -167,17 +167,30 @@ export async function triggerApprovalFlow(loadId: string, driverId: string) {
     }
   }
 
-  // Generate secure token
+  // Generate secure token + short ID for SMS-friendly URL
   const rawToken = crypto.randomBytes(32).toString('hex')
   const tokenHash = hashToken(rawToken)
+  const shortId = crypto.randomBytes(6).toString('base64url').slice(0, 8)
 
-  // Store token
-  await supabase.from('job_access_tokens').insert({
+  // Store token — try with short_id, fallback without
+  let shortIdStored = false
+  const { error: tokenErr } = await supabase.from('job_access_tokens').insert({
     load_request_id: loadId,
     driver_id: driverId,
     token_hash: tokenHash,
+    short_id: shortId,
     expires_at: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
   })
+  if (tokenErr) {
+    await supabase.from('job_access_tokens').insert({
+      load_request_id: loadId,
+      driver_id: driverId,
+      token_hash: tokenHash,
+      expires_at: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+    })
+  } else {
+    shortIdStored = true
+  }
 
   // Create tracking session
   await supabase.from('job_tracking_sessions').insert({
@@ -193,8 +206,11 @@ export async function triggerApprovalFlow(loadId: string, driverId: string) {
     expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
   }, { onConflict: 'load_request_id' })
 
-  // Send SMS with secure link — NO address
-  const accessUrl = `${process.env.NEXT_PUBLIC_APP_URL}/job-access/${rawToken}`
+  // Send SMS with short URL — carrier-friendly
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
+  const accessUrl = shortIdStored
+    ? `${appUrl}/j/${shortId}`
+    : `${appUrl}/job-access/${rawToken}`
   await sendApprovalSMS(profile.phone, {
     accessUrl,
     loadId,

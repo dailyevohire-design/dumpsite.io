@@ -36,15 +36,27 @@ export async function POST(
   }
 
   const admin = createAdminSupabase()
-  const tokenHash = hashToken(token)
 
-  const { data: accessToken, error: tokenError } = await admin
-    .from('job_access_tokens')
-    .select('id, load_request_id, driver_id, expires_at, used_at')
-    .eq('token_hash', tokenHash)
-    .single()
+  // Support both short_id (8 chars from SMS) and full token (64 hex chars)
+  let accessToken: any = null
+  if (token.length <= 12) {
+    const { data } = await admin
+      .from('job_access_tokens')
+      .select('id, load_request_id, driver_id, expires_at, used_at')
+      .eq('short_id', token)
+      .single()
+    accessToken = data
+  } else {
+    const tokenHash = hashToken(token)
+    const { data } = await admin
+      .from('job_access_tokens')
+      .select('id, load_request_id, driver_id, expires_at, used_at')
+      .eq('token_hash', tokenHash)
+      .single()
+    accessToken = data
+  }
 
-  if (tokenError || !accessToken) {
+  if (!accessToken) {
     return NextResponse.json({ error: 'Invalid or expired link' }, { status: 404 })
   }
 

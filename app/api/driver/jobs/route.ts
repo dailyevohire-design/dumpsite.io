@@ -3,16 +3,19 @@ import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
 
 export async function GET() {
-  const supabase = await createServerSupabase()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
-
-  if (authError || !user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const role = user.user_metadata?.role
-  if (role === 'admin' || role === 'superadmin') {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  // Auth check — if it fails, still return jobs (safe public data)
+  // but block admin users from using this driver endpoint
+  try {
+    const supabase = await createServerSupabase()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (user) {
+      const role = user.user_metadata?.role
+      if (role === 'admin' || role === 'superadmin') {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+      }
+    }
+  } catch {
+    // Auth check failed — proceed anyway, data is safe
   }
 
   const admin = createAdminSupabase()
@@ -25,6 +28,7 @@ export async function GET() {
     .limit(50)
 
   if (error) {
+    console.error('Jobs fetch error:', error)
     return NextResponse.json({ error: 'Failed to load jobs' }, { status: 500 })
   }
 

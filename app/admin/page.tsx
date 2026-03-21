@@ -67,7 +67,7 @@ export default function AdminDashboard() {
       const res = await fetch(`/api/admin/loads/${id}/approve`, { method: 'PATCH' })
       const data = await res.json()
       if (data.success) {
-        setMessage({ text: '✅ Approved! SMS sent to driver with delivery address.', type: 'success' })
+        setMessage({ text: data.message || '✅ Approved!', type: data.smsSent ? 'success' : 'error' })
         fetchLoads()
       } else {
         setMessage({ text: data.error || data.message || 'Failed to approve', type: 'error' })
@@ -112,6 +112,7 @@ export default function AdminDashboard() {
         </div>
         <div style={{display:'flex',gap:'10px',alignItems:'center'}}>
           <span style={{fontSize:'12px',color:'#606670'}}>{total} {activeTab} requests</span>
+          <a href="/admin/tracking" style={{background:'transparent',border:'1px solid rgba(59,138,232,0.3)',color:'#3A8AE8',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px'}}>📡 Tracking</a>
           <a href="/admin/dispatch" style={{background:'#F5A623',color:'#111',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px',textTransform:'uppercase'}}>+ New Dispatch</a>
         </div>
       </div>

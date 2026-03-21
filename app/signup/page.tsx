@@ -49,27 +49,22 @@ export default function SignupPage() {
       if (signUpError) { setError(signUpError.message); setLoading(false); return }
 
       if (data.user) {
-        // Get tier ID
-        const { data: tier } = await supabase.from('tiers').select('id').eq('slug', 'trial').single()
-
-        const { error: profileError } = await supabase.from('driver_profiles').insert({
-          user_id: data.user.id,
-          first_name: form.firstName,
-          last_name: form.lastName,
-          company_name: form.company || null,
-          phone: normalizedPhone,
-          phone_verified: false,      // phone must be verified before dispatch SMS
-          city_id: null,
-          truck_count: parseInt(form.truckCount) || 1,
-          truck_type: form.truckType,
-          tier_id: tier?.id || null,
-          status: 'active',
-          trial_loads_used: 0,
-          gps_score: 85,
-        })
-
-        if (profileError) {
-          console.error('Profile error:', profileError)
+        // Create profile via server API (bypasses RLS)
+        try {
+          await fetch('/api/driver/create-profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: data.user.id,
+              firstName: form.firstName,
+              lastName: form.lastName,
+              company: form.company,
+              phone: normalizedPhone,
+              truckCount: form.truckCount,
+              truckType: form.truckType,
+            })
+          })
+        } catch {
           // Don't block signup if profile fails — auth was created
         }
       }

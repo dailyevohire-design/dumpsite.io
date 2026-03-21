@@ -8,17 +8,22 @@ import { createServerSupabase } from './supabase.server'
 export async function requireAdmin(): Promise<
   { user: any; error?: never } | { user?: never; error: NextResponse }
 > {
-  const supabase = await createServerSupabase()
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  try {
+    const supabase = await createServerSupabase()
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
 
-  if (authError || !user) {
-    return { error: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) }
+    if (authError || !user) {
+      return { error: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) }
+    }
+
+    const role = user.user_metadata?.role
+    if (role !== 'admin' && role !== 'superadmin') {
+      return { error: NextResponse.json({ error: 'Forbidden — admin access required' }, { status: 403 }) }
+    }
+
+    return { user }
+  } catch (e: any) {
+    console.error('Admin auth error:', e.message)
+    return { error: NextResponse.json({ error: 'Auth check failed' }, { status: 401 }) }
   }
-
-  const role = user.user_metadata?.role
-  if (role !== 'admin' && role !== 'superadmin') {
-    return { error: NextResponse.json({ error: 'Forbidden — admin access required' }, { status: 403 }) }
-  }
-
-  return { user }
 }

@@ -1,16 +1,55 @@
 import { createAdminSupabase } from './supabase'
 
 function getTwilioConfig() {
-  const sid    = process.env.TWILIO_ACCOUNT_SID
-  // Support both API Key auth and Auth Token auth
-  const key    = process.env.TWILIO_API_KEY || sid
-  const secret = process.env.TWILIO_API_SECRET || process.env.TWILIO_AUTH_TOKEN
-  const from   = process.env.TWILIO_FROM_NUMBER
-  const admin  = process.env.ADMIN_PHONE
-  if (!sid || !key || !secret || !from || !admin) {
-    throw new Error('Missing Twilio env vars — check TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN (or TWILIO_API_KEY+TWILIO_API_SECRET), TWILIO_FROM_NUMBER, ADMIN_PHONE')
+  // Support two auth modes:
+  // 1. API Key: TWILIO_ACCOUNT_SID (AC...), TWILIO_API_KEY (SK...), TWILIO_API_SECRET
+  // 2. Auth Token: TWILIO_ACCOUNT_SID (AC...), TWILIO_AUTH_TOKEN
+  //
+  // Legacy compat: if TWILIO_ACCOUNT_SID starts with SK, treat it as API Key
+  // and require TWILIO_ACCOUNT_SID_REAL for the actual Account SID
+  const rawSid = process.env.TWILIO_ACCOUNT_SID || ''
+  const apiKey = process.env.TWILIO_API_KEY
+  const apiSecret = process.env.TWILIO_API_SECRET
+  const authToken = process.env.TWILIO_AUTH_TOKEN
+  const from = process.env.TWILIO_FROM_NUMBER
+  const admin = process.env.ADMIN_PHONE
+
+  if (!rawSid || !from || !admin) {
+    throw new Error('Missing Twilio env vars — check TWILIO_ACCOUNT_SID, TWILIO_FROM_NUMBER, ADMIN_PHONE')
   }
-  return { sid, key, secret, from, admin }
+
+  let accountSid: string
+  let authKey: string
+  let authSecret: string
+
+  if (rawSid.startsWith('SK')) {
+    // TWILIO_ACCOUNT_SID is actually an API Key SID
+    accountSid = process.env.TWILIO_ACCOUNT_SID_REAL || ''
+    authKey = rawSid
+    authSecret = apiSecret || ''
+    if (!accountSid || !authSecret) {
+      throw new Error('When TWILIO_ACCOUNT_SID is an API Key (SK...), TWILIO_ACCOUNT_SID_REAL and TWILIO_API_SECRET are required')
+    }
+  } else if (apiKey && apiSecret) {
+    // Explicit API Key auth
+    accountSid = rawSid
+    authKey = apiKey
+    authSecret = apiSecret
+  } else if (authToken) {
+    // Auth Token auth
+    accountSid = rawSid
+    authKey = rawSid
+    authSecret = authToken
+  } else if (apiSecret) {
+    // Fallback: treat TWILIO_ACCOUNT_SID as account SID, use it + apiSecret
+    accountSid = rawSid
+    authKey = rawSid
+    authSecret = apiSecret
+  } else {
+    throw new Error('Missing Twilio auth — need TWILIO_AUTH_TOKEN or TWILIO_API_SECRET')
+  }
+
+  return { sid: accountSid, key: authKey, secret: authSecret, from, admin }
 }
 
 async function sendSMS(to: string, body: string, messageType: string, relatedId?: string) {
@@ -57,7 +96,9 @@ export async function sendApprovalSMS(phone: string, opts: {
   cityName: string
 }) {
   const normalized = normalizePhone(phone)
-  const body = `✅ DumpSite.io APPROVED!\n\nJob area: ${opts.cityName}\nPay: $${opts.payDollars}/load\n\nOpen your secure job link:\n${opts.accessUrl}\n\nThis link is required to start the job and unlock site details.\n\nReply STOP to unsubscribe.`
+  // Keep SMS short — carriers block long messages with URLs (error 30034)
+  // Target: under 160 chars = 1 segment
+  const body = `DumpSite.io: Job approved! ${opts.cityName} $${opts.payDollars}/load. Start here: ${opts.accessUrl}`
   return sendSMS(normalized, body, 'approval', opts.loadId)
 }
 
@@ -101,7 +142,6 @@ export async function batchDispatchSMS(drivers: DispatchDriver[]): Promise<{ sen
   let sent = 0
   let failed = 0
 
-  // Group by tier for ordered dispatch
   const byTier: Record<string, DispatchDriver[]> = {}
   for (const d of drivers) {
     const tier = d.tierSlug || 'trial'
@@ -112,33 +152,18 @@ export async function batchDispatchSMS(drivers: DispatchDriver[]): Promise<{ sen
   const order = ['elite', 'pro', 'hauler', 'trial']
   for (const tier of order) {
     const group = byTier[tier] || []
-    const delayMinutes = TIER_DELAYS[tier] || 10
 
     for (const driver of group) {
-      if (delayMinutes === 0) {
-        const result = await sendDispatchSMS(driver.phone, {
-          cityName: driver.cityName,
-          yardsNeeded: driver.yardsNeeded,
-          payDollars: driver.payDollars,
-          haulDate: driver.haulDate,
-          dispatchId: driver.dispatchId,
-          tierSlug: driver.tierSlug,
-        })
-        if (result.success) sent++
-        else failed++
-      } else {
-        // Send immediately for now — QStash migration is next sprint
-        const result = await sendDispatchSMS(driver.phone, {
-          cityName: driver.cityName,
-          yardsNeeded: driver.yardsNeeded,
-          payDollars: driver.payDollars,
-          haulDate: driver.haulDate,
-          dispatchId: driver.dispatchId,
-          tierSlug: driver.tierSlug,
-        })
-        if (result.success) sent++
-        else failed++
-      }
+      const result = await sendDispatchSMS(driver.phone, {
+        cityName: driver.cityName,
+        yardsNeeded: driver.yardsNeeded,
+        payDollars: driver.payDollars,
+        haulDate: driver.haulDate,
+        dispatchId: driver.dispatchId,
+        tierSlug: driver.tierSlug,
+      })
+      if (result.success) sent++
+      else failed++
     }
   }
 
