@@ -60,7 +60,9 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 2. Load tracking session and validate job was started
+  // 2. Load tracking session — if it exists, great. If not, still allow completion.
+  // Some loads were approved before the tracking system existed, or the driver
+  // is completing from the inline job-access page where the session is already started.
   const { data: session } = await admin
     .from('job_tracking_sessions')
     .select('id, job_started_at, address_revealed_at, arrived_at, created_at')
@@ -68,10 +70,12 @@ export async function POST(req: NextRequest) {
     .eq('driver_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1)
-    .single()
+    .maybeSingle()
 
-  if (!session || !session.job_started_at || !session.address_revealed_at) {
-    return NextResponse.json({ error: 'You must start the job via the secure link before completing it' }, { status: 400 })
+  // Flag for review if no tracking session or job wasn't started via secure link
+  let missingSession = false
+  if (!session || !session.job_started_at) {
+    missingSession = true // will be flagged but not blocked
   }
 
   // 3. Get delivery address coordinates for geofence check
@@ -120,11 +124,15 @@ export async function POST(req: NextRequest) {
   }
 
   // 4. Get GPS pings to check time on site and location
-  const { data: pings } = await admin
-    .from('job_location_pings')
-    .select('lat, lng, recorded_at')
-    .eq('tracking_session_id', session.id)
-    .order('recorded_at', { ascending: true })
+  let pings: any[] | null = null
+  if (session?.id) {
+    const { data } = await admin
+      .from('job_location_pings')
+      .select('lat, lng, recorded_at')
+      .eq('tracking_session_id', session.id)
+      .order('recorded_at', { ascending: true })
+    pings = data
+  }
 
   // 5. Calculate geofence + time on site
   let distanceKm: number | null = null
@@ -134,7 +142,7 @@ export async function POST(req: NextRequest) {
   let flagForReview = false
 
   // Time on site = time since job started
-  if (session.job_started_at) {
+  if (session?.job_started_at) {
     timeOnSiteMinutes = Math.round((Date.now() - new Date(session.job_started_at).getTime()) / 60000)
   }
 
@@ -169,8 +177,11 @@ export async function POST(req: NextRequest) {
     flagForReview = true
   }
 
+  // Flag if no tracking session
+  if (missingSession) flagForReview = true
+
   // Auto-approve if GPS matches AND enough time on site
-  const autoApproved = gpsMatch && timeOnSiteMinutes >= MIN_TIME_ON_SITE_MINUTES
+  const autoApproved = gpsMatch && timeOnSiteMinutes >= MIN_TIME_ON_SITE_MINUTES && !missingSession
 
   // 6. Resolve pay
   let payPerLoadCents = 2000
@@ -224,11 +235,13 @@ export async function POST(req: NextRequest) {
 
   if (updateError) return NextResponse.json({ error: 'Failed to mark complete' }, { status: 500 })
 
-  // 8. Update tracking session
-  await admin.from('job_tracking_sessions').update({
-    completion_code_verified_at: now,
-    arrived_at: session.arrived_at || now,
-  }).eq('id', session.id)
+  // 8. Update tracking session (if it exists)
+  if (session?.id) {
+    await admin.from('job_tracking_sessions').update({
+      completion_code_verified_at: now,
+      arrived_at: session.arrived_at || now,
+    }).eq('id', session.id)
+  }
 
   // 9. Audit log with geofence data
   await admin.from('audit_logs').insert({
