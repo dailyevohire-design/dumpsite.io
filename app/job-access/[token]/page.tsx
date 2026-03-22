@@ -302,13 +302,23 @@ export default function JobAccessPage() {
             {/* Step 1: Load Count */}
             <div style={{ marginBottom: '14px' }}>
               <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.07em', color: '#606670', fontWeight: '700', marginBottom: '8px' }}>How many loads?</div>
-              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                {[1, 2, 3, 4, 5, 6, 7].map(n => (
                   <button key={n} onClick={() => setLoadsSelected(n)} style={{
                     minWidth: '52px', height: '52px', borderRadius: '10px', border: 'none', cursor: 'pointer', fontWeight: '800', fontSize: '18px',
                     background: loadsSelected === n ? '#F5A623' : '#1C1F24', color: loadsSelected === n ? '#111' : '#606670',
-                  }}>{n}{n === 8 ? '+' : ''}</button>
+                  }}>{n}</button>
                 ))}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '12px', color: '#606670', fontWeight: '700', whiteSpace: 'nowrap' }}>Or enter exact:</span>
+                <input
+                  type="number" inputMode="numeric" min="1" max="200"
+                  value={loadsSelected}
+                  onChange={e => { const v = parseInt(e.target.value); if (!isNaN(v) && v >= 1 && v <= 200) setLoadsSelected(v) }}
+                  style={{ background: '#1C1F24', border: '1px solid #272B33', color: '#F5A623', padding: '10px 14px', borderRadius: '9px', fontSize: '18px', fontWeight: '800', width: '80px', textAlign: 'center', outline: 'none' }}
+                />
+                <span style={{ fontSize: '12px', color: '#606670' }}>loads</span>
               </div>
               <div style={{ marginTop: '8px', background: 'rgba(245,166,35,0.08)', border: '1px solid rgba(245,166,35,0.15)', borderRadius: '8px', padding: '10px', fontSize: '15px', color: '#F5A623', fontWeight: '700', textAlign: 'center' }}>
                 {loadsSelected} load{loadsSelected > 1 ? 's' : ''} × ${payPerLoad} = <span style={{ fontSize: '20px' }}>${totalPay}</span> total
