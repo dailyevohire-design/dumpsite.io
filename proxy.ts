@@ -33,7 +33,8 @@ export async function proxy(request: NextRequest) {
   const userProtected =
     pathname.startsWith('/dashboard') ||
     pathname.startsWith('/account') ||
-    pathname.startsWith('/map')
+    pathname.startsWith('/map') ||
+    pathname.startsWith('/contractor')
 
   if (userProtected && (!user || error)) {
     return NextResponse.redirect(new URL('/login', request.url))
@@ -65,5 +66,6 @@ export const config = {
     '/dashboard/:path*',
     '/account/:path*',
     '/map/:path*',
+    '/contractor/:path*',
   ],
 }

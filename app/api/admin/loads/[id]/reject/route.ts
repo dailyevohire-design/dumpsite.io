@@ -3,6 +3,7 @@ import { createAdminSupabase } from '@/lib/supabase'
 import { requireAdmin } from '@/lib/admin-auth'
 import { sendRejectionSMS } from '@/lib/sms'
 import { rateLimit } from '@/lib/rate-limit'
+import { createNotification } from '@/lib/notifications'
 
 export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
   const auth = await requireAdmin()
@@ -52,6 +53,18 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     if (driver?.phone) {
       await sendRejectionSMS(driver.phone, { reason, loadId: id })
     }
+  }
+
+  // In-app notification
+  if (load) {
+    try {
+      await createNotification(load.driver_id, {
+        type: 'job_rejected',
+        title: 'Load Not Approved',
+        message: `Reason: ${reason}`,
+        actionUrl: '/dashboard',
+      })
+    } catch {}
   }
 
   return NextResponse.json({ success: true })

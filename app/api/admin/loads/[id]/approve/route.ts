@@ -4,6 +4,7 @@ import { requireAdmin } from '@/lib/admin-auth'
 import { sendApprovalSMS } from '@/lib/sms'
 import { sendApprovalEmail } from '@/lib/email'
 import { rateLimit } from '@/lib/rate-limit'
+import { createNotification } from '@/lib/notifications'
 import crypto from 'crypto'
 
 function hashToken(token: string): string {
@@ -180,6 +181,16 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
       if (emailResult.success) emailSent = true
     } catch {}
   }
+
+  // Create in-app notification for driver
+  try {
+    await createNotification(load.driver_id, {
+      type: 'job_approved',
+      title: 'Job Approved!',
+      message: `Your ${cityName} job ($${payDollars}/load) has been approved. Check your SMS for the secure link.`,
+      actionUrl: '/dashboard',
+    })
+  } catch {}
 
   const hasDbErrors = errors.length > 0
 

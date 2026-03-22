@@ -134,6 +134,47 @@ function CompletionForm({ load, user, onComplete }: {
   )
 }
 
+// ── Notification Bell ─────────────────────────────────────────────────────
+function NotificationBell() {
+  const [open, setOpen] = useState(false)
+  const [notifs, setNotifs] = useState<any[]>([])
+  const [unread, setUnread] = useState(0)
+
+  useEffect(() => {
+    fetch('/api/driver/notifications').then(r => r.json()).then(d => { setNotifs(d.notifications || []); setUnread(d.unreadCount || 0) }).catch(() => {})
+    const i = setInterval(() => {
+      fetch('/api/driver/notifications').then(r => r.json()).then(d => { setNotifs(d.notifications || []); setUnread(d.unreadCount || 0) }).catch(() => {})
+    }, 30000)
+    return () => clearInterval(i)
+  }, [])
+
+  function markRead() {
+    fetch('/api/driver/notifications', { method: 'PATCH' }).then(() => setUnread(0)).catch(() => {})
+  }
+
+  return (
+    <div style={{position:'relative'}}>
+      <button onClick={() => { setOpen(!open); if (!open && unread > 0) markRead() }} style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 12px',borderRadius:'8px',cursor:'pointer',fontSize:'16px',position:'relative'}}>
+        🔔
+        {unread > 0 && <span style={{position:'absolute',top:'-4px',right:'-4px',background:'#E74C3C',color:'#fff',borderRadius:'50%',width:'16px',height:'16px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'9px',fontWeight:'800'}}>{unread}</span>}
+      </button>
+      {open && (
+        <div style={{position:'absolute',right:0,top:'100%',marginTop:'8px',width:'300px',maxHeight:'400px',overflowY:'auto',background:'#111316',border:'1px solid #272B33',borderRadius:'12px',zIndex:100,boxShadow:'0 8px 24px rgba(0,0,0,0.5)'}}>
+          <div style={{padding:'12px 14px',borderBottom:'1px solid #272B33',fontWeight:'700',fontSize:'13px'}}>Notifications</div>
+          {notifs.length === 0 ? <div style={{padding:'24px',textAlign:'center',color:'#606670',fontSize:'13px'}}>No notifications yet</div>
+          : notifs.map(n => (
+            <a key={n.id} href={n.action_url || '#'} style={{display:'block',padding:'10px 14px',borderBottom:'1px solid #1C1F24',textDecoration:'none',color:'#E8E3DC',fontSize:'13px',background:n.is_read?'transparent':'rgba(245,166,35,0.03)'}}>
+              <div style={{fontWeight:'700',marginBottom:'2px'}}>{n.title}</div>
+              <div style={{color:'#606670',fontSize:'12px'}}>{n.message}</div>
+              <div style={{color:'#3a3d44',fontSize:'10px',marginTop:'4px'}}>{new Date(n.created_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</div>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Push Notification Button ──────────────────────────────────────────────
 function PushNotificationButton() {
   const [status, setStatus] = useState<'idle'|'enabled'|'denied'|'loading'>('idle')
@@ -233,6 +274,49 @@ function EarningsTab({ tier }: { tier: any }) {
           </a>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Leaderboard Tab ───────────────────────────────────────────────────────
+function LeaderboardTab() {
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetch('/api/driver/leaderboard').then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
+  }, [])
+
+  if (loading) return <div style={{textAlign:'center',padding:'40px',color:'#606670'}}>Loading leaderboard...</div>
+  if (!data) return <div style={{textAlign:'center',padding:'40px',color:'#606670'}}>Failed to load</div>
+
+  const tierColors: Record<string,string> = { trial: '#27AE60', hauler: '#3A8AE8', pro: '#F5A623', elite: '#8E44AD' }
+
+  return (
+    <div>
+      {data.myRank && (
+        <div style={{background:'rgba(245,166,35,0.08)',border:'1px solid rgba(245,166,35,0.2)',borderRadius:'10px',padding:'14px',marginBottom:'16px',textAlign:'center',fontSize:'15px',fontWeight:'700',color:'#F5A623'}}>
+          You are ranked #{data.myRank} in your area
+        </div>
+      )}
+      <div style={{background:'#111316',border:'1px solid #272B33',borderRadius:'14px',overflow:'hidden'}}>
+        <div style={{display:'grid',gridTemplateColumns:'40px 1fr 80px 80px 60px',gap:'8px',padding:'10px 14px',fontSize:'10px',textTransform:'uppercase',letterSpacing:'0.07em',color:'#606670',fontWeight:'700',borderBottom:'1px solid #272B33'}}>
+          <div>#</div><div>Driver</div><div style={{textAlign:'right'}}>Loads</div><div style={{textAlign:'right'}}>Earned</div><div style={{textAlign:'right'}}>GPS</div>
+        </div>
+        {(data.leaderboard || []).map((d: any) => (
+          <div key={d.userId} style={{display:'grid',gridTemplateColumns:'40px 1fr 80px 80px 60px',gap:'8px',padding:'10px 14px',fontSize:'13px',borderBottom:'1px solid #1C1F24',background:data.myRank && d.rank === data.myRank ? 'rgba(245,166,35,0.05)' : 'transparent'}}>
+            <div style={{fontWeight:'900',color:d.rank<=3?'#F5A623':'#606670'}}>{d.rank}</div>
+            <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+              <span style={{fontWeight:'700'}}>{d.name}</span>
+              <span style={{background:`${tierColors[d.tierSlug]||'#606670'}18`,color:tierColors[d.tierSlug]||'#606670',fontSize:'9px',padding:'2px 6px',borderRadius:'3px',fontWeight:'800',textTransform:'uppercase'}}>{d.tier}</span>
+            </div>
+            <div style={{textAlign:'right',fontWeight:'700'}}>{d.loadsThisMonth}</div>
+            <div style={{textAlign:'right',color:'#F5A623',fontWeight:'700'}}>${d.earnedThisMonth}</div>
+            <div style={{textAlign:'right',color:'#27AE60',fontWeight:'600'}}>{d.gpsScore}%</div>
+          </div>
+        ))}
+        {data.leaderboard?.length === 0 && <div style={{textAlign:'center',padding:'40px',color:'#606670',fontSize:'13px'}}>No rankings yet this month</div>}
+      </div>
     </div>
   )
 }
@@ -404,6 +488,7 @@ export default function DriverDashboard() {
         <span style={{fontFamily:'Georgia,serif',fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
           {tier && <span style={{background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}33`,padding:'4px 12px',borderRadius:'6px',fontSize:'11px',fontWeight:'800',textTransform:'uppercase'}}>{tier.name}</span>}
+          <NotificationBell />
           <a href="/account" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',textDecoration:'none',fontSize:'13px'}}>My Account</a>
           <button onClick={signOut} style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',cursor:'pointer',fontSize:'13px'}}>Sign Out</button>
         </div>
@@ -429,7 +514,7 @@ export default function DriverDashboard() {
       )}
 
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
-        {[['jobs','🏗️ Available Jobs'],['loads','🚚 My Loads'],['earnings','💰 Earnings'],['map','🗺️ Map View']].map(([tab, label]) => (
+        {[['jobs','🏗️ Jobs'],['loads','🚚 Loads'],['earnings','💰 Earn'],['leaderboard','🏆 Rank'],['map','🗺️ Map']].map(([tab, label]) => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={{padding:'13px 24px',background:'transparent',border:'none',borderBottom:activeTab === tab ? '2px solid #F5A623' : '2px solid transparent',color:activeTab === tab ? '#F5A623' : '#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>{label}</button>
         ))}
       </div>
@@ -558,6 +643,8 @@ export default function DriverDashboard() {
         )}
 
         {activeTab === 'earnings' && <EarningsTab tier={tier} />}
+
+        {activeTab === 'leaderboard' && <LeaderboardTab />}
 
         {activeTab === 'map' && (
           <div style={{paddingTop:'20px'}}>
