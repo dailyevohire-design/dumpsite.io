@@ -46,7 +46,26 @@ export async function POST(req: NextRequest) {
 
   if (loadError || !load) return NextResponse.json({ error: 'Load not found' }, { status: 404 })
   if (load.driver_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-  if (load.status !== 'approved') return NextResponse.json({ error: 'Load is not approved' }, { status: 409 })
+
+  // Already completed — return success so driver sees green screen (idempotent)
+  if (load.status === 'completed') {
+    const payPerLoad = 2000
+    return NextResponse.json({
+      success: true,
+      loadsDelivered: load.truck_count || numLoads,
+      totalPayDollars: Math.round((load.payout_cents || payPerLoad * numLoads) / 100),
+      autoApproved: true,
+      flaggedForReview: false,
+      alreadyCompleted: true,
+    })
+  }
+
+  if (load.status !== 'approved') {
+    const msg = load.status === 'rejected' ? 'This load was rejected'
+      : load.status === 'pending' ? 'This load is still pending approval'
+      : 'This load cannot be completed right now'
+    return NextResponse.json({ error: msg }, { status: 409 })
+  }
 
   // FIX: Verify dispatch order is still active (not cancelled/completed)
   if (load.dispatch_order_id) {
