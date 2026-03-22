@@ -87,7 +87,7 @@ function StatusDot({ active, label }: { active: boolean; label: string }) {
 
 function getJobPhase(s: Session): { label: string; color: string; bg: string } {
   if (s.load?.status === 'completed') return { label: 'COMPLETED', color: '#3A8AE8', bg: 'rgba(59,138,232,0.12)' }
-  if (s.completion_code_verified_at) return { label: 'CODE VERIFIED', color: '#27AE60', bg: 'rgba(39,174,96,0.12)' }
+  if (s.completion_code_verified_at) return { label: 'ON SITE', color: '#27AE60', bg: 'rgba(39,174,96,0.12)' }
   if (s.address_revealed_at) return { label: 'EN ROUTE', color: '#F5A623', bg: 'rgba(245,166,35,0.12)' }
   if (s.job_started_at) return { label: 'STARTED', color: '#F5A623', bg: 'rgba(245,166,35,0.12)' }
   return { label: 'LINK SENT', color: '#606670', bg: 'rgba(96,102,112,0.12)' }
@@ -327,7 +327,7 @@ export default function TrackingPage() {
                   <StatusDot active={!!s.terms_accepted_at} label="Terms" />
                   <StatusDot active={!!s.address_revealed_at} label="Address" />
                   <StatusDot active={!!isLive} label="GPS" />
-                  <StatusDot active={!!s.completion_code_verified_at} label="Code" />
+                  <StatusDot active={!!s.completion_code_verified_at} label="On Site" />
                   <StatusDot active={s.load?.status === 'completed'} label="Done" />
                 </div>
                 {isLive && <div style={{ fontSize: '10px', color: '#27AE60', marginTop: '6px', fontWeight: '700' }}>● LIVE — last ping {fmtTime(s.last_ping_at)}</div>}
@@ -419,22 +419,22 @@ export default function TrackingPage() {
                 {/* Distance & ETA */}
                 <div style={{ display: 'flex', gap: '16px', marginBottom: '16px' }}>
                   <div style={{ flex: 1, background: 'rgba(245,166,35,0.07)', border: '1px solid rgba(245,166,35,0.18)', borderRadius: '12px', padding: '18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.07em', color: '#606670', fontWeight: '700', marginBottom: '6px' }}>Distance to Site</div>
+                    <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.07em', color: '#FFFFFF', fontWeight: '700', marginBottom: '6px' }}>Distance to Site</div>
                     {distanceMiles !== null ? (
                       <>
                         <div style={{ fontSize: '36px', fontWeight: '900', color: '#F5A623', lineHeight: '1' }}>{distanceMiles < 1 ? distanceMiles.toFixed(1) : Math.round(distanceMiles)}</div>
-                        <div style={{ fontSize: '13px', color: '#606670', marginTop: '4px' }}>miles</div>
+                        <div style={{ fontSize: '13px', color: '#FFFFFF', marginTop: '4px' }}>miles</div>
                       </>
                     ) : (
                       <div style={{ fontSize: '16px', color: '#606670', padding: '8px 0' }}>Waiting for GPS</div>
                     )}
                   </div>
                   <div style={{ flex: 1, background: 'rgba(59,138,232,0.07)', border: '1px solid rgba(59,138,232,0.18)', borderRadius: '12px', padding: '18px', textAlign: 'center' }}>
-                    <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.07em', color: '#606670', fontWeight: '700', marginBottom: '6px' }}>Est. Arrival</div>
+                    <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.07em', color: '#FFFFFF', fontWeight: '700', marginBottom: '6px' }}>Est. Arrival</div>
                     {etaMins !== null ? (
                       <>
                         <div style={{ fontSize: '36px', fontWeight: '900', color: '#3A8AE8', lineHeight: '1' }}>{etaMins < 60 ? etaMins : `${Math.floor(etaMins / 60)}h ${etaMins % 60}m`}</div>
-                        <div style={{ fontSize: '13px', color: '#606670', marginTop: '4px' }}>{etaMins < 60 ? 'minutes' : ''}</div>
+                        <div style={{ fontSize: '13px', color: '#FFFFFF', marginTop: '4px' }}>{etaMins < 60 ? 'minutes' : ''}</div>
                       </>
                     ) : (
                       <div style={{ fontSize: '16px', color: '#606670', padding: '8px 0' }}>Waiting for GPS</div>
@@ -471,7 +471,7 @@ export default function TrackingPage() {
                     { label: 'Address Revealed', time: detail.session?.address_revealed_at, icon: '📍' },
                     { label: 'First GPS Ping', time: detail.pings?.[0]?.recorded_at, icon: '📡' },
                     { label: 'Arrived On-Site', time: detail.session?.arrived_at, icon: '🏗️' },
-                    { label: 'Code Verified', time: detail.session?.completion_code_verified_at, icon: '🔑' },
+                    { label: 'GPS Verified On Site', time: detail.session?.completion_code_verified_at, icon: '📍' },
                     { label: 'Completed', time: detail.load?.completed_at, icon: '🎉' },
                   ].map((step, i, arr) => (
                     <div key={i} style={{ display: 'flex', gap: '12px', marginBottom: '10px', alignItems: 'center' }}>
@@ -483,22 +483,6 @@ export default function TrackingPage() {
                     </div>
                   ))}
                 </div>
-
-                {/* Completion Code */}
-                {detail.completionCode && (
-                  <div style={{ background: '#111316', border: '1px solid #272B33', borderRadius: '14px', padding: '20px', marginBottom: '16px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div>
-                        <div style={lbl}>Completion Code</div>
-                        <div style={{ fontFamily: 'monospace', fontSize: '32px', fontWeight: '900', color: '#F5A623', letterSpacing: '4px' }}>{detail.completionCode.code}</div>
-                        <div style={{ fontSize: '11px', color: '#606670', marginTop: '2px' }}>Expires: {fmtTime(detail.completionCode.expires_at)}</div>
-                      </div>
-                      <span style={{ background: detail.completionCode.used_at ? 'rgba(39,174,96,0.12)' : 'rgba(245,166,35,0.12)', color: detail.completionCode.used_at ? '#27AE60' : '#F5A623', padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: '800' }}>
-                        {detail.completionCode.used_at ? `USED ${fmtTime(detail.completionCode.used_at)}` : 'UNUSED'}
-                      </span>
-                    </div>
-                  </div>
-                )}
 
                 {/* Payout */}
                 {detail.load?.payout_cents && (

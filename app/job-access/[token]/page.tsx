@@ -192,7 +192,7 @@ export default function JobAccessPage() {
           </div>
 
           <div style={{ background: 'rgba(245,166,35,0.07)', border: '1px solid rgba(245,166,35,0.18)', borderRadius: '10px', padding: '14px', textAlign: 'center', fontSize: '14px', color: '#F5A623', fontWeight: '700' }}>
-            When you arrive, collect the 6-digit completion code at the site. You will need it to mark the job complete.
+            Your location will be tracked automatically. When you complete the delivery, take a photo at the site to verify arrival.
           </div>
         </div>
       </div>
@@ -210,7 +210,6 @@ export default function JobAccessPage() {
 
         <div style={{ background: '#111316', border: '1px solid #272B33', borderRadius: '14px', padding: '22px', marginBottom: '16px' }}>
           <div style={{ textAlign: 'center', marginBottom: '16px' }}>
-            <div style={{ fontSize: '40px', marginBottom: '8px' }}>🚛</div>
             <div style={{ fontWeight: '800', fontSize: '22px', marginBottom: '4px' }}>Your Approved Job</div>
           </div>
 

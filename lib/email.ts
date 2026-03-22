@@ -159,3 +159,53 @@ export async function sendLoadSubmissionEmail(data: {
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
+
+export async function sendApprovalEmail(data: {
+  to: string
+  driverName: string
+  cityName: string
+  payDollars: number
+  accessUrl: string
+  loadId: string
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    const resend = getResend()
+    const result = await resend.emails.send({
+      from: FROM,
+      to: data.to,
+      subject: `DumpSite.io — Job Approved! $${data.payDollars}/load in ${data.cityName}`,
+      html: `
+        <div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
+          <div style="text-align:center;margin-bottom:20px;">
+            <span style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#111;">DUMPSITE<span style="color:#F5A623;">.IO</span></span>
+          </div>
+          <div style="background:#f8f9fa;border:1px solid #e9ecef;border-radius:12px;padding:24px;text-align:center;margin-bottom:20px;">
+            <div style="font-size:14px;color:#27AE60;font-weight:800;margin-bottom:8px;">JOB APPROVED</div>
+            <div style="font-size:24px;font-weight:900;color:#111;margin-bottom:4px;">$${data.payDollars}/load</div>
+            <div style="font-size:16px;color:#666;">${esc(data.cityName)}</div>
+          </div>
+          <div style="text-align:center;margin-bottom:20px;">
+            <p style="color:#333;font-size:15px;margin-bottom:16px;">
+              Hi ${esc(data.driverName)}, your load request has been approved!
+            </p>
+            <a href="${esc(data.accessUrl)}" style="display:inline-block;background:#F5A623;color:#111;padding:14px 32px;border-radius:10px;font-weight:800;font-size:16px;text-decoration:none;text-transform:uppercase;">
+              Start Job
+            </a>
+          </div>
+          <p style="color:#999;font-size:12px;text-align:center;margin-top:24px;">
+            Click the button above to accept terms and unlock the delivery address.
+          </p>
+        </div>
+      `,
+    })
+
+    if (result?.error) {
+      console.error('Approval email error:', result.error)
+      return { success: false, error: String(result.error) }
+    }
+    return { success: true }
+  } catch (err: any) {
+    console.error('Approval email failed:', err.message)
+    return { success: false, error: err.message }
+  }
+}

@@ -13,9 +13,9 @@ function CompletionForm({ load, user, onComplete }: {
   const [photo, setPhoto] = useState<File|null>(null)
   const [preview, setPreview] = useState<string|null>(null)
   const [loadsDelivered, setLoadsDelivered] = useState('1')
-  const [completionCode, setCompletionCode] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string|null>(null)
+  const [gpsStatus, setGpsStatus] = useState<string|null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const payPerLoad = load.dispatch_orders?.driver_pay_cents || 2000
@@ -42,33 +42,57 @@ function CompletionForm({ load, user, onComplete }: {
     return data.publicUrl
   }
 
+  function getGPS(): Promise<{ lat: number; lng: number } | null> {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) { resolve(null); return }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        () => resolve(null),
+        { enableHighAccuracy: true, timeout: 10000 }
+      )
+    })
+  }
+
   async function submit() {
     if (!photo) { setError('Please upload a completion photo'); return }
     const numLoads = parseInt(loadsDelivered)
     if (isNaN(numLoads) || numLoads < 1) { setError('Please enter a valid number of loads'); return }
-    if (!completionCode.trim()) { setError('Please enter the completion code given at the job site'); return }
 
     setSubmitting(true)
     setError(null)
+    setGpsStatus('Getting your location...')
+
     try {
+      // Get GPS for photo verification
+      const gps = await getGPS()
+      setGpsStatus(gps ? 'Location captured' : 'Location unavailable — submitting anyway')
+
       const photoUrl = await uploadPhoto()
-      if (!photoUrl) { setError('Photo upload failed — please try again'); return }
+      if (!photoUrl) { setError('Photo upload failed — please try again'); setSubmitting(false); return }
 
       const res = await fetch('/api/driver/complete-load', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ loadId: load.id, completionPhotoUrl: photoUrl, loadsDelivered: numLoads, completionCode: completionCode.trim() })
+        body: JSON.stringify({
+          loadId: load.id,
+          completionPhotoUrl: photoUrl,
+          loadsDelivered: numLoads,
+          photoLat: gps?.lat,
+          photoLng: gps?.lng,
+        })
       })
       const data = await res.json()
       if (!data.success) {
         setError(data.error || 'Failed to mark complete. Please try again.')
       } else {
-        onComplete(`🎉 Job complete! ${numLoads} load${numLoads > 1 ? 's' : ''} delivered — total pay: $${data.totalPayDollars}. Payment processed shortly.`)
+        const flag = data.flaggedForReview ? ' (GPS verification pending — admin will confirm)' : ''
+        onComplete(`🎉 Job complete! ${numLoads} load${numLoads > 1 ? 's' : ''} delivered — total pay: $${data.totalPayDollars}.${flag}`)
       }
     } catch {
       setError('Network error — please try again.')
     } finally {
       setSubmitting(false)
+      setGpsStatus(null)
     }
   }
 
@@ -92,24 +116,19 @@ function CompletionForm({ load, user, onComplete }: {
 
       <div style={{marginBottom:'14px'}}>
         <label style={{fontSize:'11px',textTransform:'uppercase' as const,letterSpacing:'0.07em',color:'#606670',fontWeight:'700',display:'block',marginBottom:'6px'}}>Photo of completed delivery *</label>
-        <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{display:'none'}} />
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} style={{display:'none'}} />
         <div onClick={() => fileRef.current?.click()} style={{border:`2px dashed ${photo ? '#27AE60' : '#272B33'}`,borderRadius:'10px',padding:'20px',textAlign:'center',cursor:'pointer',background:photo ? 'rgba(39,174,96,0.05)' : '#0A0C0F'}}>
           {preview
             ? <div><img src={preview} alt="Completion" style={{maxHeight:'160px',maxWidth:'100%',borderRadius:'8px',marginBottom:'8px'}} /><div style={{fontSize:'12px',color:'#27AE60',fontWeight:'700'}}>✓ Photo ready — tap to replace</div></div>
-            : <div><div style={{fontSize:'32px',marginBottom:'8px'}}>📷</div><div style={{fontSize:'14px',fontWeight:'700',marginBottom:'4px'}}>Photo of completed delivery</div><div style={{fontSize:'12px',color:'#606670'}}>Show the site after delivery</div></div>
+            : <div><div style={{fontSize:'32px',marginBottom:'8px'}}>📷</div><div style={{fontSize:'14px',fontWeight:'700',marginBottom:'4px'}}>Take photo at delivery site</div><div style={{fontSize:'12px',color:'#606670'}}>GPS location will be verified automatically</div></div>
           }
         </div>
       </div>
 
-      <div style={{marginBottom:'14px'}}>
-        <label style={{fontSize:'11px',textTransform:'uppercase' as const,letterSpacing:'0.07em',color:'#606670',fontWeight:'700',display:'block',marginBottom:'6px'}}>Completion code *</label>
-        <input type="text" inputMode="numeric" maxLength={4} value={completionCode}
-          onChange={e => setCompletionCode(e.target.value.replace(/\D/g, '').slice(0, 6))} style={inp} placeholder="6-digit code from job site" />
-        <div style={{fontSize:'11px',color:'#606670',marginTop:'4px'}}>Enter the code provided at the delivery site</div>
-      </div>
+      {gpsStatus && <div style={{fontSize:'12px',color:'#F5A623',marginBottom:'10px',textAlign:'center'}}>{gpsStatus}</div>}
 
-      <button onClick={submit} disabled={submitting || !photo || !completionCode.trim()} style={{width:'100%',background:(photo && completionCode.trim()) ? 'rgba(39,174,96,0.15)' : '#1C1F24',color:(photo && completionCode.trim()) ? '#27AE60' : '#606670',border:`1px solid ${(photo && completionCode.trim()) ? 'rgba(39,174,96,0.3)' : '#272B33'}`,padding:'12px',borderRadius:'8px',cursor:(submitting || !photo || !completionCode.trim()) ? 'not-allowed' : 'pointer',fontWeight:'800',fontSize:'14px'}}>
-        {submitting ? 'Submitting...' : '✓ Mark Job Complete'}
+      <button onClick={submit} disabled={submitting || !photo} style={{width:'100%',background:photo ? 'rgba(39,174,96,0.15)' : '#1C1F24',color:photo ? '#27AE60' : '#606670',border:`1px solid ${photo ? 'rgba(39,174,96,0.3)' : '#272B33'}`,padding:'12px',borderRadius:'8px',cursor:(submitting || !photo) ? 'not-allowed' : 'pointer',fontWeight:'800',fontSize:'14px'}}>
+        {submitting ? 'Verifying location & submitting...' : '✓ Mark Job Complete'}
       </button>
     </div>
   )

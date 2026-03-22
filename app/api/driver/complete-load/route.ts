@@ -1,10 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
-import crypto from 'crypto'
 
-const MAX_CODE_ATTEMPTS = 5
-const ATTEMPT_WINDOW_MINUTES = 60
+// Geofence thresholds
+const GEOFENCE_AUTO_APPROVE_KM = 1.0   // Within 1km = auto-approve
+const GEOFENCE_FLAG_KM = 5.0           // Within 5km = flag for review (not block)
+const MIN_TIME_ON_SITE_MINUTES = 10    // Must be on site at least 10 minutes
+
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371
+  const dLat = (lat2 - lat1) * Math.PI / 180
+  const dLng = (lng2 - lng1) * Math.PI / 180
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerSupabase()
@@ -14,9 +23,9 @@ export async function POST(req: NextRequest) {
   let body: any
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
 
-  const { loadId, completionPhotoUrl, loadsDelivered, completionCode } = body
-  if (!loadId || !completionPhotoUrl || !loadsDelivered || !completionCode) {
-    return NextResponse.json({ error: 'Missing required fields (loadId, completionPhotoUrl, loadsDelivered, completionCode)' }, { status: 400 })
+  const { loadId, completionPhotoUrl, loadsDelivered, photoLat, photoLng } = body
+  if (!loadId || !completionPhotoUrl || !loadsDelivered) {
+    return NextResponse.json({ error: 'Missing required fields (loadId, completionPhotoUrl, loadsDelivered)' }, { status: 400 })
   }
 
   const numLoads = parseInt(loadsDelivered)
@@ -35,26 +44,10 @@ export async function POST(req: NextRequest) {
   if (load.driver_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   if (load.status !== 'approved') return NextResponse.json({ error: 'Load is not approved' }, { status: 409 })
 
-  // 2. Rate limit: check failed code attempts in rolling window
-  const windowStart = new Date(Date.now() - ATTEMPT_WINDOW_MINUTES * 60 * 1000).toISOString()
-  const { count: failedAttempts } = await admin
-    .from('completion_code_attempts')
-    .select('id', { count: 'exact', head: true })
-    .eq('load_request_id', loadId)
-    .eq('driver_id', user.id)
-    .eq('success', false)
-    .gte('created_at', windowStart)
-
-  if ((failedAttempts || 0) >= MAX_CODE_ATTEMPTS) {
-    return NextResponse.json({
-      error: 'Too many invalid completion code attempts. Try again later or contact dispatch.'
-    }, { status: 429 })
-  }
-
-  // 3. Load latest tracking session and validate job was started
+  // 2. Load tracking session and validate job was started
   const { data: session } = await admin
     .from('job_tracking_sessions')
-    .select('id, job_started_at, address_revealed_at')
+    .select('id, job_started_at, address_revealed_at, arrived_at, created_at')
     .eq('load_request_id', loadId)
     .eq('driver_id', user.id)
     .order('created_at', { ascending: false })
@@ -65,39 +58,105 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'You must start the job via the secure link before completing it' }, { status: 400 })
   }
 
-  // 4. Validate completion code
-  const { data: codeRecord } = await admin
-    .from('job_completion_codes')
-    .select('id, code, expires_at, used_at')
-    .eq('load_request_id', loadId)
-    .single()
+  // 3. Get delivery address coordinates for geofence check
+  let destLat: number | null = null
+  let destLng: number | null = null
 
-  if (!codeRecord) {
-    return NextResponse.json({ error: 'No completion code found for this job' }, { status: 400 })
+  if (load.dispatch_order_id) {
+    const { data: order } = await admin
+      .from('dispatch_orders')
+      .select('client_address, cities(name)')
+      .eq('id', load.dispatch_order_id)
+      .single()
+
+    if (order?.client_address) {
+      // Try geocoding
+      try {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 4000)
+        const geoRes = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(order.client_address)}`,
+          { headers: { 'User-Agent': 'DumpSite.io/1.0' }, signal: controller.signal }
+        )
+        clearTimeout(timeout)
+        const geoData = await geoRes.json()
+        if (geoData?.[0]) {
+          destLat = parseFloat(geoData[0].lat)
+          destLng = parseFloat(geoData[0].lon)
+        }
+      } catch {}
+    }
+
+    // City fallback
+    if (destLat === null && order) {
+      const CITY_COORDS: Record<string, [number, number]> = {
+        'Arlington': [32.7357, -97.1081], 'Dallas': [32.7767, -96.7970], 'Fort Worth': [32.7555, -97.3308],
+        'Garland': [32.9126, -96.6389], 'Everman': [32.6293, -97.2836], 'McKinney': [33.1972, -96.6397],
+        'Plano': [33.0198, -96.6989], 'Irving': [32.8140, -96.9489], 'Little Elm': [33.1629, -96.9375],
+        'Midlothian': [32.4821, -97.0053], 'Carrollton': [32.9537, -96.8903], 'Mansfield': [32.5632, -97.1411],
+      }
+      const cityName = (order.cities as any)?.name
+      if (cityName && CITY_COORDS[cityName]) {
+        destLat = CITY_COORDS[cityName][0]
+        destLng = CITY_COORDS[cityName][1]
+      }
+    }
   }
 
-  if (codeRecord.used_at) {
-    return NextResponse.json({ error: 'Completion code has already been used' }, { status: 409 })
+  // 4. Get GPS pings to check time on site and location
+  const { data: pings } = await admin
+    .from('job_location_pings')
+    .select('lat, lng, recorded_at')
+    .eq('tracking_session_id', session.id)
+    .order('recorded_at', { ascending: true })
+
+  // 5. Calculate geofence + time on site
+  let distanceKm: number | null = null
+  let photoDistanceKm: number | null = null
+  let timeOnSiteMinutes = 0
+  let gpsMatch = false
+  let flagForReview = false
+
+  // Time on site = time since job started
+  if (session.job_started_at) {
+    timeOnSiteMinutes = Math.round((Date.now() - new Date(session.job_started_at).getTime()) / 60000)
   }
 
-  if (new Date(codeRecord.expires_at) < new Date()) {
-    return NextResponse.json({ error: 'Completion code has expired' }, { status: 410 })
+  // Check latest ping against destination
+  if (destLat !== null && destLng !== null && pings && pings.length > 0) {
+    const lastPing = pings[pings.length - 1]
+    distanceKm = haversineKm(lastPing.lat, lastPing.lng, destLat, destLng)
   }
 
-  const submittedCode = Buffer.from(String(completionCode).trim())
-  const storedCode = Buffer.from(codeRecord.code)
-  if (submittedCode.length !== storedCode.length || !crypto.timingSafeEqual(submittedCode, storedCode)) {
-    // Log failed attempt
-    await admin.from('completion_code_attempts').insert({
-      load_request_id: loadId,
-      driver_id: user.id,
-      attempted_code: String(completionCode).trim(),
-      success: false,
-    })
-    return NextResponse.json({ error: 'Invalid completion code' }, { status: 400 })
+  // Check photo GPS metadata against destination
+  if (destLat !== null && destLng !== null && typeof photoLat === 'number' && typeof photoLng === 'number') {
+    photoDistanceKm = haversineKm(photoLat, photoLng, destLat, destLng)
   }
 
-  // 5. Resolve pay
+  // Determine if GPS matches
+  const bestDistance = Math.min(
+    distanceKm ?? Infinity,
+    photoDistanceKm ?? Infinity
+  )
+
+  if (bestDistance <= GEOFENCE_AUTO_APPROVE_KM) {
+    gpsMatch = true
+  } else if (bestDistance <= GEOFENCE_FLAG_KM) {
+    // Close enough — allow but flag
+    gpsMatch = false
+    flagForReview = true
+  } else if (bestDistance === Infinity) {
+    // No GPS data at all — allow but flag
+    flagForReview = true
+  } else {
+    // Far from site — flag for review (don't block)
+    flagForReview = true
+  }
+
+  // Auto-approve if GPS matches AND enough time on site
+  const autoApproved = gpsMatch && timeOnSiteMinutes >= MIN_TIME_ON_SITE_MINUTES
+
+  // 6. Resolve pay
   let payPerLoadCents = 2000
   if (load.dispatch_order_id) {
     const { data: order } = await admin.from('dispatch_orders').select('driver_pay_cents').eq('id', load.dispatch_order_id).single()
@@ -107,7 +166,7 @@ export async function POST(req: NextRequest) {
   const payoutCents = payPerLoadCents * numLoads
   const now = new Date().toISOString()
 
-  // 6. Mark load_request completed
+  // 7. Mark load_request completed (or flagged)
   const { error: updateError } = await admin.from('load_requests').update({
     status: 'completed',
     completion_photo_url: completionPhotoUrl,
@@ -118,29 +177,35 @@ export async function POST(req: NextRequest) {
 
   if (updateError) return NextResponse.json({ error: 'Failed to mark complete' }, { status: 500 })
 
-  // 7. Mark completion code used
-  await admin.from('job_completion_codes').update({
-    used_at: now,
-    used_by_driver_id: user.id,
-  }).eq('id', codeRecord.id)
-
   // 8. Update tracking session
   await admin.from('job_tracking_sessions').update({
     completion_code_verified_at: now,
-    arrived_at: now,
+    arrived_at: session.arrived_at || now,
   }).eq('id', session.id)
 
-  // 9. Log successful attempt
-  await admin.from('completion_code_attempts').insert({
-    load_request_id: loadId,
-    driver_id: user.id,
-    attempted_code: '[valid]',
-    success: true,
+  // 9. Audit log with geofence data
+  await admin.from('audit_logs').insert({
+    action: flagForReview ? 'job.completed_flagged_review' : 'job.completed_auto_approved',
+    entity_type: 'load_request',
+    entity_id: loadId,
+    metadata: {
+      driver_id: user.id,
+      distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
+      photo_distance_km: photoDistanceKm !== null ? Math.round(photoDistanceKm * 100) / 100 : null,
+      time_on_site_minutes: timeOnSiteMinutes,
+      auto_approved: autoApproved,
+      flagged: flagForReview,
+      ping_count: pings?.length || 0,
+    }
   })
 
   return NextResponse.json({
     success: true,
     loadsDelivered: numLoads,
-    totalPayDollars: Math.round(payoutCents / 100)
+    totalPayDollars: Math.round(payoutCents / 100),
+    autoApproved,
+    flaggedForReview: flagForReview,
+    distanceKm: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
+    timeOnSiteMinutes,
   })
 }

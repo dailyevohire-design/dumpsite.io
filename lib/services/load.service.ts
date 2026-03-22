@@ -8,9 +8,7 @@ function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex')
 }
 
-function makeCode(): string {
-  return String(Math.floor(100000 + Math.random() * 900000))
-}
+
 
 export async function submitLoadRequest(driverId: string, input: {
   siteId: string, dispatchOrderId?: string, dirtType: string,
@@ -197,14 +195,6 @@ export async function triggerApprovalFlow(loadId: string, driverId: string) {
     load_request_id: loadId,
     driver_id: driverId,
   })
-
-  // Create completion code
-  const code = makeCode()
-  await supabase.from('job_completion_codes').upsert({
-    load_request_id: loadId,
-    code,
-    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-  }, { onConflict: 'load_request_id' })
 
   // Send SMS with short URL — carrier-friendly
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'

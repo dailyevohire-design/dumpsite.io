@@ -2,14 +2,11 @@ import { NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { requireAdmin } from '@/lib/admin-auth'
 import { sendApprovalSMS } from '@/lib/sms'
+import { sendApprovalEmail } from '@/lib/email'
 import crypto from 'crypto'
 
 function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex')
-}
-
-function makeCode(): string {
-  return String(Math.floor(100000 + Math.random() * 900000))
 }
 
 // Generate short 8-char alphanumeric ID for SMS-friendly URLs
@@ -37,12 +34,19 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     return NextResponse.json({ success: false, error: 'Load not found or already processed' }, { status: 404 })
   }
 
-  // 2. Load driver profile
+  // 2. Load driver profile + get email from auth
   const { data: driver, error: driverError } = await supabase
     .from('driver_profiles')
     .select('user_id, first_name, phone, status')
     .eq('user_id', load.driver_id)
     .single()
+
+  // Get driver email from auth.users
+  let driverEmail: string | null = null
+  try {
+    const { data: authData } = await supabase.auth.admin.getUserById(load.driver_id)
+    driverEmail = authData?.user?.email || null
+  } catch {}
 
   if (driverError || !driver) {
     errors.push(`Driver profile not found: ${driverError?.message || 'null'}`)
@@ -114,16 +118,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
   })
   if (sessionErr) errors.push(`job_tracking_sessions: ${sessionErr.message}`)
 
-  // 9. Create completion code
-  const code = makeCode()
-  const { error: codeErr } = await supabase.from('job_completion_codes').upsert({
-    load_request_id: id,
-    code,
-    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-  }, { onConflict: 'load_request_id' })
-  if (codeErr) errors.push(`job_completion_codes: ${codeErr.message}`)
-
-  // 10. Audit log
+  // 9. Audit log
   const { error: auditErr } = await supabase.from('audit_logs').insert({
     action: 'job.approved_secure_link_issued',
     entity_type: 'load_request',
@@ -162,17 +157,48 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     }
   }
 
+  // 12. Email fallback — always send, ensures driver gets the link even if SMS is carrier-blocked
+  let emailSent = false
+  if (driverEmail) {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
+    const accessUrl = shortIdStored
+      ? `${appUrl}/j/${shortId}`
+      : `${appUrl}/job-access/${rawToken}`
+    try {
+      const emailResult = await sendApprovalEmail({
+        to: driverEmail,
+        driverName: driver?.first_name || 'Driver',
+        cityName,
+        payDollars,
+        accessUrl,
+        loadId: id,
+      })
+      if (emailResult.success) emailSent = true
+    } catch {}
+  }
+
   const hasDbErrors = errors.length > 0
+
+  const notified = smsSent || emailSent
+  let message = ''
+  if (smsSent && emailSent) {
+    message = `✅ Approved! Job link sent via SMS (${driver?.phone}) and email (${driverEmail}).`
+  } else if (smsSent) {
+    message = `✅ Approved! Job link sent via SMS to ${driver?.phone}.`
+  } else if (emailSent) {
+    message = `✅ Approved! SMS failed (carrier blocked) — job link sent via email to ${driverEmail}.`
+  } else {
+    message = `⚠️ Approved but notification failed. SMS: ${smsError}. Email: ${driverEmail ? 'failed' : 'no email on file'}.`
+  }
 
   return NextResponse.json({
     success: true,
     smsSent,
+    emailSent,
     smsError,
-    completionCode: code,
     driverPhone: driver?.phone || null,
+    driverEmail,
     dbErrors: hasDbErrors ? errors : undefined,
-    message: smsSent
-      ? `✅ Approved! Secure job link sent to ${driver?.phone}.`
-      : `⚠️ Approved but SMS failed: ${smsError}${hasDbErrors ? ` | DB issues: ${errors.join('; ')}` : ''}`,
+    message,
   })
 }
