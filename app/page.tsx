@@ -89,9 +89,9 @@ export default function Home() {
         <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'40px'}}>Built for the way dirt moves.</h2>
         <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'1px',background:'#1A1A1A',border:'1px solid #1A1A1A',borderRadius:'8px',overflow:'hidden'}}>
           {[
-            {t:'Speed',d:'Jobs dispatched within 60 minutes of posting. Elite drivers notified first.',c:'#F5A623'},
-            {t:'Trust',d:'Every driver verified. Every load photo-documented. Full audit trail.',c:'#27AE60'},
-            {t:'Scale',d:'Starting DFW. Expanding nationally. The infrastructure for dirt movement.',c:'#3A8AE8'},
+            {t:'Get paid to dump. Not the other way around.',d:'Stop paying dump fees. Access jobs where you earn per load while disposing of dirt. Turn every haul into profit.',c:'#F5A623'},
+            {t:'See every dump site — live.',d:'Access a real-time map of active dump sites in your area. No guessing, no calling around. Just open the map and go.',c:'#27AE60'},
+            {t:'Everything in one place.',d:'No more calling, texting, or chasing leads. Find sites, get approved, deliver, and get paid — all inside one platform.',c:'#3A8AE8'},
           ].map(f=>(
             <div key={f.t} style={{background:'#0A0A0A',padding:'36px 28px'}}>
               <div style={{width:'40px',height:'3px',background:f.c,marginBottom:'20px',borderRadius:'2px'}}/>
