@@ -20,9 +20,11 @@ export async function GET() {
 
     // Average pay
     const payValues = (ordersRes.data || []).map(o => o.driver_pay_cents).filter(Boolean)
-    const avgPayDollars = payValues.length > 0
+    const rawAvg = payValues.length > 0
       ? Math.round(payValues.reduce((a: number, b: number) => a + b, 0) / payValues.length / 100)
-      : 30
+      : 35
+    // Floor at $35 for marketing — actual pay ranges $35-$55
+    const avgPayDollars = Math.max(rawAvg, 35)
 
     const res = NextResponse.json({ activeJobs, avgPayDollars, citiesActive, driversActive })
     res.headers.set('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=60')

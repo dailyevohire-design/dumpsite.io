@@ -87,7 +87,7 @@ export default function Home() {
       <section className="fade-in fade-d2" style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
         <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'12px'}}>Why DumpSite.io</p>
         <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'40px'}}>Built for the way dirt moves.</h2>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'1px',background:'#1A1A1A',border:'1px solid #1A1A1A',borderRadius:'8px',overflow:'hidden'}}>
+        <div className="feature-grid" style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'1px',background:'#1A1A1A',border:'1px solid #1A1A1A',borderRadius:'8px',overflow:'hidden'}}>
           {[
             {t:'Get paid to dump. Not the other way around.',d:'Stop paying dump fees. Access jobs where you earn per load while disposing of dirt. Turn every haul into profit.',c:'#F5A623'},
             {t:'See every dump site — live.',d:'Access a real-time map of active dump sites in your area. No guessing, no calling around. Just open the map and go.',c:'#27AE60'},
