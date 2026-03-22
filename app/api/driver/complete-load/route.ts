@@ -193,47 +193,29 @@ export async function POST(req: NextRequest) {
   const payoutCents = payPerLoadCents * numLoads
   const now = new Date().toISOString()
 
-  // 7. Mark load_request completed — try with all columns, degrade gracefully
-  let updateError: any = null
-
-  // Attempt 1: all columns including geofence + completed_at
-  const fullUpdate: Record<string, any> = {
+  // 7. Mark load_request completed — minimal columns only (guaranteed to exist)
+  const { error: updateError } = await admin.from('load_requests').update({
     status: 'completed',
     completion_photo_url: completionPhotoUrl,
     truck_count: numLoads,
     payout_cents: payoutCents,
-    completed_at: now,
-    completion_latitude: typeof photoLat === 'number' ? photoLat : null,
-    completion_longitude: typeof photoLng === 'number' ? photoLng : null,
-    completion_distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
-    requires_manual_review: flagForReview,
+  }).eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
+
+  if (updateError) {
+    console.error('Complete-load update error:', JSON.stringify(updateError))
+    return NextResponse.json({ error: `Failed to mark complete: ${updateError.message || 'unknown'}` }, { status: 500 })
   }
 
-  const { error: err1 } = await admin.from('load_requests').update(fullUpdate)
-    .eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
-
-  if (err1?.message?.includes('does not exist')) {
-    // Attempt 2: without geofence columns but with completed_at
-    const { error: err2 } = await admin.from('load_requests').update({
-      status: 'completed', completion_photo_url: completionPhotoUrl,
-      truck_count: numLoads, payout_cents: payoutCents, completed_at: now,
-    }).eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
-
-    if (err2?.message?.includes('does not exist')) {
-      // Attempt 3: minimal — only columns guaranteed to exist
-      const { error: err3 } = await admin.from('load_requests').update({
-        status: 'completed', completion_photo_url: completionPhotoUrl,
-        truck_count: numLoads, payout_cents: payoutCents,
-      }).eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
-      updateError = err3
-    } else {
-      updateError = err2
-    }
-  } else {
-    updateError = err1
-  }
-
-  if (updateError) return NextResponse.json({ error: 'Failed to mark complete' }, { status: 500 })
+  // Try to set optional columns (don't fail if they don't exist)
+  try {
+    await admin.from('load_requests').update({
+      completed_at: now,
+      completion_latitude: typeof photoLat === 'number' ? photoLat : null,
+      completion_longitude: typeof photoLng === 'number' ? photoLng : null,
+      completion_distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
+      requires_manual_review: flagForReview,
+    }).eq('id', loadId)
+  } catch {}
 
   // 8. Update tracking session (if it exists)
   if (session?.id) {
