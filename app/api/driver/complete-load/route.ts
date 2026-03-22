@@ -182,32 +182,42 @@ export async function POST(req: NextRequest) {
   const payoutCents = payPerLoadCents * numLoads
   const now = new Date().toISOString()
 
-  // 7. Mark load_request completed with geofence data
+  // 7. Mark load_request completed — try with all columns, degrade gracefully
   let updateError: any = null
-  const baseUpdate: Record<string, any> = {
+
+  // Attempt 1: all columns including geofence + completed_at
+  const fullUpdate: Record<string, any> = {
     status: 'completed',
     completion_photo_url: completionPhotoUrl,
     truck_count: numLoads,
     payout_cents: payoutCents,
     completed_at: now,
-  }
-
-  // Try with geofence columns first, fall back without if they don't exist yet
-  const geoUpdate = {
-    ...baseUpdate,
     completion_latitude: typeof photoLat === 'number' ? photoLat : null,
     completion_longitude: typeof photoLng === 'number' ? photoLng : null,
     completion_distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
     requires_manual_review: flagForReview,
   }
 
-  const { error: err1 } = await admin.from('load_requests').update(geoUpdate)
+  const { error: err1 } = await admin.from('load_requests').update(fullUpdate)
     .eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
 
   if (err1?.message?.includes('does not exist')) {
-    const { error: err2 } = await admin.from('load_requests').update(baseUpdate)
-      .eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
-    updateError = err2
+    // Attempt 2: without geofence columns but with completed_at
+    const { error: err2 } = await admin.from('load_requests').update({
+      status: 'completed', completion_photo_url: completionPhotoUrl,
+      truck_count: numLoads, payout_cents: payoutCents, completed_at: now,
+    }).eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
+
+    if (err2?.message?.includes('does not exist')) {
+      // Attempt 3: minimal — only columns guaranteed to exist
+      const { error: err3 } = await admin.from('load_requests').update({
+        status: 'completed', completion_photo_url: completionPhotoUrl,
+        truck_count: numLoads, payout_cents: payoutCents,
+      }).eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
+      updateError = err3
+    } else {
+      updateError = err2
+    }
   } else {
     updateError = err1
   }
