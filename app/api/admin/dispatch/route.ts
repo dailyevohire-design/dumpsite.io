@@ -2,15 +2,26 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createDispatchOrder } from '@/lib/services/dispatch.service'
 import { requireAdmin } from '@/lib/admin-auth'
+import { rateLimit } from '@/lib/rate-limit'
+import { sanitizeText } from '@/lib/validation'
 
 export async function POST(req: NextRequest) {
   const auth = await requireAdmin()
   if (auth.error) return auth.error
 
+  const rl = await rateLimit(`dispatch:${auth.user.id}`, 30, '1 h')
+  if (!rl.allowed) return rl.response!
+
   let body: any
   try { body = await req.json() } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
+
+  // Sanitize text inputs
+  if (body.clientName) body.clientName = sanitizeText(body.clientName).slice(0, 200)
+  if (body.clientAddress) body.clientAddress = sanitizeText(body.clientAddress).slice(0, 500)
+  if (body.notes) body.notes = sanitizeText(body.notes).slice(0, 1000)
+  if (body.clientPhone) body.clientPhone = sanitizeText(body.clientPhone).slice(0, 20)
 
   if (!body.clientName || !body.clientAddress || !body.cityId || !body.yardsNeeded) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })

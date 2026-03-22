@@ -348,6 +348,14 @@ export default function DriverDashboard() {
                       <div style={{fontSize:'12px',color:'#606670'}}>per load you deliver</div>
                     </div>
                   </div>
+                  <div style={{background:'rgba(39,174,96,0.07)',border:'1px solid rgba(39,174,96,0.18)',borderRadius:'9px',padding:'11px 14px',fontSize:'13px',color:'#27AE60',marginBottom:'10px'}}>
+                    🚛 Truck Access: {selectedJob.truck_type_needed?.replace(/_/g,' ') || 'Tandem Only'}
+                  </div>
+                  {profile?.truck_type && selectedJob.truck_type_needed && selectedJob.truck_type_needed !== profile.truck_type && (
+                    <div style={{background:'rgba(245,166,35,0.07)',border:'1px solid rgba(245,166,35,0.18)',borderRadius:'9px',padding:'11px 14px',fontSize:'13px',color:'#F5A623',marginBottom:'10px'}}>
+                      ⚠️ Your truck ({profile.truck_type?.replace(/_/g,' ')}) may not qualify for this job
+                    </div>
+                  )}
                   <div style={{background:'rgba(245,166,35,0.07)',border:'1px solid rgba(245,166,35,0.18)',borderRadius:'9px',padding:'11px 14px',fontSize:'13px',color:'#606670'}}>
                     🔒 Delivery address sent via SMS after approval
                   </div>
@@ -423,7 +431,11 @@ export default function DriverDashboard() {
                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
                       <div style={{flex:1}}>
                         <div style={{fontWeight:'800',fontSize:'18px',marginBottom:'4px'}}>Delivery Job — {job.cities?.name}</div>
-                        <div style={{fontSize:'13px',color:'#606670',marginBottom:'8px'}}>{job.yards_needed} yards needed</div>
+                        <div style={{fontSize:'13px',color:'#606670',marginBottom:'4px'}}>{job.yards_needed} yards needed</div>
+                        <div style={{fontSize:'12px',color:'#27AE60',marginBottom:'6px'}}>🚛 Truck Access: {job.truck_type_needed?.replace(/_/g,' ') || 'Tandem Only'}</div>
+                        {profile?.truck_type && job.truck_type_needed && job.truck_type_needed !== profile.truck_type && (
+                          <div style={{fontSize:'11px',color:'#F5A623',marginBottom:'6px'}}>⚠️ Your truck may not qualify</div>
+                        )}
                         <div style={{display:'flex',gap:'8px'}}>
                           <span style={{background:'rgba(39,174,96,0.12)',color:'#27AE60',border:'1px solid rgba(39,174,96,0.3)',padding:'3px 10px',borderRadius:'5px',fontSize:'11px',fontWeight:'800'}}>✓ Open</span>
                           <span style={{background:'#1C1F24',color:'#606670',border:'1px solid #272B33',padding:'3px 10px',borderRadius:'5px',fontSize:'11px'}}>{job.urgency === 'urgent' ? '🔥 Urgent' : 'Standard'}</span>

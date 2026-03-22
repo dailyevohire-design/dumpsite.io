@@ -22,7 +22,7 @@ export async function GET() {
 
   const { data, error } = await admin
     .from('dispatch_orders')
-    .select('id, city_id, yards_needed, driver_pay_cents, urgency, created_at, cities(name)')
+    .select('id, city_id, yards_needed, driver_pay_cents, urgency, created_at, truck_type_needed, cities(name)')
     .eq('status', 'dispatching')
     .order('driver_pay_cents', { ascending: false })
     .limit(50)

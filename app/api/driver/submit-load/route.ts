@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
 import { sendLoadSubmissionEmail } from '@/lib/email'
+import { rateLimit } from '@/lib/rate-limit'
+import { sanitizeText, validateUrl } from '@/lib/validation'
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerSupabase()
@@ -11,6 +13,10 @@ export async function POST(req: NextRequest) {
   const role = user.user_metadata?.role
   if (role === 'admin' || role === 'superadmin') return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
+  // Rate limit: 5 per user per hour
+  const rl = await rateLimit(`submit-load:${user.id}`, 5, '1 h')
+  if (!rl.allowed) return rl.response!
+
   let body: any
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
 
@@ -18,6 +24,15 @@ export async function POST(req: NextRequest) {
 
   if (!dirtType || !photoUrl || !locationText || !truckType || !truckCount || !yardsEstimated || !haulDate || !idempotencyKey || !dispatchOrderId) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+  }
+
+  // Sanitize text inputs
+  const cleanLocation = sanitizeText(String(locationText)).slice(0, 500)
+  const cleanDirtType = sanitizeText(String(dirtType)).slice(0, 50)
+
+  // Validate photo URL
+  if (!validateUrl(String(photoUrl))) {
+    return NextResponse.json({ error: 'Invalid photo URL' }, { status: 400 })
   }
 
   const truckCountNum = parseInt(truckCount)
@@ -36,6 +51,18 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminSupabase()
 
+  // Validate dispatchOrderId exists and is active
+  const { data: dispatchOrder } = await admin
+    .from('dispatch_orders')
+    .select('id')
+    .eq('id', dispatchOrderId)
+    .eq('status', 'dispatching')
+    .single()
+
+  if (!dispatchOrder) {
+    return NextResponse.json({ error: 'This job is no longer available' }, { status: 404 })
+  }
+
   const { data: profile } = await admin.from('driver_profiles').select('trial_loads_used, tiers(slug, trial_load_limit)').eq('user_id', user.id).single()
   if (!profile) return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
 
@@ -49,15 +76,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, code: 'TOO_MANY_PENDING', message: 'You have 5 pending requests. Wait for approval before submitting more.' }, { status: 429 })
   }
 
-  const requiresExtraReview = dirtType === 'caliche'
+  const requiresExtraReview = cleanDirtType === 'caliche'
 
   const { data: loadReq, error } = await admin.from('load_requests').upsert({
     idempotency_key: idempotencyKey,
     driver_id: user.id,
     dispatch_order_id: dispatchOrderId,
-    dirt_type: dirtType,
+    dirt_type: cleanDirtType,
     photo_url: photoUrl,
-    location_text: String(locationText).slice(0, 500),
+    location_text: cleanLocation,
     truck_type: truckType,
     truck_count: truckCountNum,
     yards_estimated: yardsNum,
@@ -72,7 +99,6 @@ export async function POST(req: NextRequest) {
     await admin.from('driver_profiles').update({ trial_loads_used: profile.trial_loads_used + 1 }).eq('user_id', user.id)
   }
 
-  // Get driver profile for notification
   const { data: driverProfile } = await admin
     .from('driver_profiles')
     .select('first_name, last_name, phone')
@@ -83,17 +109,16 @@ export async function POST(req: NextRequest) {
     ? `${driverProfile.first_name || ''} ${driverProfile.last_name || ''}`.trim() || 'Unknown Driver'
     : 'Unknown Driver'
 
-  // Send admin email notification
   try {
     await sendLoadSubmissionEmail({
       driverName,
       driverPhone: driverProfile?.phone || 'N/A',
-      dirtType,
+      dirtType: cleanDirtType,
       truckType,
       truckCount: truckCountNum,
       yardsEstimated: yardsNum,
       haulDate,
-      locationText: String(locationText).slice(0, 500),
+      locationText: cleanLocation,
       loadId: loadReq.id,
       requiresExtraReview,
       submittedAt: new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }),

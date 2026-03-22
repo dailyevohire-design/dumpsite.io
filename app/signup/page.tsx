@@ -23,12 +23,17 @@ export default function SignupPage() {
       setError('Please fill in all required fields')
       return
     }
-    if (form.phone.replace(/\D/g, '').length < 10) {
+    const phoneDigits = form.phone.replace(/\D/g, '')
+    if (phoneDigits.length < 10 || phoneDigits.length > 11) {
       setError('Please enter a valid 10-digit phone number')
       return
     }
     if (form.password.length < 8) {
       setError('Password must be at least 8 characters')
+      return
+    }
+    if (!/\d/.test(form.password)) {
+      setError('Password must contain at least one number')
       return
     }
 
@@ -159,7 +164,19 @@ export default function SignupPage() {
           </div>
           <div style={{ marginBottom: '12px' }}>
             <label style={lbl}>Password *</label>
-            <input style={inp} type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} placeholder="At least 8 characters" />
+            <input style={inp} type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} placeholder="At least 8 characters + 1 number" />
+            {form.password && (
+              <div style={{ marginTop: '6px', display: 'flex', gap: '4px', alignItems: 'center' }}>
+                {[1,2,3].map(i => {
+                  const strength = form.password.length >= 12 && /\d/.test(form.password) && /[A-Z]/.test(form.password) ? 3
+                    : form.password.length >= 8 && /\d/.test(form.password) ? 2 : 1
+                  return <div key={i} style={{ height: '4px', flex: 1, borderRadius: '2px', background: i <= strength ? (strength === 3 ? '#27AE60' : strength === 2 ? '#F5A623' : '#E74C3C') : '#272B33' }} />
+                })}
+                <span style={{ fontSize: '10px', marginLeft: '6px', color: form.password.length >= 12 && /\d/.test(form.password) && /[A-Z]/.test(form.password) ? '#27AE60' : form.password.length >= 8 && /\d/.test(form.password) ? '#F5A623' : '#E74C3C', fontWeight: '700' }}>
+                  {form.password.length >= 12 && /\d/.test(form.password) && /[A-Z]/.test(form.password) ? 'Strong' : form.password.length >= 8 && /\d/.test(form.password) ? 'Medium' : 'Weak'}
+                </span>
+              </div>
+            )}
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
             <div>

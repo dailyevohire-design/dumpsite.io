@@ -8,6 +8,8 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [resetSent, setResetSent] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const router = useRouter()
 
   async function submit(e: any) {
@@ -31,6 +33,20 @@ export default function LoginPage() {
     setLoading(false)
   }
 
+  async function forgotPassword() {
+    if (!email) { setError('Enter your email above, then click Forgot Password'); return }
+    setResetting(true)
+    setError('')
+    try {
+      const supabase = createBrowserSupabase()
+      await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: `${window.location.origin}/login`,
+      })
+      setResetSent(true)
+    } catch { setError('Failed to send reset email. Try again.') }
+    setResetting(false)
+  }
+
   const inp = { background: '#1C1F24', border: '1px solid #272B33', color: '#E8E3DC', padding: '12px 14px', borderRadius: '9px', fontSize: '14px', width: '100%', outline: 'none', marginTop: '5px' }
   const lbl = { fontSize: '11px', fontWeight: '700' as const, letterSpacing: '0.07em', textTransform: 'uppercase' as const, color: '#606670' }
 
@@ -51,14 +67,25 @@ export default function LoginPage() {
           </div>
         )}
 
+        {resetSent && (
+          <div style={{ background: 'rgba(39,174,96,0.12)', border: '1px solid rgba(39,174,96,0.3)', borderRadius: '8px', padding: '10px 14px', marginBottom: '16px', color: '#27AE60', fontSize: '13px', fontWeight: '600' }}>
+            Check your email for a reset link
+          </div>
+        )}
+
         <form onSubmit={submit} style={{ background: '#111316', border: '1px solid #272B33', borderRadius: '12px', padding: '24px' }}>
           <div style={{ marginBottom: '14px' }}>
             <label style={lbl}>Email</label>
             <input style={inp} type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="mike@hauling.com" autoComplete="email" />
           </div>
-          <div style={{ marginBottom: '20px' }}>
+          <div style={{ marginBottom: '10px' }}>
             <label style={lbl}>Password</label>
             <input style={inp} type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" autoComplete="current-password" />
+          </div>
+          <div style={{ textAlign: 'right', marginBottom: '16px' }}>
+            <button type="button" onClick={forgotPassword} disabled={resetting} style={{ background: 'none', border: 'none', color: '#F5A623', cursor: 'pointer', fontSize: '12px', fontWeight: '700', padding: 0 }}>
+              {resetting ? 'Sending...' : 'Forgot Password?'}
+            </button>
           </div>
           <button type="submit" disabled={loading} style={{ width: '100%', background: '#F5A623', color: '#111', border: 'none', padding: '13px', borderRadius: '9px', fontWeight: '800', fontSize: '15px', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             {loading ? 'Signing In...' : 'Sign In'}

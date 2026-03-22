@@ -3,6 +3,7 @@ import { createAdminSupabase } from '@/lib/supabase'
 import { requireAdmin } from '@/lib/admin-auth'
 import { sendApprovalSMS } from '@/lib/sms'
 import { sendApprovalEmail } from '@/lib/email'
+import { rateLimit } from '@/lib/rate-limit'
 import crypto from 'crypto'
 
 function hashToken(token: string): string {
@@ -17,6 +18,9 @@ function makeShortId(): string {
 export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
   const auth = await requireAdmin()
   if (auth.error) return auth.error
+
+  const rl = await rateLimit(`approve:${auth.user.id}`, 50, '1 h')
+  if (!rl.allowed) return rl.response!
 
   const { id } = await context.params
   const supabase = createAdminSupabase()

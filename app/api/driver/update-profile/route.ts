@@ -2,15 +2,21 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
 import { encryptAddress } from '@/lib/crypto'
+import { rateLimit } from '@/lib/rate-limit'
+import { sanitizeText } from '@/lib/validation'
 
 const ALLOWED = new Set(['first_name','last_name','company_name','phone','truck_count','truck_type','bank_name','account_holder_name','routing_number','account_number','account_type','payment_method'])
 const FORBIDDEN = new Set(['user_id','tier_id','status','gps_score','rating','trial_loads_used','phone_verified','city_id','w9_url'])
 const ENCRYPT_FIELDS = new Set(['routing_number','account_number'])
+const TEXT_FIELDS = new Set(['first_name','last_name','company_name','phone','bank_name','account_holder_name'])
 
 export async function PATCH(req: NextRequest) {
   const supabase = await createServerSupabase()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const rl = await rateLimit(`update-profile:${user.id}`, 20, '1 h')
+  if (!rl.allowed) return rl.response!
 
   let body: any
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
@@ -27,6 +33,8 @@ export async function PATCH(req: NextRequest) {
       } catch {
         return NextResponse.json({ error: 'Encryption failed' }, { status: 500 })
       }
+    } else if (TEXT_FIELDS.has(key) && typeof value === 'string') {
+      updates[key] = sanitizeText(value).slice(0, 200)
     } else {
       updates[key] = value
     }

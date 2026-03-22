@@ -99,7 +99,8 @@ export default function MapPage() {
                 <div style={{fontWeight:'700',fontSize:'13px'}}>📍 {job.cities?.name}</div>
                 <div style={{fontWeight:'900',fontSize:'18px',color:'#F5A623'}}>${Math.round((job.driver_pay_cents||2000)/100)}</div>
               </div>
-              <div style={{fontSize:'11px',color:'#606670',marginBottom:'5px'}}>{job.yards_needed} yards needed</div>
+              <div style={{fontSize:'11px',color:'#606670',marginBottom:'3px'}}>{job.yards_needed} yards needed</div>
+              <div style={{fontSize:'10px',color:'#27AE60',marginBottom:'5px'}}>🚛 {job.truck_type_needed?.replace(/_/g,' ') || 'Tandem Only'}</div>
               <span style={{background:'rgba(39,174,96,0.12)',color:'#27AE60',border:'1px solid rgba(39,174,96,0.3)',padding:'2px 8px',borderRadius:'4px',fontSize:'10px',fontWeight:'800'}}>Open</span>
               {selected?.id===job.id&&<a href="/dashboard" style={{display:'block',marginTop:'8px',background:'#F5A623',color:'#111',padding:'8px',borderRadius:'7px',textAlign:'center',textDecoration:'none',fontWeight:'800',fontSize:'12px'}}>Claim This Job</a>}
             </div>

@@ -2,10 +2,14 @@ import { NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { requireAdmin } from '@/lib/admin-auth'
 import { sendRejectionSMS } from '@/lib/sms'
+import { rateLimit } from '@/lib/rate-limit'
 
 export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
   const auth = await requireAdmin()
   if (auth.error) return auth.error
+
+  const rl = await rateLimit(`reject:${auth.user.id}`, 50, '1 h')
+  if (!rl.allowed) return rl.response!
 
   const { id } = await context.params
 

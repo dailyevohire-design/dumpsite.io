@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
+import { rateLimit } from '@/lib/rate-limit'
 
 // Geofence thresholds
 const GEOFENCE_AUTO_APPROVE_KM = 1.0   // Within 1km = auto-approve
@@ -19,6 +20,9 @@ export async function POST(req: NextRequest) {
   const supabase = await createServerSupabase()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const rl = await rateLimit(`complete-load:${user.id}`, 10, '1 h')
+  if (!rl.allowed) return rl.response!
 
   let body: any
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
@@ -166,12 +170,16 @@ export async function POST(req: NextRequest) {
   const payoutCents = payPerLoadCents * numLoads
   const now = new Date().toISOString()
 
-  // 7. Mark load_request completed (or flagged)
+  // 7. Mark load_request completed with geofence data
   const { error: updateError } = await admin.from('load_requests').update({
     status: 'completed',
     completion_photo_url: completionPhotoUrl,
     truck_count: numLoads,
     payout_cents: payoutCents,
+    completion_latitude: typeof photoLat === 'number' ? photoLat : null,
+    completion_longitude: typeof photoLng === 'number' ? photoLng : null,
+    completion_distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
+    requires_manual_review: flagForReview,
     completed_at: now,
   }).eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
 
