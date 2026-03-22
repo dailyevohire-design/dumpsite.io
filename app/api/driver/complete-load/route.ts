@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
   // 1. Load load_request and validate ownership + status
   const { data: load, error: loadError } = await admin
     .from('load_requests')
-    .select('id, driver_id, status, dispatch_order_id')
+    .select('id, driver_id, status, dispatch_order_id, truck_count, payout_cents')
     .eq('id', loadId)
     .single()
 
