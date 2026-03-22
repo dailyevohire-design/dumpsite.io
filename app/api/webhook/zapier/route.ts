@@ -3,8 +3,13 @@ import { createAdminSupabase } from '@/lib/supabase'
 import { createDispatchOrder } from '@/lib/services/dispatch.service'
 
 export async function POST(req: NextRequest) {
+  // SECURITY: Validate webhook secret from env — never use a hardcoded fallback
+  const expectedSecret = process.env.ZAPIER_WEBHOOK_SECRET
+  if (!expectedSecret) {
+    return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 500 })
+  }
   const zapierSecret = req.headers.get('x-zapier-secret')
-  if (zapierSecret !== process.env.ZAPIER_WEBHOOK_SECRET) {
+  if (zapierSecret !== expectedSecret) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

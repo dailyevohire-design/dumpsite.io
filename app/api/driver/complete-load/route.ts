@@ -55,8 +55,8 @@ export async function POST(req: NextRequest) {
       .select('status')
       .eq('id', load.dispatch_order_id)
       .single()
-    if (dOrder && dOrder.status === 'cancelled') {
-      return NextResponse.json({ error: 'This job has been cancelled' }, { status: 409 })
+    if (dOrder && (dOrder.status === 'cancelled' || dOrder.status === 'completed')) {
+      return NextResponse.json({ error: 'This job is no longer active' }, { status: 409 })
     }
   }
 

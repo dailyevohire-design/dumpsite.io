@@ -134,8 +134,16 @@ export async function sendDispatchSMS(phone: string, opts: {
 }
 
 export async function sendAdminAlert(message: string) {
-  const { admin } = getTwilioConfig()
-  return sendSMS(admin, `DumpSite.io Alert: ${message}`, 'admin_alert')
+  // FIX: Wrap getTwilioConfig in try/catch — never crash the calling route
+  let adminPhone: string
+  try {
+    const config = getTwilioConfig()
+    adminPhone = config.admin
+  } catch (e: any) {
+    console.error('Twilio config error in sendAdminAlert:', e.message)
+    return { success: false, error: e.message }
+  }
+  return sendSMS(adminPhone, `DumpSite.io Alert: ${message}`, 'admin_alert')
 }
 
 export interface DispatchDriver {

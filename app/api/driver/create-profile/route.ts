@@ -8,25 +8,32 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  // FIX: Validate userId against authenticated session OR verify user exists in auth.users
-  // The body.userId is only accepted if the user was JUST created (signup flow) —
-  // we verify the userId exists in auth.users before allowing profile creation
+  // SECURITY: Get userId from authenticated session first
   let userId: string | null = null
-
   try {
     const supabase = await createServerSupabase()
     const { data, error } = await supabase.auth.getUser()
     if (!error && data.user) userId = data.user.id
   } catch {}
 
-  // If session auth worked, use that. If not, verify body.userId exists in auth.
+  // SECURITY: If no session, accept body.userId ONLY if it matches a real auth user
+  // AND no profile exists yet (signup race condition where session cookie isn't set yet)
   if (!userId && body.userId) {
     const admin = createAdminSupabase()
-    // Verify this user actually exists in auth — prevents arbitrary profile creation
     const { data: authUser } = await admin.auth.admin.getUserById(body.userId)
     if (authUser?.user) {
-      userId = body.userId
+      // Extra check: only allow if the user was created in the last 5 minutes (signup window)
+      const createdAt = new Date(authUser.user.created_at).getTime()
+      const fiveMinutesAgo = Date.now() - 5 * 60 * 1000
+      if (createdAt >= fiveMinutesAgo) {
+        userId = body.userId
+      }
     }
+  }
+
+  // SECURITY: If session auth succeeded but body.userId differs, reject (impersonation attempt)
+  if (userId && body.userId && body.userId !== userId) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
   if (!userId) {
@@ -40,7 +47,6 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminSupabase()
 
-  // Check if profile already exists
   const { data: existing } = await admin
     .from('driver_profiles')
     .select('user_id')
