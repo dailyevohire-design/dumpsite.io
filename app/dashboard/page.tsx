@@ -486,11 +486,10 @@ export default function DriverDashboard() {
     <div style={{background:'#0A0C0F',minHeight:'100vh',color:'#E8E3DC',fontFamily:'system-ui,sans-serif',overflowX:'hidden'}}>
       <div style={{background:'#080A0C',borderBottom:'1px solid #272B33',padding:'14px 20px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <span style={{fontFamily:'Georgia,serif',fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
-        <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
-          {tier && <span style={{background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}33`,padding:'4px 12px',borderRadius:'6px',fontSize:'11px',fontWeight:'800',textTransform:'uppercase'}}>{tier.name}</span>}
-          <NotificationBell />
-          <a href="/account" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',textDecoration:'none',fontSize:'13px'}}>My Account</a>
-          <button onClick={signOut} style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',cursor:'pointer',fontSize:'13px'}}>Sign Out</button>
+        <div style={{display:'flex',alignItems:'center',gap:'8px',flexShrink:0}}>
+          {tier && <span style={{background:`${tierColor}18`,color:tierColor,border:`1px solid ${tierColor}33`,padding:'4px 10px',borderRadius:'6px',fontSize:'10px',fontWeight:'800',textTransform:'uppercase'}}>{tier.name}</span>}
+          <a href="/account" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'6px 10px',borderRadius:'8px',textDecoration:'none',fontSize:'12px',whiteSpace:'nowrap'}}>Account</a>
+          <button onClick={signOut} style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'6px 10px',borderRadius:'8px',cursor:'pointer',fontSize:'12px',whiteSpace:'nowrap'}}>Sign Out</button>
         </div>
       </div>
 
