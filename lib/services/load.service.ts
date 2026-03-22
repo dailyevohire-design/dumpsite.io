@@ -86,9 +86,13 @@ export async function submitLoadRequest(driverId: string, input: {
     return { success: true, loadId: loadReq.id, status: 'approved', autoApproved: true, message: '✅ Approved! Check your SMS for a secure job link.' }
   }
 
-  await sendAdminAlert(
-    `New load request${requiresExtraReview ? ' ⚠️ CALICHE - needs extra review' : ''}. Review: ${process.env.NEXT_PUBLIC_APP_URL}/admin/approvals`
-  )
+  // FIX: Wrap in try/catch — SMS failure must not crash the request
+  try {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
+    await sendAdminAlert(
+      `New load request${requiresExtraReview ? ' ⚠️ CALICHE - needs extra review' : ''}. Review: ${appUrl}/admin/approvals`
+    )
+  } catch {}
 
   return {
     success: true, loadId: loadReq.id, status: 'pending', autoApproved: false,
@@ -201,12 +205,15 @@ export async function triggerApprovalFlow(loadId: string, driverId: string) {
   const accessUrl = shortIdStored
     ? `${appUrl}/j/${shortId}`
     : `${appUrl}/job-access/${rawToken}`
-  await sendApprovalSMS(profile.phone, {
-    accessUrl,
-    loadId,
-    payDollars,
-    cityName,
-  })
+  // FIX: Wrap SMS in try/catch — must not crash the calling route
+  try {
+    await sendApprovalSMS(profile.phone, {
+      accessUrl,
+      loadId,
+      payDollars,
+      cityName,
+    })
+  } catch {}
 
   await supabase.from('audit_logs').insert({
     action: 'job.approved_secure_link_issued',
@@ -258,8 +265,11 @@ export async function adminRejectLoad(loadId: string, adminUserId: string, reaso
     .eq('user_id', data.driver_id)
     .single()
 
+  // FIX: Wrap SMS in try/catch — rejection SMS failure must not crash the request
   if (profile?.phone) {
-    await sendRejectionSMS(profile.phone, { reason, loadId })
+    try {
+      await sendRejectionSMS(profile.phone, { reason, loadId })
+    } catch {}
   }
 
   await supabase.from('audit_logs').insert({

@@ -53,8 +53,17 @@ function getTwilioConfig() {
 }
 
 async function sendSMS(to: string, body: string, messageType: string, relatedId?: string) {
+  // FIX: Wrap getTwilioConfig in try/catch — never crash the calling route
+  let config: ReturnType<typeof getTwilioConfig>
+  try {
+    config = getTwilioConfig()
+  } catch (e: any) {
+    console.error('Twilio config error:', e.message)
+    return { success: false, error: e.message }
+  }
+
   const supabase = createAdminSupabase()
-  const { sid, key, secret, from } = getTwilioConfig()
+  const { sid, key, secret, from } = config
   try {
     const response = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
@@ -70,10 +79,12 @@ async function sendSMS(to: string, body: string, messageType: string, relatedId?
     const data = await response.json()
     if (data.error_code) {
       console.error('Twilio error:', data.message)
-      supabase.from('sms_log').insert({ to_phone: to, message_type: messageType, message_body: body, status: 'failed', related_id: relatedId }).then(() => {})
+      // FIX: await SMS log instead of dangling .then() — Vercel kills unawaited promises
+      await supabase.from('sms_log').insert({ to_phone: to, message_type: messageType, message_body: body, status: 'failed', related_id: relatedId })
       return { success: false, error: data.message }
     }
-    supabase.from('sms_log').insert({ to_phone: to, message_type: messageType, message_body: body, twilio_sid: data.sid, status: 'sent', related_id: relatedId }).then(() => {})
+    // FIX: await SMS log
+    await supabase.from('sms_log').insert({ to_phone: to, message_type: messageType, message_body: body, twilio_sid: data.sid, status: 'sent', related_id: relatedId })
     return { success: true, sid: data.sid }
   } catch (error: any) {
     console.error('SMS failed:', error.message)

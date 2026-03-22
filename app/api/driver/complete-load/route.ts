@@ -48,6 +48,18 @@ export async function POST(req: NextRequest) {
   if (load.driver_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   if (load.status !== 'approved') return NextResponse.json({ error: 'Load is not approved' }, { status: 409 })
 
+  // FIX: Verify dispatch order is still active (not cancelled/completed)
+  if (load.dispatch_order_id) {
+    const { data: dOrder } = await admin
+      .from('dispatch_orders')
+      .select('status')
+      .eq('id', load.dispatch_order_id)
+      .single()
+    if (dOrder && dOrder.status === 'cancelled') {
+      return NextResponse.json({ error: 'This job has been cancelled' }, { status: 409 })
+    }
+  }
+
   // 2. Load tracking session and validate job was started
   const { data: session } = await admin
     .from('job_tracking_sessions')
@@ -171,17 +183,34 @@ export async function POST(req: NextRequest) {
   const now = new Date().toISOString()
 
   // 7. Mark load_request completed with geofence data
-  const { error: updateError } = await admin.from('load_requests').update({
+  let updateError: any = null
+  const baseUpdate: Record<string, any> = {
     status: 'completed',
     completion_photo_url: completionPhotoUrl,
     truck_count: numLoads,
     payout_cents: payoutCents,
+    completed_at: now,
+  }
+
+  // Try with geofence columns first, fall back without if they don't exist yet
+  const geoUpdate = {
+    ...baseUpdate,
     completion_latitude: typeof photoLat === 'number' ? photoLat : null,
     completion_longitude: typeof photoLng === 'number' ? photoLng : null,
     completion_distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
     requires_manual_review: flagForReview,
-    completed_at: now,
-  }).eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
+  }
+
+  const { error: err1 } = await admin.from('load_requests').update(geoUpdate)
+    .eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
+
+  if (err1?.message?.includes('does not exist')) {
+    const { error: err2 } = await admin.from('load_requests').update(baseUpdate)
+      .eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
+    updateError = err2
+  } else {
+    updateError = err1
+  }
 
   if (updateError) return NextResponse.json({ error: 'Failed to mark complete' }, { status: 500 })
 

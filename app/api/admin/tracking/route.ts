@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
     const [sessionRes, tokenRes, codeRes, loadRes] = await Promise.all([
       supabase
         .from('job_tracking_sessions')
-        .select('*')
+        .select('id, load_request_id, driver_id, terms_accepted_at, location_permission_granted_at, job_started_at, address_revealed_at, arrived_at, completion_code_verified_at, created_at, last_ping_at')
         .eq('load_request_id', loadId)
         .order('created_at', { ascending: false })
         .limit(1)

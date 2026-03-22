@@ -63,6 +63,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'This job is no longer available' }, { status: 404 })
   }
 
+  // FIX: Prevent duplicate submissions to the same dispatch order by the same driver
+  const { count: existingForOrder } = await admin
+    .from('load_requests')
+    .select('id', { count: 'exact', head: true })
+    .eq('driver_id', user.id)
+    .eq('dispatch_order_id', dispatchOrderId)
+    .in('status', ['pending', 'approved'])
+
+  if ((existingForOrder || 0) > 0) {
+    return NextResponse.json({ error: 'You already have a submission for this job' }, { status: 409 })
+  }
+
   const { data: profile } = await admin.from('driver_profiles').select('trial_loads_used, tiers(slug, trial_load_limit)').eq('user_id', user.id).single()
   if (!profile) return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
 
