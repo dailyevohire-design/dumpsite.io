@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { createBrowserSupabase } from '@/lib/supabase'
 
 export default function SignupPage() {
-  const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle', userType: '', monthlyYardage: '' })
+  const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle', userType: '', monthlyYardage: '', referralCode: '' })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
@@ -71,6 +71,21 @@ export default function SignupPage() {
           })
         } catch {
           // Don't block signup if profile fails — auth was created
+        }
+
+        // Handle referral code if provided
+        if (form.referralCode.trim() && data.user) {
+          try {
+            const supabase = createBrowserSupabase()
+            const { data: referrer } = await supabase.from('driver_profiles').select('user_id').eq('referral_code', form.referralCode.trim().toUpperCase()).maybeSingle()
+            if (referrer) {
+              await fetch('/api/driver/create-referral', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ referrerId: referrer.user_id, referredId: data.user.id, referralCode: form.referralCode.trim().toUpperCase() })
+              })
+            }
+          } catch {}
         }
       }
       setSuccess(true)
@@ -194,6 +209,10 @@ export default function SignupPage() {
                 <option value="bottom_dump">Bottom Dump</option>
               </select>
             </div>
+          </div>
+          <div style={{ marginBottom: '16px' }}>
+            <label style={lbl}>Referral Code (optional)</label>
+            <input style={inp} value={form.referralCode} onChange={e => setForm({ ...form, referralCode: e.target.value.toUpperCase() })} placeholder="e.g. MIKE42" maxLength={8} />
           </div>
           <button type="submit" disabled={loading} style={{ width: '100%', background: '#F5A623', color: '#111', border: 'none', padding: '13px', borderRadius: '9px', fontWeight: '800', fontSize: '15px', cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             {loading ? 'Creating Account...' : 'Create Free Account'}

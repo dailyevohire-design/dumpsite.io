@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import LiveStats from '@/components/LiveStats'
 
 export default function Home() {
   return (
@@ -62,22 +63,7 @@ export default function Home() {
               Driver Sign Up — Free
             </Link>
           </div>
-          <div className="stats-grid">
-            <div className="stat-card" style={{background:'#111',border:'1px solid #1E1E1E',borderRadius:'8px',padding:'28px',display:'flex',flexDirection:'column',justifyContent:'flex-end'}}>
-              <div className="stat-num" style={{fontSize:'52px',fontWeight:'300',color:'#F5A623',letterSpacing:'-2px',marginBottom:'4px'}}>$30</div>
-              <div style={{fontSize:'11px',color:'#555',letterSpacing:'0.1em',fontFamily:'system-ui,sans-serif',textTransform:'uppercase'}}>Avg. per load delivered</div>
-            </div>
-            <div className="stats-bottom">
-              <div className="stat-card" style={{background:'#111',border:'1px solid #1E1E1E',borderRadius:'8px',padding:'24px',display:'flex',flexDirection:'column',justifyContent:'flex-end'}}>
-                <div className="stat-num" style={{fontSize:'38px',fontWeight:'300',color:'#27AE60',letterSpacing:'-1px',marginBottom:'4px'}}>47+</div>
-                <div style={{fontSize:'11px',color:'#555',letterSpacing:'0.1em',fontFamily:'system-ui,sans-serif',textTransform:'uppercase'}}>Active jobs</div>
-              </div>
-              <div className="stat-card" style={{background:'#111',border:'1px solid #1E1E1E',borderRadius:'8px',padding:'24px',display:'flex',flexDirection:'column',justifyContent:'flex-end'}}>
-                <div className="stat-num" style={{fontSize:'38px',fontWeight:'300',color:'#3A8AE8',letterSpacing:'-1px',marginBottom:'4px'}}>DFW</div>
-                <div style={{fontSize:'11px',color:'#555',letterSpacing:'0.1em',fontFamily:'system-ui,sans-serif',textTransform:'uppercase'}}>Coverage area</div>
-              </div>
-            </div>
-          </div>
+          <LiveStats />
         </div>
       </section>
 

@@ -1,0 +1,19 @@
+self.addEventListener('push', function(event) {
+  const data = event.data ? event.data.json() : {}
+  event.waitUntil(
+    self.registration.showNotification(data.title || 'DumpSite.io', {
+      body: data.body || 'New job available',
+      icon: '/logo.png',
+      badge: '/logo.png',
+      data: { url: data.url || '/dashboard' },
+      requireInteraction: true,
+      actions: [{ action: 'view', title: 'View Job' }]
+    })
+  )
+})
+
+self.addEventListener('notificationclick', function(event) {
+  event.notification.close()
+  const url = event.notification.data?.url || '/dashboard'
+  event.waitUntil(clients.openWindow(url))
+})

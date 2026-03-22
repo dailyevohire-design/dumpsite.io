@@ -134,6 +134,109 @@ function CompletionForm({ load, user, onComplete }: {
   )
 }
 
+// ── Push Notification Button ──────────────────────────────────────────────
+function PushNotificationButton() {
+  const [status, setStatus] = useState<'idle'|'enabled'|'denied'|'loading'>('idle')
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && localStorage.getItem('pushEnabled') === 'true') setStatus('enabled')
+    if (typeof Notification !== 'undefined' && Notification.permission === 'denied') setStatus('denied')
+  }, [])
+
+  async function enablePush() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) { setStatus('denied'); return }
+    setStatus('loading')
+    try {
+      const perm = await Notification.requestPermission()
+      if (perm !== 'granted') { setStatus('denied'); return }
+      const reg = await navigator.serviceWorker.ready
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || '',
+      })
+      await fetch('/api/driver/push-subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: sub.toJSON() }),
+      })
+      localStorage.setItem('pushEnabled', 'true')
+      setStatus('enabled')
+    } catch { setStatus('denied') }
+  }
+
+  if (status === 'enabled') return <div style={{background:'rgba(39,174,96,0.08)',border:'1px solid rgba(39,174,96,0.2)',borderRadius:'8px',padding:'8px 14px',marginBottom:'14px',fontSize:'12px',color:'#27AE60',fontWeight:'600'}}>✅ Job alerts enabled — you will be notified instantly when new jobs post</div>
+  if (status === 'denied') return <div style={{background:'rgba(245,166,35,0.08)',border:'1px solid rgba(245,166,35,0.2)',borderRadius:'8px',padding:'8px 14px',marginBottom:'14px',fontSize:'12px',color:'#F5A623'}}>Enable notifications in your browser settings to get instant job alerts</div>
+
+  return (
+    <button onClick={enablePush} disabled={status === 'loading'} style={{display:'block',width:'100%',background:'rgba(245,166,35,0.1)',border:'1px solid rgba(245,166,35,0.25)',color:'#F5A623',padding:'10px',borderRadius:'8px',cursor:'pointer',fontWeight:'700',fontSize:'13px',marginBottom:'14px'}}>
+      {status === 'loading' ? 'Enabling...' : 'Enable Job Alerts 🔔'}
+    </button>
+  )
+}
+
+// ── Earnings Tab ──────────────────────────────────────────────────────────
+function EarningsTab({ tier }: { tier: any }) {
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetch('/api/driver/earnings').then(r => r.json()).then(d => { setData(d); setLoading(false) }).catch(() => setLoading(false))
+  }, [])
+
+  if (loading) return <div style={{textAlign:'center',padding:'40px',color:'#606670'}}>Loading earnings...</div>
+  if (!data) return <div style={{textAlign:'center',padding:'40px',color:'#606670'}}>Failed to load earnings</div>
+
+  const maxWeek = Math.max(...data.weeks.map((w: any) => w.dollars), 1)
+
+  return (
+    <div>
+      {/* Stats Grid */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'16px'}}>
+        {[
+          { label: 'Total Earned', value: `$${data.totalDollars}` },
+          { label: 'This Week', value: `$${data.weekDollars}` },
+          { label: 'This Month', value: `$${data.monthDollars}` },
+          { label: 'Avg Per Load', value: `$${data.avgPerLoad}` },
+          { label: 'Loads Done', value: String(data.totalLoads) },
+          { label: 'Best Day', value: `$${data.bestDayDollars}` },
+        ].map((s, i) => (
+          <div key={i} style={{background:'#111316',border:'1px solid #272B33',borderRadius:'10px',padding:'14px',textAlign:'center'}}>
+            <div style={{fontSize:'10px',textTransform:'uppercase',letterSpacing:'0.07em',color:'#606670',fontWeight:'700',marginBottom:'4px'}}>{s.label}</div>
+            <div style={{fontSize:'22px',fontWeight:'900',color:'#F5A623'}}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Weekly Chart */}
+      <div style={{background:'#111316',border:'1px solid #272B33',borderRadius:'14px',padding:'20px',marginBottom:'16px'}}>
+        <div style={{fontWeight:'800',fontSize:'15px',marginBottom:'16px'}}>Weekly Earnings</div>
+        <div style={{display:'flex',alignItems:'flex-end',gap:'6px',height:'160px'}}>
+          {data.weeks.map((w: any, i: number) => (
+            <div key={i} style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-end',height:'100%'}}>
+              {w.dollars > 0 && <div style={{fontSize:'10px',color:'#F5A623',fontWeight:'700',marginBottom:'4px'}}>${w.dollars}</div>}
+              <div style={{width:'100%',background:w.isCurrent ? '#F5A623' : '#272B33',borderRadius:'4px 4px 0 0',minHeight:'4px',height:`${Math.max(4, (w.dollars / maxWeek) * 120)}px`,transition:'height 0.3s'}} />
+              <div style={{fontSize:'9px',color:'#606670',marginTop:'4px',whiteSpace:'nowrap'}}>{w.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Upgrade CTA — only for trial/hauler */}
+      {tier && (tier.slug === 'trial' || tier.slug === 'hauler') && (
+        <div style={{background:'#111316',border:'1px solid rgba(245,166,35,0.2)',borderRadius:'14px',padding:'20px'}}>
+          <div style={{fontWeight:'800',fontSize:'15px',marginBottom:'8px'}}>Upgrade Your Earning Potential</div>
+          <div style={{fontSize:'13px',color:'#606670',marginBottom:'12px'}}>
+            At your current pace, upgrading to Pro could earn you ~${Math.round(data.avgPerLoad * data.totalLoads * 1.15 / Math.max(1, data.totalLoads) * 4.3)} more per month.
+          </div>
+          <a href="/upgrade" style={{display:'block',background:'#F5A623',color:'#111',padding:'12px',borderRadius:'9px',textAlign:'center',textDecoration:'none',fontWeight:'800',fontSize:'14px'}}>
+            Upgrade Now
+          </a>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main Dashboard ─────────────────────────────────────────────────────────
 export default function DriverDashboard() {
   const [user, setUser] = useState<any>(null)
@@ -326,7 +429,7 @@ export default function DriverDashboard() {
       )}
 
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
-        {[['jobs','🏗️ Available Jobs'],['loads','🚚 My Loads'],['map','🗺️ Map View']].map(([tab, label]) => (
+        {[['jobs','🏗️ Available Jobs'],['loads','🚚 My Loads'],['earnings','💰 Earnings'],['map','🗺️ Map View']].map(([tab, label]) => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={{padding:'13px 24px',background:'transparent',border:'none',borderBottom:activeTab === tab ? '2px solid #F5A623' : '2px solid transparent',color:activeTab === tab ? '#F5A623' : '#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>{label}</button>
         ))}
       </div>
@@ -421,7 +524,8 @@ export default function DriverDashboard() {
               </div>
             ) : (
               <div>
-                <p style={{color:'#606670',fontSize:'14px',marginBottom:'16px'}}>Available delivery jobs in your area. You bring the dirt, we handle the rest.</p>
+                <p style={{color:'#606670',fontSize:'14px',marginBottom:'12px'}}>Available delivery jobs in your area. You bring the dirt, we handle the rest.</p>
+                <PushNotificationButton />
                 {loadingJobs ? (
                   <div style={{textAlign:'center',padding:'40px',color:'#606670'}}>Loading jobs...</div>
                 ) : jobs.length === 0 ? (
@@ -452,6 +556,8 @@ export default function DriverDashboard() {
             )}
           </div>
         )}
+
+        {activeTab === 'earnings' && <EarningsTab tier={tier} />}
 
         {activeTab === 'map' && (
           <div style={{paddingTop:'20px'}}>

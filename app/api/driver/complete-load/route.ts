@@ -236,6 +236,33 @@ export async function POST(req: NextRequest) {
     }
   })
 
+  // Track referral progress — increment loads for the referred driver
+  try {
+    const { data: referral } = await admin
+      .from('driver_referrals')
+      .select('id, referrer_id, loads_completed_by_referred, loads_required_to_qualify, status')
+      .eq('referred_id', user.id)
+      .eq('status', 'pending')
+      .single()
+
+    if (referral) {
+      const newCount = (referral.loads_completed_by_referred || 0) + 1
+      const updates: Record<string, any> = { loads_completed_by_referred: newCount }
+
+      if (newCount >= referral.loads_required_to_qualify) {
+        updates.status = 'qualified'
+        updates.qualified_at = new Date().toISOString()
+        // Alert admin about qualified referral
+        try {
+          const { sendAdminAlert } = await import('@/lib/sms')
+          await sendAdminAlert(`Referral qualified! Driver completed ${newCount} loads. Referrer earns $25 bonus.`)
+        } catch {}
+      }
+
+      await admin.from('driver_referrals').update(updates).eq('id', referral.id)
+    }
+  } catch {}
+
   return NextResponse.json({
     success: true,
     loadsDelivered: numLoads,

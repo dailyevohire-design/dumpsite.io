@@ -79,34 +79,54 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
 
   const haulDate = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
 
-  const sorted = [...drivers].sort((a, b) => {
-    const pa = (a.tiers as any)?.dispatch_priority || 4
-    const pb = (b.tiers as any)?.dispatch_priority || 4
-    return pa - pb
+  // Group drivers by tier for tiered dispatch
+  const tierCounts = { elite: 0, pro: 0, hauler: 0, trial: 0 }
+  const dispatchDrivers = drivers.map(d => {
+    const tierSlug = (d.tiers as any)?.slug || 'trial'
+    if (tierSlug in tierCounts) tierCounts[tierSlug as keyof typeof tierCounts]++
+    return {
+      phone: d.phone,
+      tierSlug,
+      dispatchId: order.id,
+      cityName: city.name,
+      yardsNeeded: input.yardsNeeded,
+      payDollars: input.priceQuotedCents ? Math.round(input.priceQuotedCents / 100) : 20,
+      haulDate
+    }
   })
-
-  const dispatchDrivers = sorted.map(d => ({
-    phone: d.phone,
-    tierSlug: (d.tiers as any)?.slug || 'trial',
-    dispatchId: order.id,
-    cityName: city.name,
-    yardsNeeded: input.yardsNeeded,
-    payDollars: input.priceQuotedCents ? Math.round(input.priceQuotedCents / 100) : 20,
-    haulDate
-  }))
 
   const { sent, failed } = await batchDispatchSMS(dispatchDrivers)
 
-  await supabase
-    .from('dispatch_orders')
-    .update({ drivers_notified: sent })
-    .eq('id', order.id)
+  // Update with tier-specific counts (columns may not exist yet — graceful fallback)
+  const tierUpdate: Record<string, any> = { drivers_notified: sent }
+  tierUpdate.elite_notified_count = tierCounts.elite
+  tierUpdate.pro_notified_count = tierCounts.pro
+  tierUpdate.hauler_notified_count = tierCounts.hauler
+  tierUpdate.trial_notified_count = tierCounts.trial
+
+  const { error: tierErr } = await supabase.from('dispatch_orders').update(tierUpdate).eq('id', order.id)
+  if (tierErr) {
+    // Fallback if tier columns don't exist yet
+    await supabase.from('dispatch_orders').update({ drivers_notified: sent }).eq('id', order.id)
+  }
+
+  // Send push notifications to drivers in this city
+  try {
+    const { sendPushToCity } = await import('../push-notifications')
+    const payDollars = input.priceQuotedCents ? Math.round(input.priceQuotedCents / 100) : 20
+    await sendPushToCity(
+      input.cityId,
+      `New Job in ${city.name}`,
+      `$${payDollars}/load · ${input.yardsNeeded} yards needed`,
+      'https://dumpsite.io/dashboard'
+    )
+  } catch {}
 
   await supabase.from('audit_logs').insert({
     action: 'dispatch_order.created',
     entity_type: 'dispatch_order',
     entity_id: order.id,
-    metadata: { drivers_notified: sent, city: city.name }
+    metadata: { drivers_notified: sent, city: city.name, tier_counts: tierCounts }
   })
 
   return { success: true, dispatchId: order.id, driversNotified: sent, cityName: city.name }

@@ -138,7 +138,7 @@ export default function AccountPage() {
         )}
 
         <div style={{display:'flex',gap:'8px',marginBottom:'24px',flexWrap:'wrap'}}>
-          {[['profile','👤 Profile'],['truck','🚛 Truck Info'],['payment','💳 Payment Info'],['documents','📄 Documents']].map(([sec,label])=>(
+          {[['profile','👤 Profile'],['truck','🚛 Truck Info'],['payment','💳 Payment Info'],['documents','📄 Documents'],['referral','🔗 Referrals']].map(([sec,label])=>(
             <button key={sec} onClick={()=>setActiveSection(sec)} style={{padding:'9px 18px',borderRadius:'8px',border:`1px solid ${activeSection===sec?'#F5A623':'#272B33'}`,background:activeSection===sec?'rgba(245,166,35,0.1)':'transparent',color:activeSection===sec?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.05em'}}>
               {label}
             </button>
@@ -287,6 +287,63 @@ export default function AccountPage() {
             </div>
           </div>
         )}
+        {activeSection==='referral'&&(
+          <ReferralSection profile={profile} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ReferralSection({ profile }: { profile: any }) {
+  const [referrals, setReferrals] = useState<any[]>([])
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!profile?.referral_code) return
+    const supabase = createBrowserSupabase()
+    supabase.from('driver_referrals').select('id, referred_id, status, loads_completed_by_referred, bonus_amount_cents, created_at')
+      .eq('referrer_id', profile.user_id)
+      .order('created_at', { ascending: false })
+      .then(({ data }) => setReferrals(data || []))
+  }, [profile])
+
+  const code = profile?.referral_code || 'N/A'
+  const qualified = referrals.filter(r => r.status === 'qualified' || r.status === 'paid').length
+  const earned = referrals.filter(r => r.status === 'qualified' || r.status === 'paid').reduce((s: number, r: any) => s + (r.bonus_amount_cents || 0), 0)
+
+  function copyLink() {
+    navigator.clipboard.writeText(`Join me on DumpSite.io — use code ${code} at signup. Get paid to dump dirt. dumpsite.io/signup`)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div>
+      <div style={{background:'#111316',border:'1px solid #272B33',borderRadius:'14px',padding:'20px',marginBottom:'16px',textAlign:'center'}}>
+        <div style={{fontSize:'11px',textTransform:'uppercase',letterSpacing:'0.07em',color:'#606670',fontWeight:'700',marginBottom:'8px'}}>Your Referral Code</div>
+        <div style={{fontSize:'36px',fontWeight:'900',color:'#F5A623',letterSpacing:'4px',fontFamily:'monospace',marginBottom:'8px'}}>{code}</div>
+        <div style={{fontSize:'13px',color:'#606670',marginBottom:'14px'}}>Share your code. When they complete 5 loads you both earn $25</div>
+        <button onClick={copyLink} style={{background:'#F5A623',color:'#111',border:'none',padding:'12px 24px',borderRadius:'9px',fontWeight:'800',fontSize:'14px',cursor:'pointer'}}>
+          {copied ? '✓ Copied!' : 'Copy Share Link'}
+        </button>
+      </div>
+
+      <div style={{background:'#111316',border:'1px solid #272B33',borderRadius:'14px',padding:'20px'}}>
+        <div style={{fontWeight:'800',fontSize:'15px',marginBottom:'12px'}}>Referral History</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'14px'}}>
+          <div style={{textAlign:'center'}}><div style={{fontSize:'10px',color:'#606670',textTransform:'uppercase',letterSpacing:'0.07em'}}>Referred</div><div style={{fontSize:'22px',fontWeight:'900',color:'#E8E3DC'}}>{referrals.length}</div></div>
+          <div style={{textAlign:'center'}}><div style={{fontSize:'10px',color:'#606670',textTransform:'uppercase',letterSpacing:'0.07em'}}>Qualified</div><div style={{fontSize:'22px',fontWeight:'900',color:'#27AE60'}}>{qualified}</div></div>
+          <div style={{textAlign:'center'}}><div style={{fontSize:'10px',color:'#606670',textTransform:'uppercase',letterSpacing:'0.07em'}}>Earned</div><div style={{fontSize:'22px',fontWeight:'900',color:'#F5A623'}}>${Math.round(earned / 100)}</div></div>
+        </div>
+        {referrals.length === 0 && <div style={{textAlign:'center',padding:'20px',color:'#606670',fontSize:'13px'}}>No referrals yet — share your code to start earning!</div>}
+        {referrals.map(r => (
+          <div key={r.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 0',borderTop:'1px solid #272B33',fontSize:'12px'}}>
+            <span style={{color:'#606670'}}>{new Date(r.created_at).toLocaleDateString()}</span>
+            <span style={{color:'#606670'}}>{r.loads_completed_by_referred}/5 loads</span>
+            <span style={{color:r.status==='qualified'?'#27AE60':r.status==='paid'?'#3A8AE8':'#F5A623',fontWeight:'700',textTransform:'uppercase'}}>{r.status}</span>
+          </div>
+        ))}
       </div>
     </div>
   )

@@ -65,6 +65,9 @@ export async function POST(req: NextRequest) {
   else if (digits.length === 11 && digits.startsWith('1')) normalizedPhone = '+' + digits
   else if (!phone.startsWith('+')) normalizedPhone = '+1' + digits
 
+  // Generate memorable referral code: first name + 2 random digits
+  const refCode = (firstName.trim().toUpperCase().slice(0, 4) + String(Math.floor(10 + Math.random() * 90))).replace(/[^A-Z0-9]/g, '')
+
   const { error: insertError } = await admin.from('driver_profiles').insert({
     user_id: userId,
     first_name: firstName.trim(),
@@ -79,6 +82,7 @@ export async function POST(req: NextRequest) {
     status: 'active',
     trial_loads_used: 0,
     gps_score: 85,
+    referral_code: refCode,
   })
 
   if (insertError) {
