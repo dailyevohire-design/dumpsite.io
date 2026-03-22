@@ -5,19 +5,19 @@ const CITIES = ['Arlington','Azle','Bonham','Carrollton','Carthage','Cedar Hill'
 
 export default function Home() {
   return (
-    <main style={{minHeight:'100vh',background:'#0A0A0A',color:'#F0EDE8',fontFamily:'"Georgia",serif'}}>
+    <main style={{minHeight:'100vh',background:'#0A0A0A',color:'#F0EDE8',fontFamily:'"Georgia",serif',overflowX:'hidden'}}>
       <style>{`
+        html,body{overflow-x:hidden;width:100%}
         .fade-in{opacity:0;transform:translateY(20px);animation:fadeUp .6s ease forwards}
         @keyframes fadeUp{to{opacity:1;transform:translateY(0)}}
         .fade-d1{animation-delay:.1s}.fade-d2{animation-delay:.2s}.fade-d3{animation-delay:.3s}.fade-d4{animation-delay:.4s}
-        @media(max-width:768px){.hero-split{grid-template-columns:1fr!important}.tier-grid{grid-template-columns:1fr 1fr!important}.proof-grid{grid-template-columns:1fr!important}.steps-2col{grid-template-columns:1fr!important}.city-tags{justify-content:center!important}.cta-split{grid-template-columns:1fr!important}.footer-links{flex-direction:column;align-items:center;gap:16px!important}}
+        @media(max-width:768px){.hero-split{grid-template-columns:1fr!important}.steps-2col{grid-template-columns:1fr!important}.city-tags{justify-content:center!important}.footer-links{flex-direction:column;align-items:center;gap:16px!important}.feature-grid{grid-template-columns:1fr!important}}
       `}</style>
 
       {/* Nav */}
       <nav style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'16px 24px',borderBottom:'1px solid #1A1A1A',position:'sticky',top:0,background:'#0A0A0A',zIndex:50}}>
         <span style={{fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
         <div style={{display:'flex',gap:'12px',alignItems:'center',fontFamily:'system-ui'}}>
-          <Link href="/dumpsite-request" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>POST A JOB</Link>
           <Link href="/signup" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>SIGN UP</Link>
           <Link href="/login" style={{background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'700',padding:'10px 18px',borderRadius:'4px'}}>SIGN IN</Link>
         </div>
@@ -35,8 +35,8 @@ export default function Home() {
           </div>
           <div>
             <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#3A8AE8',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'16px'}}>For Contractors</p>
-            <h1 style={{fontSize:'clamp(32px,4vw,52px)',fontWeight:'400',lineHeight:'1.1',marginBottom:'20px'}}>Need Dirt Gone?<br/><em style={{fontStyle:'italic',color:'#888'}}>We Handle It.</em></h1>
-            <p style={{fontSize:'15px',color:'#666',lineHeight:'1.7',marginBottom:'28px',fontFamily:'system-ui'}}>Post a job in 60 seconds. Drivers dispatched within the hour.</p>
+            <h1 style={{fontSize:'clamp(32px,4vw,52px)',fontWeight:'400',lineHeight:'1.1',marginBottom:'20px'}}>Need Dirt Moved?<br/><em style={{fontStyle:'italic',color:'#888'}}>We Handle It.</em></h1>
+            <p style={{fontSize:'15px',color:'#666',lineHeight:'1.7',marginBottom:'28px',fontFamily:'system-ui'}}>Post your import or export needs, or trucking needs. Drivers dispatched within the hour.</p>
             <Link href="/dumpsite-request" style={{display:'inline-block',background:'#3A8AE8',color:'#fff',textDecoration:'none',fontSize:'13px',fontWeight:'800',letterSpacing:'0.1em',padding:'16px 32px',borderRadius:'4px',textTransform:'uppercase',fontFamily:'system-ui'}}>Post a Job</Link>
             <p style={{fontSize:'12px',color:'#555',marginTop:'14px',fontFamily:'system-ui'}}>Trusted by excavation companies across DFW</p>
           </div>
@@ -97,53 +97,6 @@ export default function Home() {
               <div style={{width:'40px',height:'3px',background:f.c,marginBottom:'20px',borderRadius:'2px'}}/>
               <h3 style={{fontSize:'20px',fontWeight:'400',marginBottom:'12px'}}>{f.t}</h3>
               <p style={{fontSize:'14px',color:'#666',lineHeight:'1.7',fontFamily:'system-ui'}}>{f.d}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
-
-      {/* S5: Tier Cards */}
-      <section className="fade-in fade-d3" style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
-        <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'12px'}}>Driver Tiers</p>
-        <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'40px'}}>Choose your level.</h2>
-        <div className="tier-grid" style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'12px'}}>
-          {[
-            {name:'Trial',price:'Free',color:'#27AE60',features:['3 loads to try','Standard dispatch','SMS notifications'],cta:'Start Free'},
-            {name:'Hauler',price:'$49/mo',color:'#3A8AE8',features:['20 loads/month','Standard dispatch','SMS + email alerts'],cta:'Get Started'},
-            {name:'Pro',price:'$99/mo',color:'#F5A623',features:['Unlimited loads','Priority dispatch','Faster SMS','Dedicated support'],cta:'Go Pro',popular:true},
-            {name:'Elite',price:'$199/mo',color:'#8E44AD',features:['First access to every job','Highest pay rates','Dedicated support','VIP dispatch'],cta:'Go Elite'},
-          ].map(t=>(
-            <div key={t.name} style={{background:'#111',border:`1px solid ${t.popular?t.color:'#1A1A1A'}`,borderRadius:'10px',padding:'28px 20px',position:'relative'}}>
-              {t.popular&&<div style={{position:'absolute',top:'-10px',left:'50%',transform:'translateX(-50%)',background:t.color,color:'#0A0A0A',fontSize:'10px',fontWeight:'800',padding:'3px 12px',borderRadius:'4px',fontFamily:'system-ui',textTransform:'uppercase',letterSpacing:'0.05em'}}>Most Popular</div>}
-              <div style={{width:'10px',height:'10px',borderRadius:'50%',background:t.color,marginBottom:'16px'}}/>
-              <h3 style={{fontSize:'18px',fontWeight:'400',marginBottom:'4px'}}>{t.name}</h3>
-              <div style={{fontSize:'28px',fontWeight:'300',color:t.color,marginBottom:'20px',fontFamily:'system-ui'}}>{t.price}</div>
-              {t.features.map(f=><p key={f} style={{fontSize:'13px',color:'#888',marginBottom:'8px',fontFamily:'system-ui'}}>✓ {f}</p>)}
-              <Link href="/signup" style={{display:'block',textAlign:'center',marginTop:'20px',padding:'12px',borderRadius:'6px',textDecoration:'none',fontWeight:'700',fontSize:'13px',fontFamily:'system-ui',background:t.popular?t.color:'transparent',color:t.popular?'#0A0A0A':'#888',border:`1px solid ${t.popular?t.color:'#333'}`}}>{t.cta}</Link>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
-
-      {/* S6: Social Proof */}
-      <section className="fade-in fade-d4" style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
-        <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'12px'}}>Drivers Love Us</p>
-        <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'40px'}}>Real drivers. Real earnings.</h2>
-        <div className="proof-grid" style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'16px'}}>
-          {[
-            {name:'Marcus T.',city:'Dallas',quote:'Made $1,200 my first week. Best platform I\'ve used.',stars:5},
-            {name:'DeShawn R.',city:'Fort Worth',quote:'Jobs come straight to my phone. I don\'t chase work anymore.',stars:5},
-            {name:'Carlos M.',city:'Arlington',quote:'Upgraded to Pro after my first load. Worth every penny.',stars:5},
-          ].map(r=>(
-            <div key={r.name} style={{background:'#111',border:'1px solid #1A1A1A',borderRadius:'10px',padding:'28px'}}>
-              <div style={{color:'#F5A623',fontSize:'16px',marginBottom:'14px'}}>{'★'.repeat(r.stars)}</div>
-              <p style={{fontSize:'14px',color:'#999',lineHeight:'1.7',marginBottom:'16px',fontFamily:'system-ui',fontStyle:'italic'}}>"{r.quote}"</p>
-              <p style={{fontSize:'13px',fontWeight:'600',fontFamily:'system-ui'}}>{r.name}</p>
-              <p style={{fontSize:'12px',color:'#555',fontFamily:'system-ui'}}>{r.city}</p>
             </div>
           ))}
         </div>

@@ -483,7 +483,7 @@ export default function DriverDashboard() {
   if (!user) return <div style={{background:'#0A0C0F',minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',color:'#606670',fontFamily:'system-ui'}}>Loading...</div>
 
   return (
-    <div style={{background:'#0A0C0F',minHeight:'100vh',color:'#E8E3DC',fontFamily:'system-ui,sans-serif'}}>
+    <div style={{background:'#0A0C0F',minHeight:'100vh',color:'#E8E3DC',fontFamily:'system-ui,sans-serif',overflowX:'hidden'}}>
       <div style={{background:'#080A0C',borderBottom:'1px solid #272B33',padding:'14px 20px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <span style={{fontFamily:'Georgia,serif',fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
@@ -497,7 +497,6 @@ export default function DriverDashboard() {
       {profile && (
         <div style={{background:'#111316',borderBottom:'1px solid #272B33',padding:'10px 20px',display:'flex',gap:'20px',flexWrap:'wrap',alignItems:'center'}}>
           <div style={{fontWeight:'700',fontSize:'14px'}}>Hi, {profile.first_name}! 👋</div>
-          <div style={{fontSize:'12px',color:'#606670'}}>GPS Score: <span style={{color:'#F5A623',fontWeight:'700'}}>{profile.gps_score}%</span></div>
           <div style={{fontSize:'12px',color:'#606670'}}>Completed: <span style={{color:'#F5A623',fontWeight:'700'}}>{loads.filter((l: any) => l.status === 'completed').length} loads</span></div>
           {tier?.slug === 'trial' && (
             <div style={{marginLeft:'auto',background:'rgba(245,166,35,0.08)',border:'1px solid rgba(245,166,35,0.2)',borderRadius:'6px',padding:'4px 12px',fontSize:'11px',color:'#F5A623'}}>
@@ -514,7 +513,7 @@ export default function DriverDashboard() {
       )}
 
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
-        {[['jobs','🏗️ Jobs'],['loads','🚚 Loads'],['earnings','💰 Earn'],['leaderboard','🏆 Rank'],['map','🗺️ Map']].map(([tab, label]) => (
+        {[['jobs','🏗️ Jobs'],['loads','🚚 Loads'],['earnings','💰 Earn'],['map','🗺️ Map']].map(([tab, label]) => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={{padding:'13px 24px',background:'transparent',border:'none',borderBottom:activeTab === tab ? '2px solid #F5A623' : '2px solid transparent',color:activeTab === tab ? '#F5A623' : '#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>{label}</button>
         ))}
       </div>
@@ -643,8 +642,6 @@ export default function DriverDashboard() {
         )}
 
         {activeTab === 'earnings' && <EarningsTab tier={tier} />}
-
-        {activeTab === 'leaderboard' && <LeaderboardTab />}
 
         {activeTab === 'map' && (
           <div style={{paddingTop:'20px'}}>

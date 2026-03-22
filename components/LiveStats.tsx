@@ -22,7 +22,7 @@ export default function LiveStats() {
         <div className="stat-num" style={{fontSize:'52px',fontWeight:'300',color:'#F5A623',letterSpacing:'-2px',marginBottom:'4px',transition:'opacity 0.5s',opacity:animated?1:0}}>
           ${stats.avgPayDollars}
         </div>
-        <div style={{fontSize:'11px',color:'#555',letterSpacing:'0.1em',fontFamily:'system-ui,sans-serif',textTransform:'uppercase'}}>Avg. per load delivered</div>
+        <div style={{fontSize:'11px',color:'#555',letterSpacing:'0.1em',fontFamily:'system-ui,sans-serif',textTransform:'uppercase'}}>Avg pay per dump truck load</div>
       </div>
       <div className="stats-bottom">
         <div className="stat-card" style={{background:'#111',border:'1px solid #1E1E1E',borderRadius:'8px',padding:'24px',display:'flex',flexDirection:'column',justifyContent:'flex-end'}}>
