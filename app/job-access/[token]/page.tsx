@@ -18,6 +18,9 @@ export default function JobAccessPage() {
   const [locationError, setLocationError] = useState<string | null>(null)
   const pingInterval = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // Distance preview (shown before start)
+  const [distanceMiles, setDistanceMiles] = useState<number | null>(null)
+
   // Completion state
   const [arrived, setArrived] = useState(false)
   const [geoUnavailable, setGeoUnavailable] = useState(false)
@@ -65,6 +68,27 @@ export default function JobAccessPage() {
       if (watchRef.current !== null && navigator.geolocation) navigator.geolocation.clearWatch(watchRef.current)
     }
   }, [token])
+
+  // Calculate distance to delivery site on load (silent GPS — no prompt if already allowed)
+  useEffect(() => {
+    if (!jobData?.deliveryLat || !jobData?.deliveryLng) return
+    if (revealed) return // already started, don't need preview
+    if (!navigator.geolocation) return
+
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        const R = 3959 // earth radius in miles
+        const dLat = (jobData.deliveryLat - pos.coords.latitude) * Math.PI / 180
+        const dLng = (jobData.deliveryLng - pos.coords.longitude) * Math.PI / 180
+        const a = Math.sin(dLat / 2) ** 2 + Math.cos(pos.coords.latitude * Math.PI / 180) * Math.cos(jobData.deliveryLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2
+        const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        setDistanceMiles(Math.round(dist * 10) / 10)
+        setCurrentPos({ lat: pos.coords.latitude, lng: pos.coords.longitude })
+      },
+      () => {}, // silently fail — distance is a nice-to-have
+      { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
+    )
+  }, [jobData, revealed])
 
   // Geofence watching after reveal
   useEffect(() => {
@@ -595,8 +619,20 @@ export default function JobAccessPage() {
             </div>
           </div>
 
+          {distanceMiles !== null && (
+            <div style={{ background: 'rgba(59,138,232,0.08)', border: '1px solid rgba(59,138,232,0.25)', borderRadius: '10px', padding: '14px', marginBottom: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.07em', color: '#606670', fontWeight: '700' }}>Distance from you</div>
+                <div style={{ fontSize: '26px', fontWeight: '900', color: '#3A8AE8' }}>{distanceMiles} <span style={{ fontSize: '14px', fontWeight: '600' }}>miles</span></div>
+              </div>
+              <div style={{ fontSize: '11px', color: '#606670', textAlign: 'right', maxWidth: '140px' }}>
+                ~{Math.round(distanceMiles * 2)} min drive
+              </div>
+            </div>
+          )}
+
           <div style={{ background: 'rgba(245,166,35,0.07)', border: '1px solid rgba(245,166,35,0.18)', borderRadius: '9px', padding: '12px', fontSize: '13px', color: '#606670', marginBottom: '16px' }}>
-            Exact delivery address will be shown after you accept the terms and share your location.
+            Exact delivery address will be shown after you accept the terms below.
           </div>
 
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer', marginBottom: '16px', padding: '12px', background: termsAccepted ? 'rgba(39,174,96,0.05)' : '#0A0C0F', border: `1px solid ${termsAccepted ? 'rgba(39,174,96,0.3)' : '#272B33'}`, borderRadius: '10px' }}>

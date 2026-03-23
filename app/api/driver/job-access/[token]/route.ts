@@ -73,16 +73,20 @@ export async function GET(
 
   let cityName = 'DFW'
   let payDollars = 20
+  let deliveryLat: number | null = null
+  let deliveryLng: number | null = null
 
   if (load.dispatch_order_id) {
     const { data: order } = await admin
       .from('dispatch_orders')
-      .select('driver_pay_cents, cities(name)')
+      .select('driver_pay_cents, delivery_latitude, delivery_longitude, cities(name)')
       .eq('id', load.dispatch_order_id)
       .single()
     if (order) {
       payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 20
       cityName = (order.cities as any)?.name || cityName
+      deliveryLat = order.delivery_latitude
+      deliveryLng = order.delivery_longitude
     }
   }
 
@@ -112,5 +116,7 @@ export async function GET(
     address,
     instructions,
     alreadyStarted: !!accessToken.used_at,
+    deliveryLat,
+    deliveryLng,
   })
 }
