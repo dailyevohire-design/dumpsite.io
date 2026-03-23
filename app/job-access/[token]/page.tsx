@@ -181,12 +181,18 @@ export default function JobAccessPage() {
         callStartApi(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy)
       },
       () => {
-        // GPS denied/failed — still let the driver proceed (never block a driver from working)
-        setLocationError('Location unavailable — GPS tracking disabled for this job.')
-        callStartApi(null, null, null)
+        // GPS denied/failed — show instructions but still let them proceed
+        setLocationError('tap_allow')
+        setStarting(false)
       },
       { enableHighAccuracy: true, timeout: 10000 }
     )
+  }
+
+  function skipGpsAndStart() {
+    setStarting(true)
+    setLocationError(null)
+    callStartApi(null, null, null)
   }
 
   function handlePhoto(e: React.ChangeEvent<HTMLInputElement>) {
@@ -598,7 +604,27 @@ export default function JobAccessPage() {
             <span style={{ fontSize: '13px', color: '#E8E3DC', lineHeight: '1.5' }}>I agree not to contact or transact with the customer outside Dumpsite.io. Violation may result in removal and withheld payout.</span>
           </label>
 
-          {locationError && <div style={{ background: 'rgba(231,76,60,0.12)', border: '1px solid rgba(231,76,60,0.3)', borderRadius: '8px', padding: '10px 14px', marginBottom: '12px', color: '#E74C3C', fontSize: '13px' }}>{locationError}</div>}
+          {locationError === 'tap_allow' && (
+            <div style={{ background: 'rgba(245,166,35,0.1)', border: '1px solid rgba(245,166,35,0.3)', borderRadius: '10px', padding: '14px', marginBottom: '12px' }}>
+              <div style={{ fontWeight: '800', fontSize: '14px', color: '#F5A623', marginBottom: '6px' }}>Location Permission Needed</div>
+              <div style={{ fontSize: '13px', color: '#E8E3DC', lineHeight: '1.5', marginBottom: '10px' }}>
+                GPS tracking verifies your delivery and speeds up your payout. Tap the button below, then tap <strong>"Allow"</strong> when your phone asks.
+              </div>
+              <div style={{ fontSize: '12px', color: '#606670', marginBottom: '12px' }}>
+                If you already denied it: tap the lock icon in your address bar &gt; Permissions &gt; Location &gt; Allow, then retry.
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={startJob} style={{ flex: 2, background: '#F5A623', color: '#111', border: 'none', padding: '12px', borderRadius: '8px', fontWeight: '800', fontSize: '14px', cursor: 'pointer' }}>
+                  Retry with Location
+                </button>
+                <button onClick={skipGpsAndStart} style={{ flex: 1, background: 'transparent', color: '#606670', border: '1px solid #272B33', padding: '12px', borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer' }}>
+                  Skip GPS
+                </button>
+              </div>
+            </div>
+          )}
+
+          {locationError && locationError !== 'tap_allow' && <div style={{ background: 'rgba(231,76,60,0.12)', border: '1px solid rgba(231,76,60,0.3)', borderRadius: '8px', padding: '10px 14px', marginBottom: '12px', color: '#E74C3C', fontSize: '13px' }}>{locationError}</div>}
 
           <button onClick={startJob} disabled={!termsAccepted || starting} style={{
             width: '100%', background: termsAccepted ? '#F5A623' : '#1C1F24', color: termsAccepted ? '#111' : '#606670', border: 'none', padding: '15px', borderRadius: '10px',
