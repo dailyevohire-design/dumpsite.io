@@ -151,27 +151,41 @@ export default function JobAccessPage() {
     )
   }, [])
 
+  function callStartApi(lat: number | null, lng: number | null, accuracy: number | null) {
+    fetch(`/api/driver/job-access/${token}/start`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ acceptedTerms: true, lat, lng, accuracy }),
+    }).then(r => r.json()).then(data => {
+      if (data.error) { setError(data.error) }
+      else {
+        setRevealedData(data); setRevealed(true); trackEvent('address_revealed', { city: data.cityName })
+        if (jobData?.loadId) { sendPing(jobData.loadId); pingInterval.current = setInterval(() => sendPing(jobData.loadId), 20000) }
+      }
+      setStarting(false)
+    }).catch(() => { setError('Failed to start job'); setStarting(false) })
+  }
+
   function startJob() {
     if (!termsAccepted) return
     setStarting(true); setLocationError(null)
-    if (!navigator.geolocation) { setLocationError('Location permission is required to unlock job details.'); setStarting(false); return }
+
+    if (!navigator.geolocation) {
+      // No geolocation API — proceed without GPS (will be flagged for review but not blocked)
+      callStartApi(null, null, null)
+      return
+    }
+
     navigator.geolocation.getCurrentPosition(
       pos => {
         setCurrentPos({ lat: pos.coords.latitude, lng: pos.coords.longitude })
-        fetch(`/api/driver/job-access/${token}/start`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ acceptedTerms: true, lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
-        }).then(r => r.json()).then(data => {
-          if (data.error) { setError(data.error) }
-          else {
-            setRevealedData(data); setRevealed(true); trackEvent('address_revealed', { city: data.cityName })
-            if (jobData?.loadId) { sendPing(jobData.loadId); pingInterval.current = setInterval(() => sendPing(jobData.loadId), 20000) }
-          }
-          setStarting(false)
-        }).catch(() => { setError('Failed to start job'); setStarting(false) })
+        callStartApi(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy)
       },
-      () => { setLocationError('Location permission is required to unlock job details.'); setStarting(false) },
-      { enableHighAccuracy: true, timeout: 15000 }
+      () => {
+        // GPS denied/failed — still let the driver proceed (never block a driver from working)
+        setLocationError('Location unavailable — GPS tracking disabled for this job.')
+        callStartApi(null, null, null)
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
     )
   }
 

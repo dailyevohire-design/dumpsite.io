@@ -36,9 +36,9 @@ export async function POST(
     return NextResponse.json({ error: 'You must accept the terms to proceed' }, { status: 400 })
   }
 
-  if (typeof lat !== 'number' || typeof lng !== 'number') {
-    return NextResponse.json({ error: 'Location data is required' }, { status: 400 })
-  }
+  // GPS is optional — driver should never be blocked from working
+  // Missing GPS will be flagged for review by fraud detection
+  const hasLocation = typeof lat === 'number' && typeof lng === 'number'
 
   const admin = createAdminSupabase()
 
@@ -104,13 +104,15 @@ export async function POST(
       })
       .eq('id', session.id)
 
-    // Insert first location ping
-    await admin.from('job_location_pings').insert({
-      tracking_session_id: session.id,
-      lat,
-      lng,
-      accuracy_meters: typeof accuracy === 'number' ? accuracy : null,
-    })
+    // Insert first location ping (only if GPS available)
+    if (hasLocation) {
+      await admin.from('job_location_pings').insert({
+        tracking_session_id: session.id,
+        lat,
+        lng,
+        accuracy_meters: typeof accuracy === 'number' ? accuracy : null,
+      })
+    }
   }
 
   // Mark token as used
@@ -150,7 +152,7 @@ export async function POST(
     action: 'job.terms_accepted_address_revealed',
     entity_type: 'load_request',
     entity_id: accessToken.load_request_id,
-    metadata: { driver_id: user.id, lat, lng }
+    metadata: { driver_id: user.id, lat: lat || null, lng: lng || null, gps_available: hasLocation }
   })
 
   return NextResponse.json({
