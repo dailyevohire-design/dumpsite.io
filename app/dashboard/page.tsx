@@ -216,7 +216,7 @@ function PushNotificationButton() {
 }
 
 // ── Earnings Tab ──────────────────────────────────────────────────────────
-function EarningsTab({ tier }: { tier: any }) {
+function EarningsTab({ tier, todayEarnings, todayLoads }: { tier: any; todayEarnings: number; todayLoads: number }) {
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
 
@@ -231,14 +231,37 @@ function EarningsTab({ tier }: { tier: any }) {
 
   return (
     <div>
+      {/* TODAY — Hero Card (Task 4) */}
+      <div style={{background:'#111316',border:'1px solid rgba(39,174,96,0.3)',borderRadius:'14px',padding:'20px',marginBottom:'16px',textAlign:'center'}}>
+        <div style={{fontSize:'10px',textTransform:'uppercase',letterSpacing:'0.07em',color:'#606670',fontWeight:'700',marginBottom:'8px'}}>Today</div>
+        <div style={{fontSize:'40px',fontWeight:'900',color:'#27AE60',lineHeight:1,marginBottom:'6px'}}>${todayEarnings}</div>
+        {todayLoads > 0
+          ? <div style={{fontSize:'14px',color:'#606670'}}>${todayEarnings} earned today · {todayLoads} load{todayLoads > 1 ? 's' : ''}</div>
+          : <div style={{fontSize:'14px',color:'#606670'}}>Nothing yet today — your first load is waiting</div>
+        }
+      </div>
+
+      {/* Month Stats */}
+      <div style={{background:'#111316',border:'1px solid #272B33',borderRadius:'14px',padding:'16px',marginBottom:'16px'}}>
+        <div style={{fontSize:'10px',textTransform:'uppercase',letterSpacing:'0.07em',color:'#606670',fontWeight:'700',marginBottom:'10px'}}>This Month</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+          <div style={{textAlign:'center'}}>
+            <div style={{fontSize:'28px',fontWeight:'900',color:'#F5A623'}}>${data.monthDollars}</div>
+            <div style={{fontSize:'11px',color:'#606670'}}>Earned</div>
+          </div>
+          <div style={{textAlign:'center'}}>
+            <div style={{fontSize:'28px',fontWeight:'900',color:'#F5A623'}}>{data.totalLoads}</div>
+            <div style={{fontSize:'11px',color:'#606670'}}>Loads Done</div>
+          </div>
+        </div>
+      </div>
+
       {/* Stats Grid */}
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'16px'}}>
         {[
           { label: 'Total Earned', value: `$${data.totalDollars}` },
           { label: 'This Week', value: `$${data.weekDollars}` },
-          { label: 'This Month', value: `$${data.monthDollars}` },
           { label: 'Avg Per Load', value: `$${data.avgPerLoad}` },
-          { label: 'Loads Done', value: String(data.totalLoads) },
           { label: 'Best Day', value: `$${data.bestDayDollars}` },
         ].map((s, i) => (
           <div key={i} style={{background:'#111316',border:'1px solid #272B33',borderRadius:'10px',padding:'14px',textAlign:'center'}}>
@@ -341,6 +364,11 @@ export default function DriverDashboard() {
   const submitResultTimer = useRef<ReturnType<typeof setTimeout>|null>(null)
   const [form, setForm] = useState({ dirtType:'clean_fill', locationText:'', truckType:'tandem_axle', truckCount:'1', yardsEstimated:'', haulDate:'' })
   const router = useRouter()
+  // Task 3 — Earnings state
+  const [todayEarnings, setTodayEarnings] = useState<number>(0)
+  const [todayLoads, setTodayLoads] = useState<number>(0)
+  const [earningsUpdated, setEarningsUpdated] = useState(false)
+  const [earningsRefreshing, setEarningsRefreshing] = useState(false)
 
   function showResult(result: {success:boolean,message:string}, duration = 6000) {
     if (submitResultTimer.current) clearTimeout(submitResultTimer.current)
@@ -377,15 +405,46 @@ export default function DriverDashboard() {
 
   useEffect(() => {
     const supabase = createBrowserSupabase()
+    let realtimeChannel: ReturnType<typeof supabase.channel> | null = null
+
     supabase.auth.getUser().then(({ data }) => {
       if (!data.user) { router.push('/login'); return }
       setUser(data.user)
       supabase.from('driver_profiles').select('*, tiers(name,slug,pay_boost_pct,trial_load_limit)').eq('user_id', data.user.id).single().then(({ data: p }) => setProfile(p))
       fetchJobs(supabase)
       fetchLoads(supabase, data.user.id)
+
+      // Task 3A — Fetch today earnings
+      fetch('/api/driver/earnings-today')
+        .then(r => r.json())
+        .then(d => { setTodayEarnings(d.todayEarnings || 0); setTodayLoads(d.todayLoads || 0) })
+        .catch(() => {})
+
+      // Task 3C — Supabase Realtime on earnings
+      realtimeChannel = supabase
+        .channel('earnings-realtime')
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'load_requests',
+          filter: `driver_id=eq.${data.user.id}`
+        }, (payload: any) => {
+          if (payload.new.status === 'completed') {
+            fetch('/api/driver/earnings-today')
+              .then(r => r.json())
+              .then(d => {
+                setTodayEarnings(d.todayEarnings || 0)
+                setTodayLoads(d.todayLoads || 0)
+                setEarningsUpdated(true)
+                setTimeout(() => setEarningsUpdated(false), 3000)
+              })
+              .catch(() => {})
+          }
+        })
+        .subscribe()
     })
 
-    // ✅ Refresh jobs every 60 seconds so stale jobs don't show as available
+    // Refresh jobs every 60 seconds so stale jobs don't show as available
     const interval = setInterval(() => {
       fetchJobs()
     }, 60000)
@@ -393,6 +452,7 @@ export default function DriverDashboard() {
     return () => {
       clearInterval(interval)
       if (submitResultTimer.current) clearTimeout(submitResultTimer.current)
+      if (realtimeChannel) supabase.removeChannel(realtimeChannel)
     }
   }, [])
 
@@ -497,6 +557,13 @@ export default function DriverDashboard() {
         <div style={{background:'#111316',borderBottom:'1px solid #272B33',padding:'10px 20px',display:'flex',gap:'20px',flexWrap:'wrap',alignItems:'center'}}>
           <div style={{fontWeight:'700',fontSize:'14px'}}>Hi, {profile.first_name}! 👋</div>
           <div style={{fontSize:'12px',color:'#606670'}}>Completed: <span style={{color:'#F5A623',fontWeight:'700'}}>{loads.filter((l: any) => l.status === 'completed').length} loads</span></div>
+          <div style={{fontSize:'12px',color:'#606670'}}>
+            Today: {todayEarnings > 0
+              ? <><span style={{color:'#27AE60',fontWeight:'700'}}>${todayEarnings}</span>{todayLoads > 0 && <span style={{color:'#606670'}}> · {todayLoads} load{todayLoads > 1 ? 's' : ''}</span>}</>
+              : <span style={{color:'#606670'}}>$0 — get hauling!</span>
+            }
+            {earningsUpdated && <span style={{color:'#27AE60',marginLeft:'8px',fontSize:'10px',fontWeight:'600',opacity:0.8,transition:'opacity 0.5s'}}>● Updated just now</span>}
+          </div>
           {tier?.slug === 'trial' && (
             <div style={{marginLeft:'auto',background:'rgba(245,166,35,0.08)',border:'1px solid rgba(245,166,35,0.2)',borderRadius:'6px',padding:'4px 12px',fontSize:'11px',color:'#F5A623'}}>
               Trial: {profile.trial_loads_used}/{tier.trial_load_limit} loads used
@@ -513,7 +580,18 @@ export default function DriverDashboard() {
 
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
         {[['jobs','🏗️ Jobs'],['loads','🚚 Loads'],['earnings','💰 Earn'],['map','🗺️ Map']].map(([tab, label]) => (
-          <button key={tab} onClick={() => setActiveTab(tab)} style={{padding:'13px 24px',background:'transparent',border:'none',borderBottom:activeTab === tab ? '2px solid #F5A623' : '2px solid transparent',color:activeTab === tab ? '#F5A623' : '#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>{label}</button>
+          <button key={tab} onClick={() => {
+            setActiveTab(tab)
+            // Task 3D — Refetch earnings on tab switch
+            if (tab === 'earnings') {
+              setEarningsRefreshing(true)
+              fetch('/api/driver/earnings-today')
+                .then(r => r.json())
+                .then(d => { setTodayEarnings(d.todayEarnings || 0); setTodayLoads(d.todayLoads || 0) })
+                .catch(() => {})
+                .finally(() => setTimeout(() => setEarningsRefreshing(false), 300))
+            }
+          }} style={{padding:'13px 24px',background:'transparent',border:'none',borderBottom:activeTab === tab ? '2px solid #F5A623' : '2px solid transparent',color:activeTab === tab ? '#F5A623' : '#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>{label}</button>
         ))}
       </div>
 
@@ -640,7 +718,7 @@ export default function DriverDashboard() {
           </div>
         )}
 
-        {activeTab === 'earnings' && <EarningsTab tier={tier} />}
+        {activeTab === 'earnings' && <EarningsTab tier={tier} todayEarnings={todayEarnings} todayLoads={todayLoads} />}
 
         {activeTab === 'map' && (
           <div style={{paddingTop:'20px'}}>

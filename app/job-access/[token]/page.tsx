@@ -26,10 +26,21 @@ export default function JobAccessPage() {
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [completed, setCompleted] = useState(false)
   const [completedData, setCompletedData] = useState<any>(null)
-  const [countdown, setCountdown] = useState(10)
   const [currentPos, setCurrentPos] = useState<{ lat: number; lng: number } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const watchRef = useRef<number | null>(null)
+
+  // Submission overlay state (Task 6)
+  const [overlayVisible, setOverlayVisible] = useState(false)
+  const [overlayText, setOverlayText] = useState('Submitting your delivery...')
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [compressing, setCompressing] = useState(false)
+  const [fadeIn, setFadeIn] = useState(false)
+
+  // Post-completion earnings state (Task 2)
+  const [earnings, setEarnings] = useState<any>(null)
+  const [nextJob, setNextJob] = useState<any>(null)
+  const [animatedAmount, setAnimatedAmount] = useState(0)
 
   useEffect(() => {
     fetch(`/api/driver/job-access/${token}`)
@@ -58,7 +69,6 @@ export default function JobAccessPage() {
     if (!revealed || !revealedData) return
     if (!navigator.geolocation) { setGeoUnavailable(true); return }
 
-    // Geocode delivery address to get target coords
     const addr = revealedData.address
     if (!addr) { setGeoUnavailable(true); return }
 
@@ -90,15 +100,42 @@ export default function JobAccessPage() {
     )
   }, [revealed, revealedData])
 
-  // Auto-redirect countdown after completion
+  // Fetch earnings + next job after completion
   useEffect(() => {
     if (!completed) return
-    const i = setInterval(() => setCountdown(c => {
-      if (c <= 1) { router.push('/dashboard'); return 0 }
-      return c - 1
-    }), 1000)
-    return () => clearInterval(i)
-  }, [completed, router])
+    fetch('/api/driver/earnings-today')
+      .then(r => r.json())
+      .then(data => setEarnings(data))
+      .catch(() => {})
+    fetch('/api/driver/jobs')
+      .then(r => r.json())
+      .then(data => {
+        const jobs = data.jobs || []
+        if (jobs.length > 0) setNextJob(jobs[0])
+      })
+      .catch(() => {})
+  }, [completed])
+
+  // Animated earnings counter
+  useEffect(() => {
+    if (!completed || !earnings) return
+    const target = earnings.todayEarnings || 0
+    if (target === 0) { setAnimatedAmount(0); return }
+    const steps = 20
+    const stepTime = 50
+    let current = 0
+    const increment = target / steps
+    const timer = setInterval(() => {
+      current += increment
+      if (current >= target) {
+        setAnimatedAmount(target)
+        clearInterval(timer)
+      } else {
+        setAnimatedAmount(Math.round(current))
+      }
+    }, stepTime)
+    return () => clearInterval(timer)
+  }, [completed, earnings])
 
   const sendPing = useCallback((loadId: string) => {
     if (!navigator.geolocation) return
@@ -136,13 +173,14 @@ export default function JobAccessPage() {
     )
   }
 
-  function handlePhoto(e: any) {
+  function handlePhoto(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     if (!file.type.startsWith('image/')) { setSubmitError('Please select an image file'); return }
 
     // Compress if over 5MB
     if (file.size > 5 * 1024 * 1024) {
+      setCompressing(true)
       const img = new Image()
       img.onload = () => {
         const canvas = document.createElement('canvas')
@@ -160,7 +198,8 @@ export default function JobAccessPage() {
             setPhoto(compressed)
             setPhotoPreview(URL.createObjectURL(compressed))
           }
-        }, 'image/jpeg', 0.8)
+          setCompressing(false)
+        }, 'image/jpeg', 0.82)
       }
       img.src = URL.createObjectURL(file)
     } else {
@@ -175,18 +214,43 @@ export default function JobAccessPage() {
   async function submitCompletion() {
     if (!photo || !jobData?.loadId) return
     setSubmitting(true); setSubmitError(null)
+    setOverlayVisible(true)
+    setOverlayText('Submitting your delivery...')
+    setUploadProgress(0)
 
     try {
-      // Upload photo
       const supabase = createBrowserSupabase()
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user) { setSubmitError('Please log in and try again'); setSubmitting(false); return }
+      if (!user) { setSubmitError('Please log in and try again'); setSubmitting(false); setOverlayVisible(false); return }
 
+      // Upload photo with XHR for progress tracking
+      setOverlayText('Uploading photo...')
       const ext = photo.name.split('.').pop() || 'jpg'
-      const path = `${user.id}/completions/${Date.now()}.${ext}`
-      const { error: uploadErr } = await supabase.storage.from('dirt-photos').upload(path, photo, { upsert: false })
-      if (uploadErr) { setSubmitError('Photo upload failed — tap to retry'); setSubmitting(false); return }
-      const { data: urlData } = supabase.storage.from('dirt-photos').getPublicUrl(path)
+      const filePath = `${user.id}/completions/${Date.now()}.${ext}`
+
+      const { data: { session } } = await supabase.auth.getSession()
+      const uploadUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/dirt-photos/${filePath}`
+
+      const uploadSuccess = await new Promise<boolean>((resolve) => {
+        const xhr = new XMLHttpRequest()
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            setUploadProgress(Math.round((e.loaded / e.total) * 100))
+          }
+        })
+        xhr.addEventListener('load', () => resolve(xhr.status >= 200 && xhr.status < 300))
+        xhr.addEventListener('error', () => resolve(false))
+        xhr.open('POST', uploadUrl)
+        xhr.setRequestHeader('Authorization', `Bearer ${session?.access_token || ''}`)
+        xhr.setRequestHeader('x-upsert', 'false')
+        xhr.send(photo)
+      })
+
+      if (!uploadSuccess) { setSubmitError('Photo upload failed — tap to retry'); setSubmitting(false); setOverlayVisible(false); return }
+
+      const { data: urlData } = supabase.storage.from('dirt-photos').getPublicUrl(filePath)
+      setOverlayText('Verifying delivery...')
+      setUploadProgress(100)
 
       // Submit completion
       const res = await fetch('/api/driver/complete-load', {
@@ -200,18 +264,32 @@ export default function JobAccessPage() {
         }),
       })
       const data = await res.json()
-      if (!data.success) { setSubmitError(data.error || 'Submission failed — try again'); setSubmitting(false); return }
+      if (!data.success) { setSubmitError(data.error || 'Submission failed — try again'); setSubmitting(false); setOverlayVisible(false); return }
 
-      setCompleted(true)
+      // Success — fade out overlay, fade in success screen
       setCompletedData({ loads: loadsSelected, total: data.totalPayDollars })
+      setOverlayVisible(false)
+      setFadeIn(true)
+      setCompleted(true)
     } catch {
       setSubmitError('Network error — try again')
+      setOverlayVisible(false)
     }
     setSubmitting(false)
   }
 
-  function resetForm() {
-    setPhoto(null); setPhotoPreview(null); setLoadsSelected(1); setCompleted(false); setCompletedData(null); setSubmitError(null); setCountdown(10)
+  function resetForAnotherTrip() {
+    setCompleted(false)
+    setCompletedData(null)
+    setPhoto(null)
+    setPhotoPreview(null)
+    setLoadsSelected(1)
+    setSubmitError(null)
+    setFadeIn(false)
+    setEarnings(null)
+    setNextJob(null)
+    setAnimatedAmount(0)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const cs: React.CSSProperties = { background: '#0A0C0F', minHeight: '100vh', color: '#E8E3DC', fontFamily: 'system-ui, sans-serif', padding: '20px', overflowX: 'hidden' }
@@ -233,27 +311,98 @@ export default function JobAccessPage() {
     const payPerLoad = revealedData.payDollars || 20
     const totalPay = payPerLoad * loadsSelected
 
-    // ── SUCCESS STATE ──
+    // ── SUCCESS STATE — Redesigned (Task 2) ──
     if (completed && completedData) {
       return (
-        <div style={{ ...cs, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ width: '100%', maxWidth: '480px', textAlign: 'center' }}>
-            <div style={{ fontSize: '80px', marginBottom: '16px' }}>✅</div>
-            <div style={{ fontWeight: '900', fontSize: '28px', color: '#27AE60', marginBottom: '8px' }}>
-              {completedData.loads} load{completedData.loads > 1 ? 's' : ''} delivered!
-            </div>
-            <div style={{ fontSize: '40px', fontWeight: '900', color: '#F5A623', marginBottom: '8px' }}>
-              ${completedData.total} earned
-            </div>
-            <div style={{ fontSize: '14px', color: '#606670', marginBottom: '28px' }}>Payment within 24 hours</div>
+        <div style={{ ...cs, opacity: fadeIn ? 1 : 0, transition: 'opacity 0.4s ease-in' }}>
+          <div style={{ width: '100%', maxWidth: '480px', margin: '0 auto' }}>
 
-            <button onClick={resetForm} style={{ width: '100%', background: 'rgba(39,174,96,0.12)', color: '#27AE60', border: '1px solid rgba(39,174,96,0.3)', padding: '15px', borderRadius: '10px', fontWeight: '800', fontSize: '15px', cursor: 'pointer', marginBottom: '12px' }}>
-              Add Another Load
+            {/* SECTION 1 — Earnings Hero */}
+            <div style={{
+              background: 'rgba(39,174,96,0.1)', border: '1px solid rgba(39,174,96,0.3)',
+              borderRadius: '16px', padding: '32px', textAlign: 'center', marginBottom: '16px',
+            }}>
+              <div style={{ fontSize: '64px', fontWeight: '900', color: '#27AE60', lineHeight: 1, marginBottom: '8px' }}>
+                ${animatedAmount}
+              </div>
+              <div style={{ fontSize: '15px', color: '#E8E3DC', fontWeight: '600' }}>
+                {completedData.loads} load{completedData.loads > 1 ? 's' : ''} delivered
+              </div>
+              <div style={{ fontSize: '13px', color: '#606670', marginTop: '4px' }}>
+                Payment within 24 hours
+              </div>
+            </div>
+
+            {/* SECTION 2 — Running Totals Bar */}
+            {earnings && (
+              <div style={{
+                background: '#111316', border: '1px solid #272B33', borderRadius: '12px',
+                padding: '14px 18px', marginBottom: '16px', display: 'flex', justifyContent: 'space-around',
+              }}>
+                <div style={{ fontSize: '14px', color: '#606670', fontFamily: 'system-ui' }}>
+                  Today: <span style={{ color: '#F5A623', fontWeight: '700' }}>${earnings.todayEarnings || 0}</span>
+                </div>
+                <div style={{ fontSize: '14px', color: '#606670', fontFamily: 'system-ui' }}>
+                  Month: <span style={{ color: '#F5A623', fontWeight: '700' }}>{earnings.monthLoads} loads</span> · <span style={{ color: '#F5A623', fontWeight: '700' }}>${earnings.monthEarnings}</span>
+                </div>
+              </div>
+            )}
+
+            {/* SECTION 3 — Next Job Card */}
+            {nextJob ? (
+              <div style={{
+                background: '#111316', border: '1px solid #272B33', borderLeft: '3px solid #27AE60',
+                borderRadius: '12px', padding: '16px', marginBottom: '16px',
+              }}>
+                <div style={{ fontWeight: '800', fontSize: '16px', marginBottom: '6px' }}>
+                  Another job in {nextJob.cities?.name || 'your area'}
+                </div>
+                <div style={{ fontSize: '14px', color: '#F5A623', fontWeight: '700', marginBottom: '12px' }}>
+                  ${Math.round((nextJob.driver_pay_cents || 2000) / 100)}/load · {nextJob.yards_needed} yards needed
+                </div>
+                <button
+                  onClick={() => router.push('/dashboard')}
+                  style={{
+                    width: '100%', background: '#F5A623', color: '#111', border: 'none',
+                    padding: '14px', borderRadius: '10px', fontWeight: '800', fontSize: '15px', cursor: 'pointer',
+                  }}
+                >
+                  Claim This Job →
+                </button>
+              </div>
+            ) : (
+              <div style={{
+                background: '#111316', border: '1px solid #272B33', borderRadius: '12px',
+                padding: '16px', marginBottom: '16px', textAlign: 'center',
+              }}>
+                <div style={{ fontSize: '15px', fontWeight: '700', marginBottom: '4px' }}>No jobs right now</div>
+                <div style={{ fontSize: '13px', color: '#606670' }}>
+                  We will notify you the moment one posts in your city.
+                </div>
+              </div>
+            )}
+
+            {/* SECTION 4 — Action Buttons */}
+            <button
+              onClick={() => router.push('/dashboard')}
+              style={{
+                width: '100%', background: '#F5A623', color: '#111', border: 'none',
+                padding: '16px', borderRadius: '10px', fontWeight: '800', fontSize: '16px',
+                cursor: 'pointer', height: '52px',
+              }}
+            >
+              Find More Jobs
             </button>
-            <a href="/dashboard" style={{ display: 'block', width: '100%', background: 'transparent', color: '#606670', border: '1px solid #272B33', padding: '15px', borderRadius: '10px', fontWeight: '700', fontSize: '14px', textDecoration: 'none', textAlign: 'center', boxSizing: 'border-box' }}>
-              Back to Dashboard
-            </a>
-            <div style={{ marginTop: '16px', fontSize: '12px', color: '#3a3d44' }}>Returning to dashboard in {countdown}s</div>
+            <button
+              onClick={resetForAnotherTrip}
+              style={{
+                width: '100%', background: 'transparent', color: '#606670',
+                border: '1px solid #272B33', padding: '12px', borderRadius: '10px',
+                fontWeight: '700', fontSize: '14px', cursor: 'pointer', height: '44px', marginTop: '10px',
+              }}
+            >
+              Same site, another trip
+            </button>
           </div>
         </div>
       )
@@ -262,6 +411,38 @@ export default function JobAccessPage() {
     return (
       <div style={cs}>
         <div style={{ width: '100%', maxWidth: '480px', margin: '0 auto' }}>
+          {/* Loading Overlay (Task 6) */}
+          {overlayVisible && (
+            <div style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999,
+              background: 'rgba(10,12,15,0.95)', display: 'flex', alignItems: 'center',
+              justifyContent: 'center', flexDirection: 'column',
+            }}>
+              <div style={{
+                width: '40px', height: '40px', border: '3px solid #272B33',
+                borderTop: '3px solid #F5A623', borderRadius: '50%',
+                animation: 'spin 0.8s linear infinite', marginBottom: '20px',
+              }} />
+              <div style={{ fontSize: '16px', fontWeight: '700', color: '#E8E3DC', marginBottom: '8px' }}>{overlayText}</div>
+              {uploadProgress > 0 && uploadProgress < 100 && (
+                <div style={{ width: '200px', marginTop: '12px' }}>
+                  <div style={{ background: '#272B33', borderRadius: '4px', height: '6px', overflow: 'hidden' }}>
+                    <div style={{ background: '#F5A623', height: '100%', width: `${uploadProgress}%`, transition: 'width 0.2s', borderRadius: '4px' }} />
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#606670', textAlign: 'center', marginTop: '6px' }}>{uploadProgress}%</div>
+                </div>
+              )}
+              <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+            </div>
+          )}
+
+          {/* Compressing indicator */}
+          {compressing && (
+            <div style={{ background: 'rgba(245,166,35,0.08)', border: '1px solid rgba(245,166,35,0.2)', borderRadius: '10px', padding: '10px', marginBottom: '14px', textAlign: 'center', fontSize: '12px', color: '#F5A623' }}>
+              Optimizing photo...
+            </div>
+          )}
+
           {/* Logo */}
           <div style={{ textAlign: 'center', marginBottom: '16px' }}>
             <span style={{ fontFamily: 'Georgia, serif', fontSize: '20px', fontWeight: '700', color: '#F0EDE8' }}>DUMPSITE<span style={{ color: '#F5A623' }}>.IO</span></span>
@@ -270,7 +451,7 @@ export default function JobAccessPage() {
           {/* Arrival Status */}
           {arrived ? (
             <div style={{ background: 'rgba(39,174,96,0.1)', border: '1px solid rgba(39,174,96,0.3)', borderRadius: '10px', padding: '12px', marginBottom: '14px', textAlign: 'center' }}>
-              <div style={{ fontWeight: '800', fontSize: '15px', color: '#27AE60' }}>✅ You're at the site — ready to complete</div>
+              <div style={{ fontWeight: '800', fontSize: '15px', color: '#27AE60' }}>You are at the site — ready to complete</div>
             </div>
           ) : geoUnavailable ? (
             <div style={{ background: 'rgba(245,166,35,0.08)', border: '1px solid rgba(245,166,35,0.2)', borderRadius: '10px', padding: '10px', marginBottom: '14px', textAlign: 'center', fontSize: '12px', color: '#F5A623' }}>
@@ -278,7 +459,7 @@ export default function JobAccessPage() {
             </div>
           ) : (
             <div style={{ background: '#111316', border: '1px solid #272B33', borderRadius: '10px', padding: '10px', marginBottom: '14px', textAlign: 'center', fontSize: '12px', color: '#606670' }}>
-              📍 Tracking your location...
+              Tracking your location...
             </div>
           )}
 
@@ -336,7 +517,7 @@ export default function JobAccessPage() {
                 {photoPreview ? (
                   <>
                     <img src={photoPreview} alt="Delivery" style={{ maxHeight: '140px', maxWidth: '100%', borderRadius: '8px', marginBottom: '8px' }} />
-                    <div style={{ fontSize: '12px', color: '#27AE60', fontWeight: '700' }}>✓ Photo ready — tap to replace</div>
+                    <div style={{ fontSize: '12px', color: '#27AE60', fontWeight: '700' }}>Photo ready — tap to replace</div>
                   </>
                 ) : (
                   <>
@@ -391,7 +572,7 @@ export default function JobAccessPage() {
           </div>
 
           <div style={{ background: 'rgba(245,166,35,0.07)', border: '1px solid rgba(245,166,35,0.18)', borderRadius: '9px', padding: '12px', fontSize: '13px', color: '#606670', marginBottom: '16px' }}>
-            🔒 Exact delivery address will be shown after you accept the terms and share your location.
+            Exact delivery address will be shown after you accept the terms and share your location.
           </div>
 
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer', marginBottom: '16px', padding: '12px', background: termsAccepted ? 'rgba(39,174,96,0.05)' : '#0A0C0F', border: `1px solid ${termsAccepted ? 'rgba(39,174,96,0.3)' : '#272B33'}`, borderRadius: '10px' }}>
