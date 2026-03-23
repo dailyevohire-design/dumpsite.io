@@ -53,6 +53,7 @@ export async function POST(req: NextRequest) {
   const phone = body.phone || ''
   const truckCount = sanitizeNumber(body.truckCount, 1, 100) || 1
   const truckType = sanitizeText(body.truckType || 'tandem_axle').slice(0, 50)
+  const cityId = body.cityId || null
 
   if (!firstName || !lastName || !phone) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
@@ -88,7 +89,7 @@ export async function POST(req: NextRequest) {
     company_name: company || null,
     phone: normalizedPhone,
     phone_verified: false,
-    city_id: null,
+    city_id: cityId,
     truck_count: truckCount,
     truck_type: truckType,
     tier_id: tier?.id || null,

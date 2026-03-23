@@ -44,7 +44,7 @@ function LoginForm() {
     try {
       const supabase = createBrowserSupabase()
       await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/login`,
+        redirectTo: `${window.location.origin}/reset-password`,
       })
       setResetSent(true)
     } catch { setError('Failed to send reset email. Try again.') }

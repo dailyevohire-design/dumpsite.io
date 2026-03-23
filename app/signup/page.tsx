@@ -4,7 +4,14 @@ import { createBrowserSupabase } from '@/lib/supabase'
 import { trackEvent } from '@/lib/posthog'
 
 export default function SignupPage() {
-  const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle', userType: '', monthlyYardage: '', referralCode: '' })
+  const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle', userType: '', monthlyYardage: '', referralCode: '', city: '' })
+  const [cities, setCities] = useState<any[]>([])
+
+  useEffect(() => {
+    createBrowserSupabase().from('cities').select('id, name').eq('is_active', true).order('name').then(({ data }) => {
+      if (data) setCities(data)
+    })
+  }, [])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
@@ -22,7 +29,7 @@ export default function SignupPage() {
   async function submit(e: any) {
     e.preventDefault()
     setError('')
-    if (!form.firstName || !form.lastName || !form.phone || !form.email || !form.password || !form.userType || !form.monthlyYardage) {
+    if (!form.firstName || !form.lastName || !form.phone || !form.email || !form.password || !form.userType || !form.monthlyYardage || !form.city) {
       setError('Please fill in all required fields')
       return
     }
@@ -70,6 +77,7 @@ export default function SignupPage() {
               phone: normalizedPhone,
               truckCount: form.truckCount,
               truckType: form.truckType,
+              cityId: form.city,
             })
           })
         } catch {
@@ -155,6 +163,13 @@ export default function SignupPage() {
           <div style={{ marginBottom: '12px' }}>
             <label style={lbl}>Phone Number * (for job SMS notifications)</label>
             <input style={inp} type="tel" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="(214) 555-0100" />
+          </div>
+          <div style={{ marginBottom: '12px' }}>
+            <label style={lbl}>Your City * (where you haul)</label>
+            <select style={inp} value={form.city} onChange={e => setForm({ ...form, city: e.target.value })}>
+              <option value="">Select your city...</option>
+              {cities.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
           </div>
           <div style={{ marginBottom: '12px' }}>
             <label style={lbl}>I am a... *</label>
