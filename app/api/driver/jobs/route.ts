@@ -1,8 +1,13 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
+import { rateLimit } from '@/lib/rate-limit'
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  // Rate limit by IP — semi-public endpoint
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+  const rl = await rateLimit(`jobs:${ip}`, 60, '1 m')
+  if (!rl.allowed) return rl.response!
   // Auth check — if it fails, still return jobs (safe public data)
   // but block admin users from using this driver endpoint
   try {

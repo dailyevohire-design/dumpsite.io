@@ -2,11 +2,24 @@ import { NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { sendDumpsiteInterestEmail } from '@/lib/email'
 import { sendAdminAlert } from '@/lib/sms'
+import { sanitizeText, sanitizeNumber } from '@/lib/validation'
+import { rateLimit } from '@/lib/rate-limit'
 
 export async function POST(req: Request) {
   try {
+    // Rate limit by IP — public form, vulnerable to spam
+    const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+    const rl = await rateLimit(`dumpsite-request:${ip}`, 5, '10 m')
+    if (!rl.allowed) return rl.response!
+
     const body = await req.json()
-    const { name, phone, address, city, material, yards, notes } = body
+    const name = sanitizeText(body.name || '').slice(0, 200)
+    const phone = sanitizeText(body.phone || '').slice(0, 20)
+    const address = sanitizeText(body.address || '').slice(0, 500)
+    const city = sanitizeText(body.city || '').slice(0, 100)
+    const material = sanitizeText(body.material || '').slice(0, 100)
+    const yards = sanitizeNumber(body.yards, 1, 100000) || 0
+    const notes = sanitizeText(body.notes || '').slice(0, 1000)
 
     // Validate required fields
     if (!name || !phone || !address || !city || !material || !yards) {
@@ -40,7 +53,7 @@ export async function POST(req: Request) {
         address,
         city,
         material,
-        yards_needed: parseInt(yards) || 0,
+        yards_needed: yards,
         notes: notes || null,
         submitted_at: submittedAt,
         status: 'new',

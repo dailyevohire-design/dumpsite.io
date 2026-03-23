@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { requireAdmin } from '@/lib/admin-auth'
 import { sendRejectionSMS } from '@/lib/sms'
+import { sanitizeText } from '@/lib/validation'
 
 export async function PATCH(
   req: NextRequest,
@@ -23,7 +24,8 @@ export async function PATCH(
       return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
     }
 
-    if (!body.reason || body.reason.trim().length < 5) {
+    const reason = sanitizeText(body.reason || '').slice(0, 500)
+    if (reason.length < 5) {
       return NextResponse.json({ error: 'Please provide a rejection reason' }, { status: 400 })
     }
 
@@ -33,7 +35,7 @@ export async function PATCH(
         status: 'rejected',
         reviewed_at: new Date().toISOString(),
         reviewed_by: auth.user.id,
-        rejected_reason: body.reason
+        rejected_reason: reason
       })
       .eq('id', loadId)
       .eq('status', 'pending')
@@ -57,7 +59,7 @@ export async function PATCH(
 
       if (driver?.phone) {
         const phone = driver.phone.startsWith('+') ? driver.phone : '+1' + driver.phone.replace(/\D/g, '')
-        await sendRejectionSMS(phone, { reason: body.reason, loadId })
+        await sendRejectionSMS(phone, { reason, loadId })
       }
     }
 

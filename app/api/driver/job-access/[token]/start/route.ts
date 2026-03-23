@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
 import crypto from 'crypto'
+import { rateLimit } from '@/lib/rate-limit'
 
 function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex')
@@ -19,6 +20,10 @@ export async function POST(
   if (authError || !user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
+
+  // Rate limit to prevent token brute-force
+  const rl = await rateLimit(`job-start:${user.id}`, 10, '1 m')
+  if (!rl.allowed) return rl.response!
 
   let body: any
   try { body = await req.json() } catch {

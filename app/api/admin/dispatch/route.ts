@@ -50,8 +50,9 @@ export async function GET(req: NextRequest) {
 
   const supabase = createAdminSupabase()
   const { searchParams } = new URL(req.url)
-  const page = parseInt(searchParams.get('page') || '1')
-  const statusFilter = searchParams.get('status') || 'dispatching'
+  const page = Math.max(1, parseInt(searchParams.get('page') || '1'))
+  const ALLOWED_STATUSES = ['dispatching', 'completed', 'cancelled']
+  const statusFilter = ALLOWED_STATUSES.includes(searchParams.get('status') || '') ? searchParams.get('status')! : 'dispatching'
   const limit = 200
   const offset = (page - 1) * limit
 

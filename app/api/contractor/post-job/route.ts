@@ -2,13 +2,17 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
 import { encryptAddress } from '@/lib/crypto'
-import { sanitizeText } from '@/lib/validation'
+import { sanitizeText, sanitizeNumber } from '@/lib/validation'
 import { sendAdminAlert } from '@/lib/sms'
+import { rateLimit } from '@/lib/rate-limit'
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerSupabase()
   const { data: { user }, error: authError } = await supabase.auth.getUser()
   if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const rl = await rateLimit(`contractor-post:${user.id}`, 10, '1 h')
+  if (!rl.allowed) return rl.response!
 
   let body: any
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
@@ -36,9 +40,9 @@ export async function POST(req: NextRequest) {
     client_phone: sanitizeText(contactPhone).slice(0, 20),
     client_address: sanitizeText(address).slice(0, 500),
     city_id: city.id,
-    yards_needed: parseInt(yardsEstimated) || 10,
-    price_quoted_cents: Math.round((parseFloat(budgetPerLoad) || 30) * 100),
-    driver_pay_cents: Math.round((parseFloat(budgetPerLoad) || 30) * 100),
+    yards_needed: sanitizeNumber(yardsEstimated, 1, 100000) || 10,
+    price_quoted_cents: Math.round(Math.max(0, Math.min(1000000, parseFloat(budgetPerLoad) || 30)) * 100),
+    driver_pay_cents: Math.round(Math.max(0, Math.min(1000000, parseFloat(budgetPerLoad) || 30)) * 100),
     truck_type_needed: materialType,
     notes: sanitizeText(title).slice(0, 500) + (encryptedInstructions ? '\n[Access instructions encrypted]' : ''),
     urgency: urgency === 'urgent' ? 'urgent' : 'standard',

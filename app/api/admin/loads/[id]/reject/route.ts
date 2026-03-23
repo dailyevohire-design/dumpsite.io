@@ -4,6 +4,7 @@ import { requireAdmin } from '@/lib/admin-auth'
 import { sendRejectionSMS } from '@/lib/sms'
 import { rateLimit } from '@/lib/rate-limit'
 import { createNotification } from '@/lib/notifications'
+import { sanitizeText } from '@/lib/validation'
 
 export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
   const auth = await requireAdmin()
@@ -19,7 +20,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     body = {}
   }
 
-  const reason = body.reason || 'Not approved'
+  const reason = sanitizeText(body.reason || 'Not approved').slice(0, 500)
 
   const supabase = createAdminSupabase()
 

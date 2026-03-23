@@ -32,6 +32,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing required fields (loadId, completionPhotoUrl, loadsDelivered)' }, { status: 400 })
   }
 
+  // Validate photo URL — must be https
+  if (typeof completionPhotoUrl !== 'string' || !completionPhotoUrl.startsWith('https://')) {
+    return NextResponse.json({ error: 'Invalid photo URL' }, { status: 400 })
+  }
+
+  // Validate GPS coordinates if provided
+  if (typeof photoLat === 'number' && (photoLat < -90 || photoLat > 90)) {
+    return NextResponse.json({ error: 'Invalid latitude' }, { status: 400 })
+  }
+  if (typeof photoLng === 'number' && (photoLng < -180 || photoLng > 180)) {
+    return NextResponse.json({ error: 'Invalid longitude' }, { status: 400 })
+  }
+
   const numLoads = parseInt(loadsDelivered)
   if (isNaN(numLoads) || numLoads < 1 || numLoads > 200) return NextResponse.json({ error: 'Invalid loads count' }, { status: 400 })
 

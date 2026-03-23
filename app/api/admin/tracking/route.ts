@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { requireAdmin } from '@/lib/admin-auth'
+import { rateLimit } from '@/lib/rate-limit'
 
 export async function GET(req: NextRequest) {
   const auth = await requireAdmin()
   if (auth.error) return auth.error
+
+  const rl = await rateLimit(`admin-tracking:${auth.user.id}`, 60, '1 m')
+  if (!rl.allowed) return rl.response!
 
   const supabase = createAdminSupabase()
   const { searchParams } = new URL(req.url)

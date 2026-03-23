@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
+import { sanitizeText, sanitizeNumber } from '@/lib/validation'
+import { rateLimit } from '@/lib/rate-limit'
 
 export async function POST(req: NextRequest) {
   let body: any
@@ -40,7 +42,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const { firstName, lastName, company, phone, truckCount, truckType } = body
+  // Rate limit by IP — signup flow
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+  const rl = await rateLimit(`create-profile:${ip}`, 5, '1 h')
+  if (!rl.allowed) return rl.response!
+
+  const firstName = sanitizeText(body.firstName || '').slice(0, 100)
+  const lastName = sanitizeText(body.lastName || '').slice(0, 100)
+  const company = body.company ? sanitizeText(body.company).slice(0, 200) : null
+  const phone = body.phone || ''
+  const truckCount = sanitizeNumber(body.truckCount, 1, 100) || 1
+  const truckType = sanitizeText(body.truckType || 'tandem_axle').slice(0, 50)
+
   if (!firstName || !lastName || !phone) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
@@ -70,14 +83,14 @@ export async function POST(req: NextRequest) {
 
   const { error: insertError } = await admin.from('driver_profiles').insert({
     user_id: userId,
-    first_name: firstName.trim(),
-    last_name: lastName.trim(),
-    company_name: company?.trim() || null,
+    first_name: firstName,
+    last_name: lastName,
+    company_name: company || null,
     phone: normalizedPhone,
     phone_verified: false,
     city_id: null,
-    truck_count: parseInt(truckCount) || 1,
-    truck_type: truckType || 'tandem_axle',
+    truck_count: truckCount,
+    truck_type: truckType,
     tier_id: tier?.id || null,
     status: 'active',
     trial_loads_used: 0,

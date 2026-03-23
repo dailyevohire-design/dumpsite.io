@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
+import { rateLimit } from '@/lib/rate-limit'
 
 const GEOFENCE_ARRIVAL_METERS = 500
 
@@ -30,6 +31,15 @@ export async function POST(req: NextRequest) {
   if (!loadId || typeof lat !== 'number' || typeof lng !== 'number') {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
+
+  // Validate coordinate bounds
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return NextResponse.json({ error: 'Invalid coordinates' }, { status: 400 })
+  }
+
+  // Rate limit — high-frequency endpoint (GPS pings every ~10s)
+  const rl = await rateLimit(`tracking-ping:${user.id}`, 120, '1 m')
+  if (!rl.allowed) return rl.response!
 
   const admin = createAdminSupabase()
 

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
+import { rateLimit } from '@/lib/rate-limit'
 
 export async function GET() {
   const supabase = await createServerSupabase()
@@ -9,6 +10,9 @@ export async function GET() {
   if (authError || !user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
+
+  const rl = await rateLimit(`my-loads:${user.id}`, 30, '1 m')
+  if (!rl.allowed) return rl.response!
 
   const admin = createAdminSupabase()
 

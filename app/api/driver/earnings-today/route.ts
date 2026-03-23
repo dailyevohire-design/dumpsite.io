@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabase } from '@/lib/supabase.server'
 import { createAdminSupabase } from '@/lib/supabase'
+import { rateLimit } from '@/lib/rate-limit'
 
 export async function GET(_req: NextRequest) {
   try {
     const supabase = await createServerSupabase()
     const { data: { user }, error } = await supabase.auth.getUser()
     if (error || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    const rl = await rateLimit(`earnings-today:${user.id}`, 30, '1 m')
+    if (!rl.allowed) return rl.response!
 
     const admin = createAdminSupabase()
     const now = new Date()
