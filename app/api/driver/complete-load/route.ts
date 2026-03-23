@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
 import { rateLimit } from '@/lib/rate-limit'
+import { analyzeForFraud, type PingData } from '@/lib/fraud-detection'
 
 // Geofence thresholds
 const GEOFENCE_AUTO_APPROVE_KM = 1.0   // Within 1km = auto-approve
@@ -217,6 +218,32 @@ export async function POST(req: NextRequest) {
   // Auto-approve if GPS matches AND enough time on site
   const autoApproved = gpsMatch && timeOnSiteMinutes >= MIN_TIME_ON_SITE_MINUTES && !missingSession
 
+  // 5b. Run fraud detection engine
+  const fraudPings: PingData[] = (pings || []).map((p: any) => ({
+    lat: p.lat,
+    lng: p.lng,
+    recorded_at: p.recorded_at,
+    accuracy_meters: p.accuracy_meters,
+    at_delivery_site: destLat !== null && destLng !== null
+      ? haversineKm(p.lat, p.lng, destLat, destLng) <= 0.5
+      : false,
+  }))
+
+  let fraudAnalysis = analyzeForFraud({
+    pings: fraudPings,
+    claimedLoads: numLoads,
+    completionLat: typeof photoLat === 'number' ? photoLat : undefined,
+    completionLng: typeof photoLng === 'number' ? photoLng : undefined,
+    deliveryLat: destLat ?? undefined,
+    deliveryLng: destLng ?? undefined,
+    sessionStartedAt: session?.job_started_at ?? undefined,
+  })
+
+  // Override flagForReview if fraud engine flags it
+  if (fraudAnalysis.recommendation === 'flag' || fraudAnalysis.recommendation === 'reject') {
+    flagForReview = true
+  }
+
   // 6. Resolve pay
   let payPerLoadCents = 2000
   if (load.dispatch_order_id) {
@@ -248,8 +275,24 @@ export async function POST(req: NextRequest) {
       completion_longitude: typeof photoLng === 'number' ? photoLng : null,
       completion_distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
       requires_manual_review: flagForReview,
+      fraud_score: fraudAnalysis.fraudScore,
+      fraud_flags: JSON.stringify(fraudAnalysis.flags),
+      flagged_for_review: flagForReview,
+      ping_count: fraudPings.length,
     }).eq('id', loadId)
   } catch {}
+
+  // Alert admin on high fraud risk — never block the driver
+  if (fraudAnalysis.recommendation === 'reject') {
+    try {
+      const { sendAdminAlert } = await import('@/lib/sms')
+      await sendAdminAlert(
+        `HIGH FRAUD RISK: Load ${loadId.slice(0, 8)} — Score: ${fraudAnalysis.fraudScore}/100. ` +
+        `Flags: ${fraudAnalysis.flags.join(', ')}. ` +
+        `Driver submitted ${numLoads} loads. Review: /admin`
+      )
+    } catch {}
+  }
 
   // 8. Update tracking session (if it exists)
   if (session?.id) {
@@ -259,13 +302,16 @@ export async function POST(req: NextRequest) {
     }).eq('id', session.id)
   }
 
-  // 9. Audit log with geofence data
+  // 9. Audit log with geofence + fraud data
   await admin.from('audit_logs').insert({
     action: flagForReview ? 'job.completed_flagged_review' : 'job.completed_auto_approved',
     entity_type: 'load_request',
     entity_id: loadId,
     metadata: {
       driver_id: user.id,
+      fraud_score: fraudAnalysis.fraudScore,
+      fraud_flags: fraudAnalysis.flags,
+      fraud_recommendation: fraudAnalysis.recommendation,
       distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,
       photo_distance_km: photoDistanceKm !== null ? Math.round(photoDistanceKm * 100) / 100 : null,
       time_on_site_minutes: timeOnSiteMinutes,

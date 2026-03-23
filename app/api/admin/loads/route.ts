@@ -12,22 +12,30 @@ export async function GET(req: NextRequest) {
 
   const supabase = createAdminSupabase()
   const { searchParams } = new URL(req.url)
-  const ALLOWED_STATUSES = ['pending', 'approved', 'rejected', 'completed']
-  const status = ALLOWED_STATUSES.includes(searchParams.get('status') || '') ? searchParams.get('status')! : 'pending'
+  const ALLOWED_STATUSES = ['pending', 'approved', 'rejected', 'completed', 'flagged']
+  const rawStatus = searchParams.get('status') || 'pending'
+  const status = ALLOWED_STATUSES.includes(rawStatus) ? rawStatus : 'pending'
   const page = Math.max(1, parseInt(searchParams.get('page') || '1'))
   const limit = 20
   const offset = (page - 1) * limit
 
-  const { data: loads, count, error } = await supabase
+  // "flagged" is a virtual tab — shows completed loads with fraud flags
+  let query = supabase
     .from('load_requests')
     .select(`
       id, status, dirt_type, photo_url, truck_type, truck_count,
       yards_estimated, haul_date, requires_extra_review,
-      submitted_at, rejected_reason, dispatch_order_id, driver_id
+      submitted_at, rejected_reason, dispatch_order_id, driver_id,
+      fraud_score, fraud_flags, flagged_for_review
     `, { count: 'exact' })
-    .eq('status', status)
-    .order('submitted_at', { ascending: true })
-    .range(offset, offset + limit - 1)
+
+  if (status === 'flagged') {
+    query = query.eq('flagged_for_review', true).order('submitted_at', { ascending: false })
+  } else {
+    query = query.eq('status', status).order('submitted_at', { ascending: true })
+  }
+
+  const { data: loads, count, error } = await query.range(offset, offset + limit - 1)
 
   if (error) {
     return NextResponse.json({ loads: [], total: 0, error: 'Failed to load' })

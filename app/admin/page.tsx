@@ -12,6 +12,7 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('pending')
   const [rejectReason, setRejectReason] = useState('')
   const [rejectingId, setRejectingId] = useState<string|null>(null)
+  const [expandedFraud, setExpandedFraud] = useState<string|null>(null)
   const [processing, setProcessing] = useState<string|null>(null)
   const [message, setMessage] = useState<{text:string;type:'success'|'error'}|null>(null)
   const [total, setTotal] = useState(0)
@@ -133,7 +134,7 @@ export default function AdminDashboard() {
       )}
 
       <div style={{display:'flex',borderBottom:'1px solid #272B33',background:'#111316'}}>
-        {['pending','approved','rejected','completed','orders'].map(tab=>(
+        {['pending','approved','rejected','completed','flagged','orders'].map(tab=>(
           <button key={tab} onClick={()=>{setActiveTab(tab); if(tab==='orders') fetchActiveOrders(); if(tab==='pending') setNewCount(0)}} style={{position:'relative',padding:'12px 20px',background:'transparent',border:'none',borderBottom:activeTab===tab?'2px solid #F5A623':'2px solid transparent',color:activeTab===tab?'#F5A623':'#606670',cursor:'pointer',fontWeight:'700',fontSize:'12px',textTransform:'uppercase',letterSpacing:'0.07em'}}>
             {tab}
             {tab==='pending'&&newCount>0&&activeTab!=='pending'&&(
@@ -234,6 +235,16 @@ export default function AdminDashboard() {
                   <span style={{background:'rgba(245,166,35,0.12)',color:'#F5A623',border:'1px solid rgba(245,166,35,0.25)',padding:'3px 9px',borderRadius:'5px',fontSize:'10px',fontWeight:'800'}}>{driver?.tiers?.name||'Trial'}</span>
                   <span style={{background:'rgba(39,174,96,0.12)',color:'#27AE60',border:'1px solid rgba(39,174,96,0.25)',padding:'3px 9px',borderRadius:'5px',fontSize:'10px',fontWeight:'800'}}>GPS {driver?.gps_score||100}%</span>
                   <span style={{background:'rgba(59,138,232,0.12)',color:'#3A8AE8',border:'1px solid rgba(59,138,232,0.25)',padding:'3px 9px',borderRadius:'5px',fontSize:'11px',fontWeight:'800'}}>Driver gets ${driverPay}/load</span>
+                  {typeof load.fraud_score === 'number' && load.fraud_score > 0 && (
+                    <span style={{
+                      background: load.fraud_score >= 70 ? 'rgba(231,76,60,0.15)' : load.fraud_score >= 30 ? 'rgba(245,166,35,0.15)' : 'rgba(39,174,96,0.15)',
+                      color: load.fraud_score >= 70 ? '#E74C3C' : load.fraud_score >= 30 ? '#F5A623' : '#27AE60',
+                      border: `1px solid ${load.fraud_score >= 70 ? 'rgba(231,76,60,0.3)' : load.fraud_score >= 30 ? 'rgba(245,166,35,0.3)' : 'rgba(39,174,96,0.3)'}`,
+                      padding:'3px 9px',borderRadius:'5px',fontSize:'10px',fontWeight:'800',cursor:'pointer'
+                    }} onClick={()=>setExpandedFraud(expandedFraud===load.id?null:load.id)}>
+                      {load.fraud_score >= 70 ? '🚨' : load.fraud_score >= 30 ? '⚠️' : '✓'} Fraud {load.fraud_score}/100
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -251,6 +262,19 @@ export default function AdminDashboard() {
                   </div>
                 ))}
               </div>
+
+              {expandedFraud===load.id&&load.fraud_flags&&(()=>{
+                let flags: string[] = []
+                try { flags = typeof load.fraud_flags === 'string' ? JSON.parse(load.fraud_flags) : (Array.isArray(load.fraud_flags) ? load.fraud_flags : []) } catch{}
+                return flags.length > 0 ? (
+                  <div style={{background:'rgba(231,76,60,0.06)',border:'1px solid rgba(231,76,60,0.15)',borderRadius:'8px',padding:'10px 14px',marginBottom:'12px'}}>
+                    <div style={{fontSize:'10px',textTransform:'uppercase',letterSpacing:'0.07em',color:'#E74C3C',fontWeight:'800',marginBottom:'6px'}}>Fraud Flags</div>
+                    {flags.map((f:string,i:number)=>(
+                      <div key={i} style={{fontSize:'12px',color:'#E74C3C',marginBottom:'3px',fontFamily:'monospace'}}>• {f}</div>
+                    ))}
+                  </div>
+                ) : null
+              })()}
 
               {load.photo_url&&load.photo_url!=='pending'&&(
                 <div style={{marginBottom:'12px'}}>

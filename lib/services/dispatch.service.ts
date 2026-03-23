@@ -1,5 +1,6 @@
 import { createAdminSupabase } from '../supabase'
 import { batchDispatchSMS, sendAdminAlert } from '../sms'
+import { CITY_COORDS } from '../city-coords'
 
 export interface CreateDispatchInput {
   clientName: string
@@ -38,6 +39,9 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
 
   if (!city) return { success: false, driversNotified: 0, cityName: '', error: 'City not found' }
 
+  // Resolve delivery coordinates — city center as fallback
+  const cityCoords = CITY_COORDS[city.name]
+
   const { data: order, error: orderError } = await supabase
     .from('dispatch_orders')
     .insert({
@@ -53,7 +57,9 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
       source: input.source || 'manual',
       zapier_row_id: input.zapierRowId,
       created_by: input.createdBy,
-      status: 'dispatching'
+      status: 'dispatching',
+      delivery_latitude: cityCoords?.lat || null,
+      delivery_longitude: cityCoords?.lng || null,
     })
     .select()
     .single()
