@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const CITY_COORDS: Record<string, [number, number]> = {
   "Dallas": [32.7767, -96.7970],
@@ -79,6 +79,7 @@ interface Props {
 export default function MapView({ jobs, onSubmitInterest }: Props) {
   const mapRef = useRef<any>(null);
   const elRef = useRef<HTMLDivElement>(null);
+  const [mapError, setMapError] = useState(false);
 
   useEffect(() => {
     if (!elRef.current || mapRef.current) return;
@@ -115,9 +116,36 @@ export default function MapView({ jobs, onSubmitInterest }: Props) {
           }, 100);
         });
       });
-    });
+    }).catch(() => { setMapError(true); });
     return () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
   }, [jobs]);
+
+  if (mapError) {
+    return (
+      <div style={{
+        background: '#111316', border: '1px solid #272B33', borderRadius: '12px',
+        padding: '40px', textAlign: 'center', fontFamily: 'system-ui',
+      }}>
+        <div style={{ fontSize: '40px', marginBottom: '12px' }}>🗺️</div>
+        <div style={{ fontWeight: '700', fontSize: '16px', color: '#E8E3DC', marginBottom: '8px' }}>
+          Map unavailable
+        </div>
+        <div style={{ fontSize: '13px', color: '#606670', marginBottom: '20px' }}>
+          View available jobs in the Jobs tab
+        </div>
+        <button
+          onClick={() => onSubmitInterest(jobs[0]?.id || '')}
+          style={{
+            background: '#F5A623', color: '#111', border: 'none',
+            padding: '10px 24px', borderRadius: '8px',
+            fontWeight: '700', cursor: 'pointer', fontSize: '14px',
+          }}
+        >
+          Go to Jobs
+        </button>
+      </div>
+    );
+  }
 
   return (
     <>

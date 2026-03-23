@@ -28,7 +28,7 @@ export async function GET() {
     .limit(50)
 
   if (error) {
-    console.error('Jobs fetch error:', error)
+    console.error('[jobs] fetch failed:', error.code)
     return NextResponse.json({ error: 'Failed to load jobs' }, { status: 500 })
   }
 

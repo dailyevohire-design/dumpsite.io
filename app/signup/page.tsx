@@ -1,12 +1,15 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { createBrowserSupabase } from '@/lib/supabase'
+import { trackEvent } from '@/lib/posthog'
 
 export default function SignupPage() {
   const [form, setForm] = useState({ firstName: '', lastName: '', company: '', phone: '', email: '', password: '', truckCount: '1', truckType: 'tandem_axle', userType: '', monthlyYardage: '', referralCode: '' })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState(false)
+
+  useEffect(() => { trackEvent('signup_started') }, [])
 
   function normalizePhone(raw: string): string {
     const digits = raw.replace(/\D/g, '')
@@ -89,8 +92,10 @@ export default function SignupPage() {
         }
       }
       setSuccess(true)
+      trackEvent('signup_completed', { truckType: form.truckType, truckCount: form.truckCount })
     } catch (err: any) {
       setError(err.message || 'Something went wrong. Please try again.')
+      trackEvent('signup_failed', { error: err.message })
     }
     setLoading(false)
   }

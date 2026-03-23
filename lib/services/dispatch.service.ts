@@ -63,12 +63,14 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
     return { success: false, driversNotified: 0, cityName: city.name, error: 'Failed to create order' }
   }
 
+  // Limit drivers per city to prevent unbounded SMS dispatch
   const { data: drivers } = await supabase
     .from('driver_profiles')
     .select('user_id, first_name, phone, phone_verified, tiers(slug, dispatch_priority, notification_delay_minutes)')
     .eq('city_id', input.cityId)
     .eq('status', 'active')
     .eq('phone_verified', true)
+    .limit(500)
 
   if (!drivers || drivers.length === 0) {
     await sendAdminAlert(

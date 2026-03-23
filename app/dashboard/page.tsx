@@ -4,6 +4,8 @@ const MapView = dynamic(() => import('@/components/MapView'), { ssr: false })
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createBrowserSupabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
+import ErrorBoundary from '@/components/ErrorBoundary'
+import { trackEvent, identifyDriver } from '@/lib/posthog'
 
 // ── Isolated completion form — one per load card, no shared state ──────────
 function CompletionForm({ load, user, onComplete }: {
@@ -344,6 +346,22 @@ function LeaderboardTab() {
   )
 }
 
+// ── Skeleton Loader ──────────────────────────────────────────────────────
+function SkeletonCard() {
+  return (
+    <div style={{
+      background:'#111316', border:'1px solid #272B33',
+      borderRadius:'13px', padding:'18px', marginBottom:'12px',
+      animation:'pulse 1.5s ease-in-out infinite'
+    }}>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}`}</style>
+      <div style={{background:'#272B33',borderRadius:'6px',height:'18px',width:'60%',marginBottom:'12px'}}/>
+      <div style={{background:'#272B33',borderRadius:'6px',height:'13px',width:'40%',marginBottom:'8px'}}/>
+      <div style={{background:'#272B33',borderRadius:'6px',height:'13px',width:'80%'}}/>
+    </div>
+  )
+}
+
 // ── Main Dashboard ─────────────────────────────────────────────────────────
 export default function DriverDashboard() {
   const [user, setUser] = useState<any>(null)
@@ -410,7 +428,11 @@ export default function DriverDashboard() {
     supabase.auth.getUser().then(({ data }) => {
       if (!data.user) { router.push('/login'); return }
       setUser(data.user)
-      supabase.from('driver_profiles').select('*, tiers(name,slug,pay_boost_pct,trial_load_limit)').eq('user_id', data.user.id).single().then(({ data: p }) => setProfile(p))
+      supabase.from('driver_profiles').select('*, tiers(name,slug,pay_boost_pct,trial_load_limit)').eq('user_id', data.user.id).single().then(({ data: p }) => {
+        setProfile(p)
+        identifyDriver(data.user!.id, { tier: (p?.tiers as any)?.slug, city: p?.city_id, truckType: p?.truck_type })
+        trackEvent('dashboard_viewed', { tier: (p?.tiers as any)?.slug })
+      })
       fetchJobs(supabase)
       fetchLoads(supabase, data.user.id)
 
@@ -513,6 +535,7 @@ export default function DriverDashboard() {
         showResult({ success: false, message: data.message || data.error || 'Failed to submit. Please try again.' })
       } else {
         showResult({ success: true, message: '✅ Submitted! You will get an SMS with the delivery address once approved.' })
+        trackEvent('load_submitted', { dirtType: form.dirtType, city: selectedJob.cities?.name })
         setSelectedJob(null)
         setPhotoFile(null)
         setPhotoPreview(null)
@@ -531,6 +554,15 @@ export default function DriverDashboard() {
   }
 
   async function signOut() {
+    // Clear push subscription before signing out
+    try { await fetch('/api/driver/push-subscribe', { method: 'DELETE' }) } catch {}
+    if ('serviceWorker' in navigator) {
+      try {
+        const registrations = await navigator.serviceWorker.getRegistrations()
+        for (const reg of registrations) { await reg.unregister() }
+      } catch {}
+    }
+    localStorage.removeItem('pushEnabled')
     const supabase = createBrowserSupabase()
     await supabase.auth.signOut()
     router.push('/')
@@ -540,9 +572,14 @@ export default function DriverDashboard() {
   const tierColor = ({ trial:'#27AE60', hauler:'#3A8AE8', pro:'#F5A623', elite:'#8E44AD' } as any)[tier?.slug || 'trial'] || '#27AE60'
   const inp = { background:'#1C1F24', border:'1px solid #272B33', color:'#E8E3DC', padding:'11px 14px', borderRadius:'9px', fontSize:'14px', width:'100%', outline:'none', marginTop:'5px' }
 
-  if (!user) return <div style={{background:'#0A0C0F',minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',color:'#606670',fontFamily:'system-ui'}}>Loading...</div>
+  if (!user) return <div style={{background:'#0A0C0F',minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',color:'#606670',fontFamily:'system-ui'}}>
+    <div>
+      <SkeletonCard /><SkeletonCard /><SkeletonCard />
+    </div>
+  </div>
 
   return (
+    <ErrorBoundary>
     <div style={{background:'#0A0C0F',minHeight:'100vh',color:'#E8E3DC',fontFamily:'system-ui,sans-serif',overflowX:'hidden'}}>
       <div style={{background:'#080A0C',borderBottom:'1px solid #272B33',padding:'14px 20px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <span style={{fontFamily:'Georgia,serif',fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
@@ -688,11 +725,11 @@ export default function DriverDashboard() {
                 <p style={{color:'#606670',fontSize:'14px',marginBottom:'12px'}}>Available delivery jobs in your area. You bring the dirt, we handle the rest.</p>
                 <PushNotificationButton />
                 {loadingJobs ? (
-                  <div style={{textAlign:'center',padding:'40px',color:'#606670'}}>Loading jobs...</div>
+                  <div><SkeletonCard /><SkeletonCard /><SkeletonCard /></div>
                 ) : jobs.length === 0 ? (
                   <div style={{textAlign:'center',padding:'60px 20px',color:'#606670'}}><div style={{fontSize:'48px',marginBottom:'14px'}}>📍</div><div style={{fontWeight:'800',fontSize:'18px',marginBottom:'6px'}}>No jobs available right now</div><div style={{fontSize:'13px'}}>Check back soon — jobs refresh automatically</div></div>
                 ) : jobs.map((job: any) => (
-                  <div key={job.id} onClick={() => setSelectedJob(job)} style={{background:'#111316',border:'1px solid #272B33',borderRadius:'13px',padding:'18px',marginBottom:'12px',cursor:'pointer',borderLeft:'3px solid #27AE60'}}>
+                  <div key={job.id} onClick={() => { setSelectedJob(job); trackEvent('job_selected', { jobId: job.id, city: job.cities?.name, payDollars: Math.round((job.driver_pay_cents || 2000) / 100) }) }} style={{background:'#111316',border:'1px solid #272B33',borderRadius:'13px',padding:'18px',marginBottom:'12px',cursor:'pointer',borderLeft:'3px solid #27AE60'}}>
                     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
                       <div style={{flex:1}}>
                         <div style={{fontWeight:'800',fontSize:'18px',marginBottom:'4px'}}>Delivery Job — {job.cities?.name}</div>
@@ -732,7 +769,7 @@ export default function DriverDashboard() {
         {activeTab === 'loads' && (
           <div>
             {loadingLoads ? (
-              <div style={{textAlign:'center',padding:'40px',color:'#606670'}}>Loading your loads...</div>
+              <div><SkeletonCard /><SkeletonCard /><SkeletonCard /></div>
             ) : loads.length === 0 ? (
               <div style={{textAlign:'center',padding:'60px 20px',color:'#606670'}}>
                 <div style={{fontSize:'48px',marginBottom:'14px'}}>📋</div>
@@ -813,5 +850,6 @@ export default function DriverDashboard() {
         )}
       </div>
     </div>
+    </ErrorBoundary>
   )
 }

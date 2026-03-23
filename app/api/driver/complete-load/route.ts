@@ -145,11 +145,13 @@ export async function POST(req: NextRequest) {
   // 4. Get GPS pings to check time on site and location
   let pings: any[] | null = null
   if (session?.id) {
+    // Limit pings to prevent unbounded fetch on long jobs
     const { data } = await admin
       .from('job_location_pings')
       .select('lat, lng, recorded_at')
       .eq('tracking_session_id', session.id)
       .order('recorded_at', { ascending: true })
+      .limit(500)
     pings = data
   }
 
@@ -212,23 +214,23 @@ export async function POST(req: NextRequest) {
   const payoutCents = payPerLoadCents * numLoads
   const now = new Date().toISOString()
 
-  // 7. Mark load_request completed — minimal columns only (guaranteed to exist)
+  // 7. Mark load_request completed — include completed_at so earnings queries work immediately
   const { error: updateError } = await admin.from('load_requests').update({
     status: 'completed',
     completion_photo_url: completionPhotoUrl,
     truck_count: numLoads,
     payout_cents: payoutCents,
+    completed_at: now,
   }).eq('id', loadId).eq('driver_id', user.id).eq('status', 'approved')
 
   if (updateError) {
-    console.error('Complete-load update error:', JSON.stringify(updateError))
-    return NextResponse.json({ error: `Failed to mark complete: ${updateError.message || 'unknown'}` }, { status: 500 })
+    console.error('[complete-load] update failed:', updateError.code)
+    return NextResponse.json({ error: 'Failed to mark load complete. Please try again.' }, { status: 500 })
   }
 
   // Try to set optional columns (don't fail if they don't exist)
   try {
     await admin.from('load_requests').update({
-      completed_at: now,
       completion_latitude: typeof photoLat === 'number' ? photoLat : null,
       completion_longitude: typeof photoLng === 'number' ? photoLng : null,
       completion_distance_km: bestDistance === Infinity ? null : Math.round(bestDistance * 100) / 100,

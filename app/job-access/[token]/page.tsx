@@ -2,6 +2,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { createBrowserSupabase } from '@/lib/supabase'
+import ErrorBoundary from '@/components/ErrorBoundary'
+import { trackEvent } from '@/lib/posthog'
 
 export default function JobAccessPage() {
   const { token } = useParams<{ token: string }>()
@@ -30,10 +32,9 @@ export default function JobAccessPage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const watchRef = useRef<number | null>(null)
 
-  // Submission overlay state (Task 6)
+  // Submission overlay state
   const [overlayVisible, setOverlayVisible] = useState(false)
   const [overlayText, setOverlayText] = useState('Submitting your delivery...')
-  const [uploadProgress, setUploadProgress] = useState(0)
   const [compressing, setCompressing] = useState(false)
   const [fadeIn, setFadeIn] = useState(false)
 
@@ -49,6 +50,7 @@ export default function JobAccessPage() {
         if (data.error) { setError(data.error) }
         else {
           setJobData(data)
+          trackEvent('job_access_opened', { city: data.cityName })
           if (data.alreadyStarted && data.address) {
             setRevealed(true)
             setRevealedData({ address: data.address, instructions: data.instructions, cityName: data.cityName, payDollars: data.payDollars })
@@ -116,10 +118,10 @@ export default function JobAccessPage() {
       .catch(() => {})
   }, [completed])
 
-  // Animated earnings counter
+  // Animated earnings counter — use completedData.total (from completion API) not earnings endpoint
   useEffect(() => {
-    if (!completed || !earnings) return
-    const target = earnings.todayEarnings || 0
+    if (!completed || !completedData) return
+    const target = completedData.total || 0
     if (target === 0) { setAnimatedAmount(0); return }
     const steps = 20
     const stepTime = 50
@@ -135,7 +137,7 @@ export default function JobAccessPage() {
       }
     }, stepTime)
     return () => clearInterval(timer)
-  }, [completed, earnings])
+  }, [completed, completedData])
 
   const sendPing = useCallback((loadId: string) => {
     if (!navigator.geolocation) return
@@ -162,7 +164,7 @@ export default function JobAccessPage() {
         }).then(r => r.json()).then(data => {
           if (data.error) { setError(data.error) }
           else {
-            setRevealedData(data); setRevealed(true)
+            setRevealedData(data); setRevealed(true); trackEvent('address_revealed', { city: data.cityName })
             if (jobData?.loadId) { sendPing(jobData.loadId); pingInterval.current = setInterval(() => sendPing(jobData.loadId), 20000) }
           }
           setStarting(false)
@@ -178,35 +180,55 @@ export default function JobAccessPage() {
     if (!file) return
     if (!file.type.startsWith('image/')) { setSubmitError('Please select an image file'); return }
 
-    // Compress if over 5MB
-    if (file.size > 5 * 1024 * 1024) {
+    // Always compress on mobile to avoid memory issues — threshold lowered to 2MB
+    if (file.size > 2 * 1024 * 1024) {
       setCompressing(true)
+      const objUrl = URL.createObjectURL(file)
       const img = new Image()
       img.onload = () => {
-        const canvas = document.createElement('canvas')
-        const maxDim = 1920
-        let w = img.width, h = img.height
-        if (w > maxDim || h > maxDim) {
-          if (w > h) { h = Math.round(h * maxDim / w); w = maxDim }
-          else { w = Math.round(w * maxDim / h); h = maxDim }
-        }
-        canvas.width = w; canvas.height = h
-        canvas.getContext('2d')!.drawImage(img, 0, 0, w, h)
-        canvas.toBlob(blob => {
-          if (blob) {
-            const compressed = new File([blob], file.name, { type: 'image/jpeg' })
-            setPhoto(compressed)
-            setPhotoPreview(URL.createObjectURL(compressed))
+        try {
+          const canvas = document.createElement('canvas')
+          const maxDim = 1280 // Lower max for mobile memory safety
+          let w = img.width, h = img.height
+          if (w > maxDim || h > maxDim) {
+            if (w > h) { h = Math.round(h * maxDim / w); w = maxDim }
+            else { w = Math.round(w * maxDim / h); h = maxDim }
           }
+          canvas.width = w; canvas.height = h
+          const ctx = canvas.getContext('2d')
+          if (!ctx) { setPhoto(file); setPhotoPreview(objUrl); setCompressing(false); return }
+          ctx.drawImage(img, 0, 0, w, h)
+          canvas.toBlob(blob => {
+            // Free canvas memory immediately
+            canvas.width = 0; canvas.height = 0
+            if (blob) {
+              const compressed = new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
+              setPhoto(compressed)
+              setPhotoPreview(URL.createObjectURL(compressed))
+            } else {
+              // Fallback: use original file if compression fails
+              setPhoto(file)
+              setPhotoPreview(objUrl)
+            }
+            setCompressing(false)
+          }, 'image/jpeg', 0.75)
+        } catch {
+          // Compression failed (memory) — use original file
+          setPhoto(file)
+          setPhotoPreview(objUrl)
           setCompressing(false)
-        }, 'image/jpeg', 0.82)
+        }
       }
-      img.src = URL.createObjectURL(file)
+      img.onerror = () => {
+        setPhoto(file)
+        setPhotoPreview(objUrl)
+        setCompressing(false)
+      }
+      img.src = objUrl
     } else {
+      // Small file — use object URL (no base64 in memory)
       setPhoto(file)
-      const reader = new FileReader()
-      reader.onload = ev => setPhotoPreview(ev.target?.result as string)
-      reader.readAsDataURL(file)
+      setPhotoPreview(URL.createObjectURL(file))
     }
     setSubmitError(null)
   }
@@ -216,41 +238,30 @@ export default function JobAccessPage() {
     setSubmitting(true); setSubmitError(null)
     setOverlayVisible(true)
     setOverlayText('Submitting your delivery...')
-    setUploadProgress(0)
 
     try {
       const supabase = createBrowserSupabase()
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { setSubmitError('Please log in and try again'); setSubmitting(false); setOverlayVisible(false); return }
 
-      // Upload photo with XHR for progress tracking
+      // Upload photo via Supabase SDK (reliable on mobile)
       setOverlayText('Uploading photo...')
       const ext = photo.name.split('.').pop() || 'jpg'
       const filePath = `${user.id}/completions/${Date.now()}.${ext}`
 
-      const { data: { session } } = await supabase.auth.getSession()
-      const uploadUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/dirt-photos/${filePath}`
+      const { error: uploadErr } = await supabase.storage
+        .from('dirt-photos')
+        .upload(filePath, photo, { upsert: false })
 
-      const uploadSuccess = await new Promise<boolean>((resolve) => {
-        const xhr = new XMLHttpRequest()
-        xhr.upload.addEventListener('progress', (e) => {
-          if (e.lengthComputable) {
-            setUploadProgress(Math.round((e.loaded / e.total) * 100))
-          }
-        })
-        xhr.addEventListener('load', () => resolve(xhr.status >= 200 && xhr.status < 300))
-        xhr.addEventListener('error', () => resolve(false))
-        xhr.open('POST', uploadUrl)
-        xhr.setRequestHeader('Authorization', `Bearer ${session?.access_token || ''}`)
-        xhr.setRequestHeader('x-upsert', 'false')
-        xhr.send(photo)
-      })
-
-      if (!uploadSuccess) { setSubmitError('Photo upload failed — tap to retry'); setSubmitting(false); setOverlayVisible(false); return }
+      if (uploadErr) {
+        setSubmitError('Photo upload failed — tap to retry')
+        setSubmitting(false)
+        setOverlayVisible(false)
+        return
+      }
 
       const { data: urlData } = supabase.storage.from('dirt-photos').getPublicUrl(filePath)
       setOverlayText('Verifying delivery...')
-      setUploadProgress(100)
 
       // Submit completion
       const res = await fetch('/api/driver/complete-load', {
@@ -268,6 +279,7 @@ export default function JobAccessPage() {
 
       // Success — fade out overlay, fade in success screen
       setCompletedData({ loads: loadsSelected, total: data.totalPayDollars })
+      trackEvent('completion_submitted', { loadsDelivered: loadsSelected, earnedDollars: data.totalPayDollars })
       setOverlayVisible(false)
       setFadeIn(true)
       setCompleted(true)
@@ -296,7 +308,7 @@ export default function JobAccessPage() {
 
   if (loading) return <div style={{ ...cs, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><div style={{ color: '#606670' }}>Loading job details...</div></div>
 
-  if (error) return (
+  if (error) return (<ErrorBoundary>
     <div style={{ ...cs, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ textAlign: 'center', maxWidth: '400px' }}>
         <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔒</div>
@@ -304,7 +316,7 @@ export default function JobAccessPage() {
         <p style={{ color: '#606670', fontSize: '14px' }}>Contact dispatch if you need help.</p>
       </div>
     </div>
-  )
+  </ErrorBoundary>)
 
   // ── REVEALED STATE: Address + Inline Completion ──
   if (revealed && revealedData) {
@@ -313,7 +325,7 @@ export default function JobAccessPage() {
 
     // ── SUCCESS STATE — Redesigned (Task 2) ──
     if (completed && completedData) {
-      return (
+      return (<ErrorBoundary>
         <div style={{ ...cs, opacity: fadeIn ? 1 : 0, transition: 'opacity 0.4s ease-in' }}>
           <div style={{ width: '100%', maxWidth: '480px', margin: '0 auto' }}>
 
@@ -405,10 +417,10 @@ export default function JobAccessPage() {
             </button>
           </div>
         </div>
-      )
+      </ErrorBoundary>)
     }
 
-    return (
+    return (<ErrorBoundary>
       <div style={cs}>
         <div style={{ width: '100%', maxWidth: '480px', margin: '0 auto' }}>
           {/* Loading Overlay (Task 6) */}
@@ -424,14 +436,6 @@ export default function JobAccessPage() {
                 animation: 'spin 0.8s linear infinite', marginBottom: '20px',
               }} />
               <div style={{ fontSize: '16px', fontWeight: '700', color: '#E8E3DC', marginBottom: '8px' }}>{overlayText}</div>
-              {uploadProgress > 0 && uploadProgress < 100 && (
-                <div style={{ width: '200px', marginTop: '12px' }}>
-                  <div style={{ background: '#272B33', borderRadius: '4px', height: '6px', overflow: 'hidden' }}>
-                    <div style={{ background: '#F5A623', height: '100%', width: `${uploadProgress}%`, transition: 'width 0.2s', borderRadius: '4px' }} />
-                  </div>
-                  <div style={{ fontSize: '12px', color: '#606670', textAlign: 'center', marginTop: '6px' }}>{uploadProgress}%</div>
-                </div>
-              )}
               <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
             </div>
           )}
@@ -543,11 +547,11 @@ export default function JobAccessPage() {
           </div>
         </div>
       </div>
-    )
+    </ErrorBoundary>)
   }
 
   // ── PRE-REVEAL: Terms Acceptance ──
-  return (
+  return (<ErrorBoundary>
     <div style={{ ...cs, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ width: '100%', maxWidth: '480px' }}>
         <div style={{ textAlign: 'center', marginBottom: '24px' }}>
@@ -591,5 +595,5 @@ export default function JobAccessPage() {
         </div>
       </div>
     </div>
-  )
+  </ErrorBoundary>)
 }

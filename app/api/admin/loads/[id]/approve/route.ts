@@ -86,7 +86,8 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     .eq('status', 'pending')
 
   if (updateError) {
-    return NextResponse.json({ success: false, error: `Failed to approve: ${updateError.message}` }, { status: 500 })
+    console.error('[approve] DB update failed:', updateError.code)
+    return NextResponse.json({ success: false, error: 'Failed to approve load. Please try again.' }, { status: 500 })
   }
 
   // 6. Generate secure token + short ID for SMS-friendly URL
@@ -111,7 +112,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
       token_hash: tokenHash,
       expires_at: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
     })
-    if (tokenErr2) errors.push(`job_access_tokens: ${tokenErr2.message}`)
+    if (tokenErr2) errors.push('job_access_tokens: insert failed')
   } else {
     shortIdStored = true
   }
@@ -121,7 +122,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     load_request_id: id,
     driver_id: load.driver_id,
   })
-  if (sessionErr) errors.push(`job_tracking_sessions: ${sessionErr.message}`)
+  if (sessionErr) errors.push('job_tracking_sessions: insert failed')
 
   // 9. Audit log
   const { error: auditErr } = await supabase.from('audit_logs').insert({
@@ -130,7 +131,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     entity_id: id,
     metadata: { driver_id: load.driver_id, city: cityName }
   })
-  if (auditErr) errors.push(`audit_logs: ${auditErr.message}`)
+  if (auditErr) errors.push('audit_logs: insert failed')
 
   // 11. Send SMS with SHORT URL
   let smsError: string | null = null
@@ -158,7 +159,8 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
         smsError = result.error || 'SMS send returned failure'
       }
     } catch (e: any) {
-      smsError = `SMS exception: ${e.message}`
+      console.error('[approve] SMS exception:', e.message)
+      smsError = 'SMS send failed'
     }
   }
 

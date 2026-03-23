@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
+import { createServerSupabase } from '@/lib/supabase.server'
 
 export async function POST(req: NextRequest) {
+  // Auth check — only authenticated users can create referrals
+  const supabase = await createServerSupabase()
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
   let body: any
   try { body = await req.json() } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
@@ -10,6 +16,11 @@ export async function POST(req: NextRequest) {
   const { referrerId, referredId, referralCode } = body
   if (!referrerId || !referredId || !referralCode) {
     return NextResponse.json({ error: 'Missing fields' }, { status: 400 })
+  }
+
+  // Validate the referred user matches the authenticated user
+  if (referredId !== user.id) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
   if (referrerId === referredId) {

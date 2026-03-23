@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createBrowserSupabase } from '@/lib/supabase'
+import ErrorBoundary from '@/components/ErrorBoundary'
 
 export default function AdminDashboard() {
   // Auth enforced by proxy — RBAC handled server-side
@@ -104,6 +105,7 @@ export default function AdminDashboard() {
   }
 
   return (
+    <ErrorBoundary>
     <div style={{background:'#0A0C0F',minHeight:'100vh',color:'#E8E3DC',fontFamily:'system-ui,sans-serif'}}>
       <div style={{background:'#080A0C',borderBottom:'1px solid #272B33',padding:'14px 20px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
@@ -189,9 +191,15 @@ export default function AdminDashboard() {
             ))}
           </div>
         ):loading?(
-          <div style={{textAlign:'center',padding:'60px',color:'#606670'}}>
-            <div style={{fontSize:'32px',marginBottom:'12px'}}>⏳</div>
-            <div style={{fontWeight:'700'}}>Loading requests...</div>
+          <div>
+            {[1,2,3].map(i => (
+              <div key={i} style={{background:'#111316',border:'1px solid #272B33',borderRadius:'13px',padding:'18px',marginBottom:'12px',animation:'pulse 1.5s ease-in-out infinite'}}>
+                <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}`}</style>
+                <div style={{background:'#272B33',borderRadius:'6px',height:'18px',width:'60%',marginBottom:'12px'}}/>
+                <div style={{background:'#272B33',borderRadius:'6px',height:'13px',width:'40%',marginBottom:'8px'}}/>
+                <div style={{background:'#272B33',borderRadius:'6px',height:'13px',width:'80%'}}/>
+              </div>
+            ))}
           </div>
         ):loads.length===0?(
           <div style={{textAlign:'center',padding:'60px',color:'#606670'}}>
@@ -295,5 +303,6 @@ export default function AdminDashboard() {
         })}
       </div>
     </div>
+    </ErrorBoundary>
   )
 }

@@ -25,3 +25,14 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({ success: true })
 }
+
+export async function DELETE() {
+  const supabase = await createServerSupabase()
+  const { data: { user }, error: authError } = await supabase.auth.getUser()
+  if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const admin = createAdminSupabase()
+  await admin.from('driver_push_subscriptions').delete().eq('user_id', user.id)
+
+  return NextResponse.json({ success: true })
+}

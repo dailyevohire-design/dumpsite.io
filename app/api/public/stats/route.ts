@@ -6,9 +6,9 @@ export async function GET() {
     const supabase = createAdminSupabase()
 
     const [jobsRes, driversRes, ordersRes] = await Promise.all([
-      supabase.from('dispatch_orders').select('id, city_id, driver_pay_cents', { count: 'exact' }).eq('status', 'dispatching'),
-      supabase.from('driver_profiles').select('id', { count: 'exact' }).eq('status', 'active'),
-      supabase.from('dispatch_orders').select('driver_pay_cents').eq('status', 'dispatching'),
+      supabase.from('dispatch_orders').select('id, city_id, driver_pay_cents', { count: 'exact' }).eq('status', 'dispatching').limit(500),
+      supabase.from('driver_profiles').select('id', { count: 'exact' }).eq('status', 'active').limit(1),
+      supabase.from('dispatch_orders').select('driver_pay_cents').eq('status', 'dispatching').limit(500),
     ])
 
     const activeJobs = jobsRes.count || 0

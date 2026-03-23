@@ -79,8 +79,17 @@ export async function POST(req: NextRequest) {
   if (!profile) return NextResponse.json({ error: 'Driver profile not found' }, { status: 404 })
 
   const tier = profile.tiers as any
-  if (tier?.slug === 'trial' && tier?.trial_load_limit && profile.trial_loads_used >= tier.trial_load_limit) {
-    return NextResponse.json({ success: false, code: 'TRIAL_LIMIT_REACHED', message: 'You have used all your free trial loads.' }, { status: 403 })
+
+  // Atomic trial limit check + increment (prevents race condition)
+  if (tier?.slug === 'trial') {
+    const { data: trialResult } = await admin.rpc('increment_trial_loads', { p_user_id: user.id })
+    if (trialResult?.[0]?.limit_reached) {
+      return NextResponse.json({
+        success: false,
+        code: 'TRIAL_LIMIT_REACHED',
+        message: 'You have used all your free trial loads.'
+      }, { status: 403 })
+    }
   }
 
   const { count: pendingCount } = await admin.from('load_requests').select('id', { count: 'exact', head: true }).eq('driver_id', user.id).eq('status', 'pending')
@@ -107,9 +116,7 @@ export async function POST(req: NextRequest) {
 
   if (error) return NextResponse.json({ success: false, message: 'Failed to submit. Please try again.' }, { status: 500 })
 
-  if (tier?.slug === 'trial') {
-    await admin.from('driver_profiles').update({ trial_loads_used: profile.trial_loads_used + 1 }).eq('user_id', user.id)
-  }
+  // Trial increment already handled atomically above via RPC
 
   const { data: driverProfile } = await admin
     .from('driver_profiles')

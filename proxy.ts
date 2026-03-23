@@ -54,6 +54,14 @@ export async function proxy(request: NextRequest) {
       if (isApiRoute) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
       return NextResponse.redirect(new URL('/dashboard', request.url))
     }
+
+    // Admin session timeout — 4 hours max
+    const FOUR_HOURS = 4 * 60 * 60 * 1000
+    const sessionAge = Date.now() - new Date(user.last_sign_in_at || user.created_at).getTime()
+    if (sessionAge > FOUR_HOURS) {
+      if (isApiRoute) return NextResponse.json({ error: 'Session expired' }, { status: 401 })
+      return NextResponse.redirect(new URL('/login?reason=session_expired', request.url))
+    }
   }
 
   return response

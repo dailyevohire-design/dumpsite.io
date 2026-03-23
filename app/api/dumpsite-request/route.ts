@@ -49,7 +49,7 @@ export async function POST(req: Request) {
       .single()
 
     if (dbError) {
-      console.error('DB insert failed for dumpsite request:', dbError.message)
+      console.error('[dumpsite-request] DB insert failed:', dbError.code)
       // Still attempt to send email even if DB fails — don't lose the lead
     }
 
@@ -68,20 +68,20 @@ export async function POST(req: Request) {
       })
 
       if (!emailResult.success) {
-        console.error('Email notification failed:', emailResult.error)
+        console.error('[dumpsite-request] Email notification failed')
         try {
           await sendAdminAlert(`New dumpsite interest from ${name} in ${city} — ${yards} yards ${material}. Email notification failed, check logs.`)
         } catch (smsErr) {
-          console.error('SMS fallback also failed:', smsErr)
+          console.error('[dumpsite-request] SMS fallback also failed')
         }
       }
     } catch (emailErr: any) {
-      console.error('Email call crashed:', emailErr.message)
+      console.error('[dumpsite-request] Email call crashed')
     }
 
     return NextResponse.json({ success: true })
   } catch (err: any) {
-    console.error('Dumpsite request error:', err.message)
+    console.error('[dumpsite-request] Unexpected error')
     return NextResponse.json({ success: false, error: 'Something went wrong' }, { status: 500 })
   }
 }

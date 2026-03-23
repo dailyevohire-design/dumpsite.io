@@ -13,12 +13,14 @@ export async function GET(_req: NextRequest) {
     const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
 
+    // Limit to 1000 completed loads to prevent unbounded queries
     const { data: loads } = await admin
       .from('load_requests')
       .select('payout_cents, completed_at, truck_count')
       .eq('driver_id', user.id)
       .eq('status', 'completed')
       .not('payout_cents', 'is', null)
+      .limit(1000)
 
     if (!loads) {
       return NextResponse.json({
