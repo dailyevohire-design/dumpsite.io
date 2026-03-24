@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import LiveStats from '@/components/LiveStats'
 import StickyRequestBar from '@/components/StickyRequestBar'
+import PublicJobsFeed from '@/components/PublicJobsFeed'
 
 const CITIES = ['Arlington','Azle','Bonham','Carrollton','Carthage','Cedar Hill','Cleburne','Colleyville','Covington','Dallas','Denison','Denton','DeSoto','Everman','Ferris','Fort Worth','Garland','Godley','Gordonville','Grand Prairie','Haslet','Hillsboro','Houston','Hutchins','Hutto','Irving','Joshua','Justin','Kaufman','Lake Worth','Little Elm','Mabank','Mansfield','Matador','McKinney','Mesquite','Midlothian','Plano','Ponder','Princeton','Rockwall','Terrell','Venus']
 
@@ -19,6 +20,7 @@ export default function Home() {
       <nav style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'16px 24px',borderBottom:'1px solid #1A1A1A',position:'sticky',top:0,background:'#0A0A0A',zIndex:50}}>
         <span style={{fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
         <div style={{display:'flex',gap:'12px',alignItems:'center',fontFamily:'system-ui'}}>
+          <Link href="/map-public" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>MAP</Link>
           <Link href="/signup" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>SIGN UP</Link>
           <Link href="/login" style={{background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'700',padding:'10px 18px',borderRadius:'4px'}}>SIGN IN</Link>
         </div>
@@ -55,6 +57,16 @@ export default function Home() {
           <LiveStats />
         </div>
       </section>
+
+      {/* S2.5: Live Public Jobs Feed */}
+      <section style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
+        <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'12px'}}>Available Now</p>
+        <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'8px'}}>Real Paying Jobs — Right Now</h2>
+        <p style={{fontSize:'14px',color:'#666',marginBottom:'32px',fontFamily:'system-ui'}}>These are live jobs. Sign up free to claim one and start earning today.</p>
+        <PublicJobsFeed limit={6} />
+      </section>
+
+      <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
 
       {/* S3: How It Works */}
       <section className="fade-in fade-d1" style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>

@@ -99,8 +99,15 @@ export default function SignupPage() {
           } catch {}
         }
       }
+      // Check for pending job from public listing
+      let pendingJobId: string | null = null
+      try { pendingJobId = sessionStorage.getItem('pending_job_id') } catch {}
+      if (pendingJobId) {
+        try { sessionStorage.removeItem('pending_job_id') } catch {}
+      }
+
       setSuccess(true)
-      trackEvent('signup_completed', { truckType: form.truckType, truckCount: form.truckCount })
+      trackEvent('signup_completed', { truckType: form.truckType, truckCount: form.truckCount, pendingJobId })
     } catch (err: any) {
       setError(err.message || 'Something went wrong. Please try again.')
       trackEvent('signup_failed', { error: err.message })
@@ -111,18 +118,34 @@ export default function SignupPage() {
   const inp = { background: '#1C1F24', border: '1px solid #272B33', color: '#E8E3DC', padding: '11px 14px', borderRadius: '9px', fontSize: '14px', width: '100%', outline: 'none', marginTop: '5px' }
   const lbl = { fontSize: '11px', fontWeight: '700' as const, letterSpacing: '0.07em', textTransform: 'uppercase' as const, color: '#606670' }
 
+  // Check for pending job on success screen render
+  const [pendingJobId, setPendingJobId] = useState<string | null>(null)
+  useEffect(() => {
+    if (success) {
+      try {
+        const jobId = sessionStorage.getItem('pending_job_id')
+        if (jobId) setPendingJobId(jobId)
+      } catch {}
+    }
+  }, [success])
+
   if (success) return (
     <div style={{ background: '#0A0C0F', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'system-ui,sans-serif' }}>
       <div style={{ textAlign: 'center', maxWidth: '400px', padding: '20px' }}>
         <div style={{ fontSize: '64px', marginBottom: '16px' }}>✅</div>
-        <h2 style={{ color: '#27AE60', fontWeight: '800', fontSize: '26px', marginBottom: '8px' }}>You're In!</h2>
+        <h2 style={{ color: '#27AE60', fontWeight: '800', fontSize: '26px', marginBottom: '8px' }}>You&apos;re In!</h2>
         <p style={{ color: '#606670', fontSize: '14px', lineHeight: '1.6', marginBottom: '8px' }}>
           Check your email and click the verification link to activate your account.
         </p>
+        {pendingJobId && (
+          <p style={{ color: '#27AE60', fontSize: '13px', fontWeight: '700', marginBottom: '8px' }}>
+            Your job is saved — sign in after verifying to claim it.
+          </p>
+        )}
         <p style={{ color: '#F5A623', fontSize: '13px', fontWeight: '700', marginBottom: '24px' }}>
           ⚠️ You must verify your email before signing in.
         </p>
-        <a href="/login" style={{ background: '#F5A623', color: '#111', padding: '13px 28px', borderRadius: '9px', textDecoration: 'none', fontWeight: '800', fontSize: '15px' }}>
+        <a href={pendingJobId ? `/login?redirect=/dashboard&job=${pendingJobId}` : '/login'} style={{ background: '#F5A623', color: '#111', padding: '13px 28px', borderRadius: '9px', textDecoration: 'none', fontWeight: '800', fontSize: '15px' }}>
           Go to Sign In
         </a>
       </div>
