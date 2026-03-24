@@ -381,6 +381,27 @@ export default function DriverDashboard() {
   const fileRef = useRef<HTMLInputElement>(null)
   const submitResultTimer = useRef<ReturnType<typeof setTimeout>|null>(null)
   const [form, setForm] = useState({ dirtType:'clean_fill', locationText:'', truckType:'tandem_axle', truckCount:'1', yardsEstimated:'', haulDate:'' })
+  const [addressSuggestions, setAddressSuggestions] = useState<string[]>([])
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const addressDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  function onLocationChange(value: string) {
+    setForm(f => ({ ...f, locationText: value }))
+    if (addressDebounce.current) clearTimeout(addressDebounce.current)
+    if (value.length < 3) { setAddressSuggestions([]); setShowSuggestions(false); return }
+    addressDebounce.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=us&q=${encodeURIComponent(value)}`, { headers: { 'User-Agent': 'DumpSite.io/1.0' } })
+        const data = await res.json()
+        if (data?.length > 0) {
+          setAddressSuggestions(data.map((d: any) => d.display_name))
+          setShowSuggestions(true)
+        } else {
+          setShowSuggestions(false)
+        }
+      } catch { setShowSuggestions(false) }
+    }, 300)
+  }
   const router = useRouter()
   // Task 3 — Earnings state
   const [todayEarnings, setTodayEarnings] = useState<number>(0)
@@ -684,9 +705,16 @@ export default function DriverDashboard() {
                       <option value="clay_free">Clay-Free Soil</option>
                     </select>
                   </div>
-                  <div style={{marginBottom:'14px'}}>
+                  <div style={{marginBottom:'14px',position:'relative'}}>
                     <label style={{fontSize:'11px',textTransform:'uppercase' as const,letterSpacing:'0.07em',color:'#606670',fontWeight:'700'}}>Where is the dirt coming from? *</label>
-                    <input style={inp} value={form.locationText} onChange={e => setForm({ ...form, locationText: e.target.value })} placeholder="123 Main St, Dallas TX" />
+                    <input style={inp} value={form.locationText} onChange={e => onLocationChange(e.target.value)} onFocus={() => { if (addressSuggestions.length > 0) setShowSuggestions(true) }} placeholder="Start typing an address..." autoComplete="off" />
+                    {showSuggestions && addressSuggestions.length > 0 && (
+                      <div style={{position:'absolute',top:'100%',left:0,right:0,zIndex:50,background:'#1C1F24',border:'1px solid #272B33',borderRadius:'0 0 9px 9px',maxHeight:'200px',overflowY:'auto'}}>
+                        {addressSuggestions.map((s,i) => (
+                          <div key={i} onClick={() => { setForm(f => ({...f, locationText: s})); setShowSuggestions(false) }} style={{padding:'10px 14px',fontSize:'13px',color:'#E8E3DC',cursor:'pointer',borderBottom:'1px solid #272B33'}} onMouseEnter={e => (e.currentTarget.style.background = '#272B33')} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>{s}</div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px',marginBottom:'14px'}}>
                     <div>
