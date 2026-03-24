@@ -136,7 +136,7 @@ export default function Home() {
             <Link href="/terms" style={{color:'#888',textDecoration:'none'}}>Terms</Link>
             <Link href="/privacy" style={{color:'#888',textDecoration:'none'}}>Privacy</Link>
           </div>
-          <p>© 2025 DumpSite.io — All rights reserved.</p>
+          <p>© 2026 DumpSite.io. All rights reserved. Proprietary platform — unauthorized reproduction prohibited.</p>
         </div>
       </footer>
     </main>
