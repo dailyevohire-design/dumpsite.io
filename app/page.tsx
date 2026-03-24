@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import LiveStats from '@/components/LiveStats'
+import StickyRequestBar from '@/components/StickyRequestBar'
 
 const CITIES = ['Arlington','Azle','Bonham','Carrollton','Carthage','Cedar Hill','Cleburne','Colleyville','Covington','Dallas','Denison','Denton','DeSoto','Everman','Ferris','Fort Worth','Garland','Godley','Gordonville','Grand Prairie','Haslet','Hillsboro','Houston','Hutchins','Hutto','Irving','Joshua','Justin','Kaufman','Lake Worth','Little Elm','Mabank','Mansfield','Matador','McKinney','Mesquite','Midlothian','Plano','Ponder','Princeton','Rockwall','Terrell','Venus']
 
@@ -126,6 +127,8 @@ export default function Home() {
           <Link href="/dumpsite-request" style={{display:'inline-block',background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'14px',fontWeight:'800',letterSpacing:'0.08em',padding:'16px 40px',borderRadius:'4px',textTransform:'uppercase',fontFamily:'system-ui'}}>Get Drivers Now</Link>
         </div>
       </section>
+
+      <StickyRequestBar />
 
       {/* S9: Footer */}
       <footer style={{maxWidth:'1100px',margin:'0 auto',padding:'40px 24px'}}>
