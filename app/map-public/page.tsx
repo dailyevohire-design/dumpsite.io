@@ -99,7 +99,7 @@ export default function PublicMapPage() {
       </nav>
 
       {/* Map area */}
-      <div style={{ flex: 1, position: 'relative', minHeight: '500px' }}>
+      <div style={{ flex: 1, position: 'relative', height: 'calc(100vh - 61px)' }}>
         {(loading || !mounted) ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#606670', fontFamily: 'system-ui' }}>
             Loading map...
