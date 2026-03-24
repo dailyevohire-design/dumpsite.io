@@ -2,6 +2,7 @@ import Link from 'next/link'
 import LiveStats from '@/components/LiveStats'
 import StickyRequestBar from '@/components/StickyRequestBar'
 import PublicJobsFeed from '@/components/PublicJobsFeed'
+import PublicMapPreview from '@/components/PublicMapPreview'
 
 const CITIES = ['Arlington','Azle','Bonham','Carrollton','Carthage','Cedar Hill','Cleburne','Colleyville','Covington','Dallas','Denison','Denton','DeSoto','Everman','Ferris','Fort Worth','Garland','Godley','Gordonville','Grand Prairie','Haslet','Hillsboro','Houston','Hutchins','Hutto','Irving','Joshua','Justin','Kaufman','Lake Worth','Little Elm','Mabank','Mansfield','Matador','McKinney','Mesquite','Midlothian','Plano','Ponder','Princeton','Rockwall','Terrell','Venus']
 
@@ -16,24 +17,26 @@ export default function Home() {
         @media(max-width:768px){.hero-split{grid-template-columns:1fr!important}.steps-2col{grid-template-columns:1fr!important}.city-tags{justify-content:center!important}.footer-links{flex-direction:column;align-items:center;gap:16px!important}.feature-grid{grid-template-columns:1fr!important}}
       `}</style>
 
-      {/* Nav */}
+      {/* S1: Sticky Nav */}
       <nav style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'16px 24px',borderBottom:'1px solid #1A1A1A',position:'sticky',top:0,background:'#0A0A0A',zIndex:50}}>
         <span style={{fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
-        <div style={{display:'flex',gap:'12px',alignItems:'center',fontFamily:'system-ui'}}>
-          <Link href="/map-public" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>MAP</Link>
+        <div style={{display:'flex',gap:'16px',alignItems:'center',fontFamily:'system-ui'}}>
+          <a href="#browse-jobs" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>Browse Jobs</a>
+          <Link href="/map-public" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>Map</Link>
+          <a href="#for-contractors" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>For Contractors</a>
           <Link href="/signup" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>SIGN UP</Link>
           <Link href="/login" style={{background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'700',padding:'10px 18px',borderRadius:'4px'}}>SIGN IN</Link>
         </div>
       </nav>
 
-      {/* S1: Hero Split */}
-      <section style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
+      {/* S2: Hero Split — slightly shorter */}
+      <section style={{maxWidth:'1100px',margin:'0 auto',padding:'40px 24px 24px'}}>
         <div className="hero-split fade-in" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'40px'}}>
           <div style={{borderRight:'1px solid #1A1A1A',paddingRight:'40px'}}>
             <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'16px'}}>For Drivers</p>
             <h1 style={{fontSize:'clamp(32px,4vw,52px)',fontWeight:'400',lineHeight:'1.1',marginBottom:'20px'}}>Get Paid to Dump.<br/><em style={{fontStyle:'italic',color:'#888'}}>Every Load.</em></h1>
-            <p style={{fontSize:'15px',color:'#666',lineHeight:'1.7',marginBottom:'28px',fontFamily:'system-ui'}}>$35–$55 per load. DFW's fastest growing driver network.</p>
-            <Link href="/signup" style={{display:'inline-block',background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'800',letterSpacing:'0.1em',padding:'16px 32px',borderRadius:'4px',textTransform:'uppercase',fontFamily:'system-ui'}}>Start Hauling — It's Free</Link>
+            <p style={{fontSize:'15px',color:'#666',lineHeight:'1.7',marginBottom:'28px',fontFamily:'system-ui'}}>$35–$55 per load. DFW&apos;s fastest growing driver network.</p>
+            <Link href="/signup" style={{display:'inline-block',background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'800',letterSpacing:'0.1em',padding:'16px 32px',borderRadius:'4px',textTransform:'uppercase',fontFamily:'system-ui'}}>Start Hauling — It&apos;s Free</Link>
             <p style={{fontSize:'12px',color:'#555',marginTop:'14px',fontFamily:'system-ui'}}>Join 200+ DFW drivers already on the platform</p>
           </div>
           <div>
@@ -44,12 +47,19 @@ export default function Home() {
             <p style={{fontSize:'12px',color:'#555',marginTop:'14px',fontFamily:'system-ui'}}>Trusted by excavation companies across DFW</p>
           </div>
         </div>
+        {/* Scroll indicator */}
+        <div style={{textAlign:'center',marginTop:'24px'}}>
+          <a href="#browse-jobs" style={{color:'#606670',textDecoration:'none',fontSize:'13px',fontFamily:'system-ui',display:'inline-flex',flexDirection:'column',alignItems:'center',gap:'4px'}}>
+            <span>Browse available jobs</span>
+            <span style={{fontSize:'18px'}}>&#x2193;</span>
+          </a>
+        </div>
       </section>
 
-      {/* S2: Live Stats Bar */}
+      {/* S3: Live Stats Bar — compact */}
       <section style={{background:'#111',borderTop:'1px solid #1A1A1A',borderBottom:'1px solid #1A1A1A'}}>
-        <div style={{maxWidth:'1100px',margin:'0 auto',padding:'24px'}}>
-          <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'16px'}}>
+        <div style={{maxWidth:'1100px',margin:'0 auto',padding:'16px 24px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'10px'}}>
             <div style={{width:'8px',height:'8px',borderRadius:'50%',background:'#27AE60',boxShadow:'0 0 8px rgba(39,174,96,0.5)',animation:'pulse 2s infinite'}} />
             <span style={{fontSize:'10px',letterSpacing:'0.15em',color:'#606670',fontFamily:'system-ui',textTransform:'uppercase',fontWeight:'700'}}>Live Market Data</span>
           </div>
@@ -58,17 +68,27 @@ export default function Home() {
         </div>
       </section>
 
-      {/* S2.5: Live Public Jobs Feed */}
-      <section style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
-        <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'12px'}}>Available Now</p>
-        <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'8px'}}>Real Paying Jobs — Right Now</h2>
-        <p style={{fontSize:'14px',color:'#666',marginBottom:'32px',fontFamily:'system-ui'}}>These are live jobs. Sign up free to claim one and start earning today.</p>
+      {/* S4: Browsable Job Listings — the Airbnb moment */}
+      <section id="browse-jobs" style={{maxWidth:'1100px',margin:'0 auto',padding:'48px 24px',scrollMarginTop:'80px'}}>
         <PublicJobsFeed limit={6} />
       </section>
 
       <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
 
-      {/* S3: How It Works */}
+      {/* S5: Public Map Preview */}
+      <section style={{maxWidth:'1100px',margin:'0 auto',padding:'48px 24px'}}>
+        <h2 style={{fontSize:'20px',fontWeight:'700',marginBottom:'20px'}}>Jobs Across DFW — Click a pin to see details</h2>
+        <PublicMapPreview />
+        <div style={{textAlign:'center',marginTop:'20px'}}>
+          <Link href="/map-public" style={{color:'#F5A623',textDecoration:'none',fontSize:'14px',fontWeight:'700',fontFamily:'system-ui'}}>
+            &#x1F5FA;&#xFE0F; Open Full Map &rarr;
+          </Link>
+        </div>
+      </section>
+
+      <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
+
+      {/* S6: How It Works */}
       <section className="fade-in fade-d1" style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
         <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'12px'}}>How It Works</p>
         <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'40px'}}>Simple for everyone.</h2>
@@ -96,7 +116,7 @@ export default function Home() {
 
       <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
 
-      {/* S4: Why DumpSite.io */}
+      {/* S7: Why DumpSite.io */}
       <section className="fade-in fade-d2" style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
         <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'12px'}}>Why DumpSite.io</p>
         <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'40px'}}>Built for the way dirt moves.</h2>
@@ -117,22 +137,22 @@ export default function Home() {
 
       <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
 
-      {/* S7: City Coverage */}
+      {/* S8: City Coverage */}
       <section style={{maxWidth:'1100px',margin:'0 auto',padding:'60px 24px'}}>
         <p style={{fontSize:'11px',letterSpacing:'0.2em',color:'#F5A623',fontFamily:'system-ui',textTransform:'uppercase',marginBottom:'12px'}}>Coverage</p>
         <h2 style={{fontSize:'32px',fontWeight:'400',marginBottom:'8px'}}>Operating Across 40+ DFW Cities</h2>
-        <p style={{fontSize:'14px',color:'#666',marginBottom:'32px',fontFamily:'system-ui'}}>Expanding to Houston, Austin, and San Antonio in 2025</p>
+        <p style={{fontSize:'14px',color:'#666',marginBottom:'32px',fontFamily:'system-ui'}}>Expanding to Houston, Austin, and San Antonio in 2026</p>
         <div className="city-tags" style={{display:'flex',flexWrap:'wrap',gap:'8px'}}>
           {CITIES.map(c=>(
-            <span key={c} style={{background:'#111',border:'1px solid #1A1A1A',borderRadius:'6px',padding:'6px 14px',fontSize:'12px',color:'#888',fontFamily:'system-ui'}}>📍 {c}</span>
+            <Link key={c} href={`/cities/${c.toLowerCase().replace(/\s+/g,'-')}`} style={{background:'#111',border:'1px solid #1A1A1A',borderRadius:'6px',padding:'6px 14px',fontSize:'12px',color:'#888',fontFamily:'system-ui',textDecoration:'none'}}>&#x1F4CD; {c}</Link>
           ))}
         </div>
       </section>
 
       <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
 
-      {/* S8: Contractor CTA */}
-      <section style={{background:'#111',borderTop:'1px solid #1A1A1A',borderBottom:'1px solid #1A1A1A',padding:'60px 24px'}}>
+      {/* S9: Contractor CTA */}
+      <section id="for-contractors" style={{background:'#111',borderTop:'1px solid #1A1A1A',borderBottom:'1px solid #1A1A1A',padding:'60px 24px',scrollMarginTop:'80px'}}>
         <div style={{maxWidth:'700px',margin:'0 auto',textAlign:'center'}}>
           <h2 style={{fontSize:'28px',fontWeight:'400',marginBottom:'12px'}}>Have a construction site that needs dirt removed?</h2>
           <p style={{fontSize:'15px',color:'#888',marginBottom:'32px',fontFamily:'system-ui'}}>We have verified drivers ready in your city today.</p>
@@ -142,16 +162,17 @@ export default function Home() {
 
       <StickyRequestBar />
 
-      {/* S9: Footer */}
+      {/* S10: Footer */}
       <footer style={{maxWidth:'1100px',margin:'0 auto',padding:'40px 24px'}}>
         <div className="footer-links" style={{display:'flex',justifyContent:'space-between',alignItems:'center',fontFamily:'system-ui',fontSize:'13px',color:'#555',flexWrap:'wrap',gap:'20px'}}>
           <div style={{display:'flex',gap:'24px'}}>
             <Link href="/signup" style={{color:'#888',textDecoration:'none'}}>Driver Signup</Link>
+            <Link href="/map-public" style={{color:'#888',textDecoration:'none'}}>Job Map</Link>
             <Link href="/dumpsite-request" style={{color:'#888',textDecoration:'none'}}>Post a Job</Link>
             <Link href="/terms" style={{color:'#888',textDecoration:'none'}}>Terms</Link>
             <Link href="/privacy" style={{color:'#888',textDecoration:'none'}}>Privacy</Link>
           </div>
-          <p>© 2025 DumpSite.io. All rights reserved.</p>
+          <p>&copy; 2026 DumpSite.io. All rights reserved.</p>
         </div>
       </footer>
     </main>

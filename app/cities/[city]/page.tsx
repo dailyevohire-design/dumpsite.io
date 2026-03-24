@@ -6,20 +6,15 @@ import ClaimJobModal from '@/components/ClaimJobModal'
 
 interface PublicJob {
   id: string
-  city_name: string
-  driver_pay_cents: number
-  yards_needed: number
-  truck_type_needed: string
+  cityName: string
+  payPerLoad: number
+  yardsNeeded: number
+  truckTypeNeeded: string
+  truckAccessLabel: string
   urgency: string
-  created_at: string
-}
-
-function formatTruckType(t: string): string {
-  const map: Record<string, string> = {
-    tandem_axle: 'Tandem Axle', end_dump: 'End Dump', tri_axle: 'Tri-Axle',
-    super_dump: 'Super Dump', semi_transfer: 'Semi Transfer', bottom_dump: 'Bottom Dump',
-  }
-  return map[t] || t || 'Any Truck'
+  createdAt: string
+  lat: number
+  lng: number
 }
 
 function formatCitySlug(slug: string): string {
@@ -40,13 +35,13 @@ export default function CityPage() {
   useEffect(() => {
     fetch(`/api/public/jobs?city=${encodeURIComponent(cityName)}`)
       .then(r => r.json())
-      .then(d => { if (d.success && d.jobs) setJobs(d.jobs) })
+      .then(d => { if (d.jobs) setJobs(d.jobs) })
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [cityName])
 
   const avgPay = jobs.length > 0
-    ? Math.round(jobs.reduce((s, j) => s + j.driver_pay_cents, 0) / jobs.length / 100)
+    ? Math.round(jobs.reduce((s, j) => s + j.payPerLoad, 0) / jobs.length)
     : 40
 
   return (
@@ -72,52 +67,46 @@ export default function CityPage() {
         </p>
 
         {!loading && jobs.length > 0 && (
-          <div className="feature-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '48px' }}>
+          <div className="city-jobs-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '48px' }}>
             {jobs.map(job => {
-              const pay = Math.round(job.driver_pay_cents / 100)
+              const isUrgent = job.urgency === 'urgent'
+              const isEndDump = job.truckAccessLabel !== 'Tandem Axle Only'
               return (
                 <div key={job.id} style={{
                   background: '#111316', border: '1px solid #272B33', borderRadius: '12px',
-                  padding: '24px', display: 'flex', flexDirection: 'column', gap: '12px',
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: '14px', color: '#E8E3DC', fontWeight: '600', fontFamily: 'system-ui' }}>
-                      {job.city_name}
-                    </span>
-                    {job.urgency === 'urgent' && (
-                      <span style={{
-                        background: 'rgba(231,76,60,0.15)', color: '#E74C3C',
-                        fontSize: '10px', fontWeight: '800', padding: '3px 8px',
-                        borderRadius: '4px', textTransform: 'uppercase', fontFamily: 'system-ui',
-                      }}>
-                        Urgent
-                      </span>
-                    )}
+                  overflow: 'hidden', display: 'flex', flexDirection: 'column',
+                  cursor: 'pointer', transition: 'border-color 0.2s',
+                }} onClick={() => setModalJob(job)}>
+                  <div style={{ padding: '16px 20px 12px', borderBottom: '1px solid #1C1F24' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '16px', fontWeight: '700', color: '#E8E3DC' }}>{job.cityName}</span>
+                      {isUrgent && (
+                        <span style={{ background: 'rgba(231,76,60,0.15)', color: '#E74C3C', fontSize: '10px', fontWeight: '800', padding: '3px 8px', borderRadius: '4px', textTransform: 'uppercase', fontFamily: 'system-ui' }}>URGENT</span>
+                      )}
+                    </div>
                   </div>
-
-                  <div style={{ color: '#F5A623', fontSize: '28px', fontWeight: '800', fontFamily: 'system-ui' }}>
-                    ${pay}<span style={{ fontSize: '14px', fontWeight: '600', color: '#888' }}>/load</span>
+                  <div style={{ padding: '16px 20px', flex: 1 }}>
+                    <div style={{ color: '#F5A623', fontSize: '36px', fontWeight: '800', fontFamily: 'system-ui', marginBottom: '8px' }}>
+                      ${job.payPerLoad}<span style={{ fontSize: '14px', fontWeight: '600', color: '#606670' }}>/load</span>
+                    </div>
+                    <div style={{ fontSize: '13px', color: '#606670', fontFamily: 'system-ui', marginBottom: '4px' }}>
+                      &#x1F4E6; {job.yardsNeeded} yards needed
+                    </div>
+                    <div style={{ fontSize: '12px', color: isEndDump ? '#27AE60' : '#606670', fontFamily: 'system-ui' }}>
+                      &#x1F69B; {job.truckAccessLabel}
+                    </div>
                   </div>
-
-                  <div style={{ fontSize: '13px', color: '#888', fontFamily: 'system-ui' }}>
-                    {job.yards_needed} yards needed
-                  </div>
-
-                  <div style={{ fontSize: '12px', color: '#606670', fontFamily: 'system-ui' }}>
-                    {formatTruckType(job.truck_type_needed)}
-                  </div>
-
-                  <button
-                    onClick={() => setModalJob(job)}
-                    style={{
-                      marginTop: 'auto', background: '#F5A623', color: '#0A0A0A',
-                      border: 'none', padding: '11px', borderRadius: '8px',
+                  <div style={{ padding: '0 20px 20px' }}>
+                    <button style={{
+                      width: '100%', height: '44px',
+                      background: isUrgent ? '#E74C3C' : '#F5A623',
+                      color: '#111', border: 'none', borderRadius: '8px',
                       fontWeight: '800', fontSize: '13px', cursor: 'pointer',
                       textTransform: 'uppercase', fontFamily: 'system-ui',
-                    }}
-                  >
-                    Claim This Job &rarr;
-                  </button>
+                    }}>
+                      {isUrgent ? 'Claim Urgent Job' : 'Claim This Job \u2192'}
+                    </button>
+                  </div>
                 </div>
               )
             })}
@@ -167,7 +156,7 @@ export default function CityPage() {
 
       {modalJob && <ClaimJobModal job={modalJob} onClose={() => setModalJob(null)} />}
 
-      <style>{`@media(max-width:768px){.feature-grid{grid-template-columns:1fr!important}}`}</style>
+      <style>{`@media(max-width:900px){.city-jobs-grid{grid-template-columns:repeat(2,1fr)!important}}@media(max-width:640px){.city-jobs-grid{grid-template-columns:1fr!important}}`}</style>
     </main>
   )
 }

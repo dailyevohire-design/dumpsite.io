@@ -1,67 +1,16 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { CITY_COORDS } from "@/lib/city-coords";
 
-const CITY_COORDS: Record<string, [number, number]> = {
-  "Dallas": [32.7767, -96.7970],
-  "Fort Worth": [32.7555, -97.3308],
-  "Irving": [32.8140, -96.9489],
-  "Arlington": [32.7357, -97.1081],
-  "Grand Prairie": [32.7460, -97.0228],
-  "Plano": [33.0198, -96.6989],
-  "Garland": [32.9126, -96.6389],
-  "Mesquite": [32.7668, -96.5992],
-  "Denton": [33.2148, -97.1331],
-  "McKinney": [33.1972, -96.6397],
-  "Houston": [29.7604, -95.3698],
-  "Austin": [30.2672, -97.7431],
-  "Cleburne": [32.3479, -97.3886],
-  "Ferris": [32.5335, -96.6644],
-  "Midlothian": [32.4821, -97.0050],
-  "Azle": [32.8957, -97.5467],
-  "Cedar Hill": [32.5885, -96.9561],
-  "Mansfield": [32.5632, -97.1417],
-  "Colleyville": [32.8890, -97.1503],
-  "Haslet": [32.9657, -97.3467],
-  "Justin": [33.0851, -97.2947],
-  "Lake Worth": [32.8021, -97.4378],
-  "Everman": [32.6312, -97.2895],
-  "Venus": [32.4307, -97.1003],
-  "Princeton": [33.1776, -96.4997],
-  "Little Elm": [33.1629, -96.9375],
-  "Godley": [32.4457, -97.5267],
-  "Joshua": [32.4618, -97.3886],
-  "Terrell": [32.7362, -96.2752],
-  "Denison": [33.7557, -96.5364],
-  "Mabank": [32.3668, -96.1044],
-  "Alvarado": [32.4068, -97.2142],
-  "Kaufman": [32.5893, -96.3058],
-  "Carthage": [32.1571, -94.3391],
-  "DeSoto": [32.5896, -96.8572],
-  "Covington": [32.1746, -97.2561],
-  "Hillsboro": [32.0126, -97.1267],
-  "Hutchins": [32.6418, -96.7133],
-  "Ponder": [33.1918, -97.2869],
-  "Gordonville": [33.8074, -96.8536],
-  "Matador": [34.0112, -100.8237],
-  "Rockwall": [32.9290, -96.4597],
-  "Hutto": [30.5427, -97.5491],
-  "Bonham": [33.5762, -96.1769],
-  "Carrollton": [32.9537, -96.8903],
-  "Jimmy": [32.7555, -97.3308],
-};
-
-function addFuzz(coords: [number, number]): [number, number] {
-  const angle = Math.random() * 2 * Math.PI;
-  const radius = Math.random() * 0.055;
-  return [coords[0] + radius * Math.cos(angle), coords[1] + radius * Math.sin(angle)];
-}
-
-function getCoords(cityName: string): [number, number] {
-  if (!cityName) return addFuzz([32.78, -97.05]);
-  for (const [key, coords] of Object.entries(CITY_COORDS)) {
-    if (cityName.toLowerCase().includes(key.toLowerCase())) return addFuzz(coords);
-  }
-  return addFuzz([32.78, -97.05]);
+/**
+ * SECURITY: All map pins use city center coordinates from CITY_COORDS.
+ * NEVER uses client_address, delivery_latitude, or delivery_longitude.
+ */
+function getCityCoords(cityName: string): [number, number] {
+  const coords = CITY_COORDS[cityName] || CITY_COORDS["Dallas"];
+  // Add jitter so multiple jobs in the same city don't stack exactly
+  const jitter = (Math.random() - 0.5) * 0.02;
+  return [coords.lat + jitter, coords.lng + jitter];
 }
 
 interface Job {
@@ -97,19 +46,20 @@ export default function MapView({ jobs, onSubmitInterest }: Props) {
         attribution: "&copy; OpenStreetMap contributors",
       }).addTo(map);
       jobs.forEach((job) => {
-        const city = job.cities?.name || "DFW";
-        const coords = getCoords(city);
+        const city = job.cities?.name || "Dallas";
+        // SECURITY: City center coordinates only — never exact address
+        const coords = getCityCoords(city);
         const pay = Math.round((job.driver_pay_cents || 2000) / 100);
         const yards = job.yards_needed || "?";
-        const isEndDump = job.truck_type_needed === 'end_dump' || (job.yards_needed && job.yards_needed >= 100);
-        const truckLabel = isEndDump ? 'End Dump · 18-Wheeler · Tandem' : 'Tandem Only';
+        const isEndDump = job.truck_type_needed === 'end_dump' || job.truck_type_needed === 'semi_transfer' || (job.yards_needed && job.yards_needed >= 100);
+        const truckLabel = isEndDump ? 'End Dump \u00b7 18-Wheeler \u00b7 Tandem' : 'Tandem Only';
         const truckColor = isEndDump ? '#27AE60' : '#888';
         const marker = L.marker(coords).addTo(map);
         marker.bindPopup(
           "<div style='font-family:sans-serif;min-width:190px;'>" +
           "<div style='font-weight:700;font-size:14px;margin-bottom:6px;'>Delivery Job - " + city + "</div>" +
           "<div style='color:#888;font-size:12px;margin-bottom:4px;'>" + yards + " yards needed</div>" +
-          "<div style='color:" + truckColor + ";font-size:11px;margin-bottom:6px;'>🚛 " + truckLabel + "</div>" +
+          "<div style='color:" + truckColor + ";font-size:11px;margin-bottom:6px;'>\uD83D\uDE9B " + truckLabel + "</div>" +
           "<div style='color:#F5A623;font-weight:700;font-size:22px;margin-bottom:12px;'>$" + pay + " / load</div>" +
           "<button id='btn-" + job.id + "' style='background:#F5A623;color:#111;border:none;padding:9px 0;border-radius:7px;cursor:pointer;font-weight:800;width:100%;font-size:13px;'>Submit Interest</button>" +
           "</div>"
@@ -131,7 +81,7 @@ export default function MapView({ jobs, onSubmitInterest }: Props) {
         background: '#111316', border: '1px solid #272B33', borderRadius: '12px',
         padding: '40px', textAlign: 'center', fontFamily: 'system-ui',
       }}>
-        <div style={{ fontSize: '40px', marginBottom: '12px' }}>🗺️</div>
+        <div style={{ fontSize: '40px', marginBottom: '12px' }}>{'\uD83D\uDDFA\uFE0F'}</div>
         <div style={{ fontWeight: '700', fontSize: '16px', color: '#E8E3DC', marginBottom: '8px' }}>
           Map unavailable
         </div>
