@@ -3,6 +3,15 @@ import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
 import crypto from 'crypto'
 import { rateLimit } from '@/lib/rate-limit'
+import { CITY_COORDS } from '@/lib/city-coords'
+
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371
+  const dLat = (lat2 - lat1) * Math.PI / 180
+  const dLng = (lng2 - lng1) * Math.PI / 180
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
 
 function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex')
@@ -63,7 +72,7 @@ export async function GET(
   // Load load_request + dispatch_order for safe fields only
   const { data: load } = await admin
     .from('load_requests')
-    .select('id, dispatch_order_id')
+    .select('id, dispatch_order_id, location_text')
     .eq('id', accessToken.load_request_id)
     .single()
 
@@ -75,6 +84,7 @@ export async function GET(
   let payDollars = 20
   let deliveryLat: number | null = null
   let deliveryLng: number | null = null
+  let distanceMiles: number | null = null
 
   if (load.dispatch_order_id) {
     const { data: order } = await admin
@@ -87,6 +97,30 @@ export async function GET(
       cityName = (order.cities as any)?.name || cityName
       deliveryLat = order.delivery_latitude
       deliveryLng = order.delivery_longitude
+
+      // Fallback to city center
+      if (!deliveryLat && cityName && CITY_COORDS[cityName]) {
+        deliveryLat = CITY_COORDS[cityName].lat
+        deliveryLng = CITY_COORDS[cityName].lng
+      }
+
+      // Calculate distance from driver's pickup location to delivery
+      if (deliveryLat && deliveryLng && load.location_text) {
+        try {
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 4000)
+          const geoRes = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(load.location_text)}`,
+            { headers: { 'User-Agent': 'DumpSite.io/1.0' }, signal: controller.signal }
+          )
+          clearTimeout(timeout)
+          const geoData = await geoRes.json()
+          if (geoData?.[0]) {
+            const km = haversineKm(parseFloat(geoData[0].lat), parseFloat(geoData[0].lon), deliveryLat, deliveryLng)
+            distanceMiles = Math.round(km * 0.621371 * 10) / 10
+          }
+        } catch {}
+      }
     }
   }
 
@@ -118,5 +152,6 @@ export async function GET(
     alreadyStarted: !!accessToken.used_at,
     deliveryLat,
     deliveryLng,
+    distanceMiles,
   })
 }

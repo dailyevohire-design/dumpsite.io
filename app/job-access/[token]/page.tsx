@@ -69,26 +69,12 @@ export default function JobAccessPage() {
     }
   }, [token])
 
-  // Calculate distance to delivery site on load (silent GPS — no prompt if already allowed)
+  // Use server-calculated distance (from driver's pickup location to delivery site)
   useEffect(() => {
-    if (!jobData?.deliveryLat || !jobData?.deliveryLng) return
-    if (revealed) return // already started, don't need preview
-    if (!navigator.geolocation) return
-
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        const R = 3959 // earth radius in miles
-        const dLat = (jobData.deliveryLat - pos.coords.latitude) * Math.PI / 180
-        const dLng = (jobData.deliveryLng - pos.coords.longitude) * Math.PI / 180
-        const a = Math.sin(dLat / 2) ** 2 + Math.cos(pos.coords.latitude * Math.PI / 180) * Math.cos(jobData.deliveryLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2
-        const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-        setDistanceMiles(Math.round(dist * 10) / 10)
-        setCurrentPos({ lat: pos.coords.latitude, lng: pos.coords.longitude })
-      },
-      () => {}, // silently fail — distance is a nice-to-have
-      { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
-    )
-  }, [jobData, revealed])
+    if (jobData?.distanceMiles) {
+      setDistanceMiles(jobData.distanceMiles)
+    }
+  }, [jobData])
 
   // Geofence watching after reveal
   useEffect(() => {
@@ -622,10 +608,10 @@ export default function JobAccessPage() {
           {distanceMiles !== null && (
             <div style={{ background: 'rgba(59,138,232,0.08)', border: '1px solid rgba(59,138,232,0.25)', borderRadius: '10px', padding: '14px', marginBottom: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div>
-                <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.07em', color: '#606670', fontWeight: '700' }}>Distance from you</div>
-                <div style={{ fontSize: '26px', fontWeight: '900', color: '#3A8AE8' }}>{distanceMiles} <span style={{ fontSize: '14px', fontWeight: '600' }}>miles</span></div>
+                <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.07em', color: '#606670', fontWeight: '700' }}>Distance to dump site</div>
+                <div style={{ fontSize: '28px', fontWeight: '900', color: '#3A8AE8' }}>{distanceMiles} <span style={{ fontSize: '14px', fontWeight: '600' }}>miles</span></div>
               </div>
-              <div style={{ fontSize: '11px', color: '#606670', textAlign: 'right', maxWidth: '140px' }}>
+              <div style={{ fontSize: '12px', color: '#606670', textAlign: 'right', maxWidth: '140px' }}>
                 ~{Math.round(distanceMiles * 2)} min drive
               </div>
             </div>
