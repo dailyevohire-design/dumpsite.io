@@ -72,7 +72,7 @@ export async function GET(
   // Load load_request + dispatch_order for safe fields only
   const { data: load } = await admin
     .from('load_requests')
-    .select('id, dispatch_order_id, location_text')
+    .select('id, dispatch_order_id, location_text, pickup_latitude, pickup_longitude')
     .eq('id', accessToken.load_request_id)
     .single()
 
@@ -104,22 +104,30 @@ export async function GET(
         deliveryLng = CITY_COORDS[cityName].lng
       }
 
-      // Calculate distance from driver's pickup location to delivery
-      if (deliveryLat && deliveryLng && load.location_text) {
-        try {
-          const controller = new AbortController()
-          const timeout = setTimeout(() => controller.abort(), 4000)
-          const geoRes = await fetch(
-            `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(load.location_text)}`,
-            { headers: { 'User-Agent': 'DumpSite.io/1.0' }, signal: controller.signal }
-          )
-          clearTimeout(timeout)
-          const geoData = await geoRes.json()
-          if (geoData?.[0]) {
-            const km = haversineKm(parseFloat(geoData[0].lat), parseFloat(geoData[0].lon), deliveryLat, deliveryLng)
-            distanceMiles = Math.round(km * 0.621371 * 10) / 10
-          }
-        } catch {}
+      // Calculate distance from driver's pickup to delivery
+      if (deliveryLat && deliveryLng) {
+        // Use stored pickup coordinates (fast, no API call)
+        if (load.pickup_latitude && load.pickup_longitude) {
+          const km = haversineKm(load.pickup_latitude, load.pickup_longitude, deliveryLat, deliveryLng)
+          distanceMiles = Math.round(km * 0.621371 * 10) / 10
+        }
+        // Fallback: geocode location_text
+        else if (load.location_text) {
+          try {
+            const controller = new AbortController()
+            const timeout = setTimeout(() => controller.abort(), 4000)
+            const geoRes = await fetch(
+              `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(load.location_text)}`,
+              { headers: { 'User-Agent': 'DumpSite.io/1.0' }, signal: controller.signal }
+            )
+            clearTimeout(timeout)
+            const geoData = await geoRes.json()
+            if (geoData?.[0]) {
+              const km = haversineKm(parseFloat(geoData[0].lat), parseFloat(geoData[0].lon), deliveryLat, deliveryLng)
+              distanceMiles = Math.round(km * 0.621371 * 10) / 10
+            }
+          } catch {}
+        }
       }
     }
   }

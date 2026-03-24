@@ -26,6 +26,10 @@ ALTER TABLE load_requests ADD COLUMN IF NOT EXISTS rejected_reason text;
 ALTER TABLE load_requests ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
 ALTER TABLE load_requests ADD COLUMN IF NOT EXISTS reviewed_by uuid;
 
+-- Pickup coordinates (saved from address autocomplete — avoids re-geocoding)
+ALTER TABLE load_requests ADD COLUMN IF NOT EXISTS pickup_latitude double precision;
+ALTER TABLE load_requests ADD COLUMN IF NOT EXISTS pickup_longitude double precision;
+
 -- Idempotency
 ALTER TABLE load_requests ADD COLUMN IF NOT EXISTS idempotency_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_load_requests_idempotency

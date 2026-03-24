@@ -380,13 +380,13 @@ export default function DriverDashboard() {
   const [loadingLoads, setLoadingLoads] = useState(true)
   const fileRef = useRef<HTMLInputElement>(null)
   const submitResultTimer = useRef<ReturnType<typeof setTimeout>|null>(null)
-  const [form, setForm] = useState({ dirtType:'clean_fill', locationText:'', truckType:'tandem_axle', truckCount:'1', yardsEstimated:'', haulDate:'' })
-  const [addressSuggestions, setAddressSuggestions] = useState<string[]>([])
+  const [form, setForm] = useState({ dirtType:'clean_fill', locationText:'', truckType:'tandem_axle', truckCount:'1', yardsEstimated:'', haulDate:'', pickupLat:'', pickupLng:'' })
+  const [addressSuggestions, setAddressSuggestions] = useState<any[]>([])
   const [showSuggestions, setShowSuggestions] = useState(false)
   const addressDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   function onLocationChange(value: string) {
-    setForm(f => ({ ...f, locationText: value }))
+    setForm(f => ({ ...f, locationText: value, pickupLat: '', pickupLng: '' }))
     if (addressDebounce.current) clearTimeout(addressDebounce.current)
     if (value.length < 3) { setAddressSuggestions([]); setShowSuggestions(false); return }
     addressDebounce.current = setTimeout(async () => {
@@ -394,7 +394,7 @@ export default function DriverDashboard() {
         const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=us&q=${encodeURIComponent(value)}`, { headers: { 'User-Agent': 'DumpSite.io/1.0' } })
         const data = await res.json()
         if (data?.length > 0) {
-          setAddressSuggestions(data.map((d: any) => d.display_name))
+          setAddressSuggestions(data)
           setShowSuggestions(true)
         } else {
           setShowSuggestions(false)
@@ -544,6 +544,8 @@ export default function DriverDashboard() {
           dirtType: form.dirtType,
           photoUrl,
           locationText: form.locationText.trim(),
+          pickupLat: form.pickupLat ? parseFloat(form.pickupLat) : undefined,
+          pickupLng: form.pickupLng ? parseFloat(form.pickupLng) : undefined,
           truckType: form.truckType,
           truckCount: form.truckCount,
           yardsEstimated: form.yardsEstimated,
@@ -560,7 +562,7 @@ export default function DriverDashboard() {
         setSelectedJob(null)
         setPhotoFile(null)
         setPhotoPreview(null)
-        setForm({ dirtType:'clean_fill', locationText:'', truckType:'tandem_axle', truckCount:'1', yardsEstimated:'', haulDate:'' })
+        setForm({ dirtType:'clean_fill', locationText:'', truckType:'tandem_axle', truckCount:'1', yardsEstimated:'', haulDate:'', pickupLat:'', pickupLng:'' })
         const supabase = createBrowserSupabase()
         await fetchLoads(supabase, user.id)
         setActiveTab('loads')
@@ -710,8 +712,8 @@ export default function DriverDashboard() {
                     <input style={inp} value={form.locationText} onChange={e => onLocationChange(e.target.value)} onFocus={() => { if (addressSuggestions.length > 0) setShowSuggestions(true) }} placeholder="Start typing an address..." autoComplete="off" />
                     {showSuggestions && addressSuggestions.length > 0 && (
                       <div style={{position:'absolute',top:'100%',left:0,right:0,zIndex:50,background:'#1C1F24',border:'1px solid #272B33',borderRadius:'0 0 9px 9px',maxHeight:'200px',overflowY:'auto'}}>
-                        {addressSuggestions.map((s,i) => (
-                          <div key={i} onClick={() => { setForm(f => ({...f, locationText: s})); setShowSuggestions(false) }} style={{padding:'10px 14px',fontSize:'13px',color:'#E8E3DC',cursor:'pointer',borderBottom:'1px solid #272B33'}} onMouseEnter={e => (e.currentTarget.style.background = '#272B33')} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>{s}</div>
+                        {addressSuggestions.map((s: any, i: number) => (
+                          <div key={i} onClick={() => { setForm(f => ({...f, locationText: s.display_name, pickupLat: s.lat, pickupLng: s.lon})); setShowSuggestions(false) }} style={{padding:'10px 14px',fontSize:'13px',color:'#E8E3DC',cursor:'pointer',borderBottom:'1px solid #272B33'}} onMouseEnter={e => (e.currentTarget.style.background = '#272B33')} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>{s.display_name}</div>
                         ))}
                       </div>
                     )}

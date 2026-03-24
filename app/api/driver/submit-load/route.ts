@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
   let body: any
   try { body = await req.json() } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }) }
 
-  const { dirtType, photoUrl, locationText, truckType, truckCount, yardsEstimated, haulDate, idempotencyKey, dispatchOrderId } = body
+  const { dirtType, photoUrl, locationText, truckType, truckCount, yardsEstimated, haulDate, idempotencyKey, dispatchOrderId, pickupLat, pickupLng } = body
 
   if (!dirtType || !photoUrl || !locationText || !truckType || !truckCount || !yardsEstimated || !haulDate || !idempotencyKey || !dispatchOrderId) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
@@ -99,7 +99,7 @@ export async function POST(req: NextRequest) {
 
   const requiresExtraReview = cleanDirtType === 'caliche'
 
-  const { data: loadReq, error } = await admin.from('load_requests').upsert({
+  const insertData: Record<string, any> = {
     idempotency_key: idempotencyKey,
     driver_id: user.id,
     dispatch_order_id: dispatchOrderId,
@@ -112,7 +112,17 @@ export async function POST(req: NextRequest) {
     haul_date: haulDate,
     status: 'pending',
     requires_extra_review: requiresExtraReview,
-  }, { onConflict: 'idempotency_key' }).select().single()
+  }
+
+  // Save pickup coordinates if provided (from address autocomplete)
+  if (typeof pickupLat === 'number' && typeof pickupLng === 'number') {
+    insertData.pickup_latitude = pickupLat
+    insertData.pickup_longitude = pickupLng
+  }
+
+  const { data: loadReq, error } = await admin.from('load_requests').upsert(
+    insertData, { onConflict: 'idempotency_key' }
+  ).select().single()
 
   if (error) return NextResponse.json({ success: false, message: 'Failed to submit. Please try again.' }, { status: 500 })
 
