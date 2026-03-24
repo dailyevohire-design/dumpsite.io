@@ -98,28 +98,6 @@ export default function SupportWidget() {
               </div>
             </a>
 
-            {/* Call */}
-            <a
-              href="tel:+19452938600"
-              style={{
-                display: 'flex', alignItems: 'center', gap: '12px',
-                padding: '14px', background: '#1C1F24', borderRadius: '10px',
-                textDecoration: 'none',
-                border: '1px solid #272B33',
-              }}
-            >
-              <div style={{
-                width: '40px', height: '40px', borderRadius: '10px',
-                background: 'rgba(245,166,35,0.15)', display: 'flex',
-                alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-              }}>
-                <span style={{ fontSize: '20px' }}>&#128222;</span>
-              </div>
-              <div>
-                <div style={{ fontWeight: '700', fontSize: '14px', color: '#E8E3DC' }}>Call Us</div>
-                <div style={{ fontSize: '12px', color: '#606670' }}>(945) 293-8600 — text only</div>
-              </div>
-            </a>
           </div>
 
           {/* Footer */}
