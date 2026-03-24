@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
       truck_type_needed,
       urgency,
       created_at,
-      cities!inner(name)
+      cities(name)
     `)
     .eq('status', 'dispatching')
     .order('driver_pay_cents', { ascending: false })

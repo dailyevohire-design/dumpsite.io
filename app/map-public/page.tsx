@@ -48,33 +48,22 @@ export default function PublicMapPage() {
         attribution: '&copy; OpenStreetMap contributors',
       }).addTo(map)
 
-      // Group jobs by city for city-center dots
-      const cityJobs: Record<string, PublicJob[]> = {}
+      // Individual pin per job — each with jittered city center coords from API
       for (const job of jobs) {
-        const city = job.cityName || 'DFW'
-        if (!cityJobs[city]) cityJobs[city] = []
-        cityJobs[city].push(job)
-      }
-
-      for (const [city, cityJobList] of Object.entries(cityJobs)) {
-        // Use pre-jittered city center coords from API
-        const topJob = cityJobList[0]
-
-        const marker = L.marker([topJob.lat, topJob.lng]).addTo(map)
+        const marker = L.marker([job.lat, job.lng]).addTo(map)
         const popupHtml =
           `<div style='font-family:sans-serif;min-width:200px;'>` +
-          `<div style='font-weight:700;font-size:16px;margin-bottom:6px;'>${city}</div>` +
-          `<div style='color:#F5A623;font-weight:800;font-size:20px;margin-bottom:4px;'>$${topJob.payPerLoad}/load</div>` +
-          `<div style='color:#888;font-size:13px;margin-bottom:4px;'>${topJob.yardsNeeded} yards &middot; ${topJob.truckAccessLabel}</div>` +
-          `<div style='font-size:12px;color:#666;margin-bottom:8px;'>${cityJobList.length} job${cityJobList.length > 1 ? 's' : ''} available in this area</div>` +
-          `<button id='map-btn-${topJob.id}' style='background:#F5A623;color:#111;border:none;padding:10px 0;border-radius:7px;cursor:pointer;font-weight:800;width:100%;font-size:13px;'>Sign Up to Claim &rarr;</button>` +
+          `<div style='font-weight:700;font-size:16px;margin-bottom:6px;'>${job.cityName}</div>` +
+          `<div style='color:#F5A623;font-weight:800;font-size:20px;margin-bottom:4px;'>$${job.payPerLoad}/load</div>` +
+          `<div style='color:#888;font-size:13px;margin-bottom:4px;'>${job.yardsNeeded} yards &middot; ${job.truckAccessLabel}</div>` +
+          `<button id='map-btn-${job.id}' style='background:#F5A623;color:#111;border:none;padding:10px 0;border-radius:7px;cursor:pointer;font-weight:800;width:100%;font-size:13px;'>Sign Up to Claim &rarr;</button>` +
           `</div>`
 
         marker.bindPopup(popupHtml)
         marker.on('popupopen', () => {
           setTimeout(() => {
-            const btn = document.getElementById(`map-btn-${topJob.id}`)
-            if (btn) btn.onclick = () => setModalJob(topJob)
+            const btn = document.getElementById(`map-btn-${job.id}`)
+            if (btn) btn.onclick = () => setModalJob(job)
           }, 100)
         })
       }
