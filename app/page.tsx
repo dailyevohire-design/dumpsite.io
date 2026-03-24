@@ -18,12 +18,57 @@ export default function Home() {
       `}</style>
 
       {/* S1: Sticky Nav */}
-      <nav style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'16px 24px',borderBottom:'1px solid #1A1A1A',position:'sticky',top:0,background:'#0A0A0A',zIndex:50}}>
-        <span style={{fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
-        <div style={{display:'flex',gap:'24px',alignItems:'center',fontFamily:'system-ui'}}>
-          <a href="#browse-jobs" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>Browse Jobs</a>
-          <Link href="/map-public" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>Map</Link>
-          <Link href="/login" style={{background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'700',padding:'10px 20px',borderRadius:'4px',marginLeft:'4px'}}>SIGN IN</Link>
+      <nav style={{
+        display:'flex',
+        justifyContent:'space-between',
+        alignItems:'center',
+        padding:'14px 20px',
+        borderBottom:'1px solid #1A1A1A',
+        position:'sticky',
+        top:0,
+        background:'#0A0A0A',
+        zIndex:50
+      }}>
+        <Link href="/" style={{
+          fontFamily:'"Georgia",serif',
+          fontSize:'18px',
+          fontWeight:'700',
+          letterSpacing:'0.02em',
+          color:'#F0EDE8',
+          textDecoration:'none',
+          flexShrink:0
+        }}>
+          DUMPSITE<span style={{color:'#F5A623'}}>.IO</span>
+        </Link>
+        <div style={{
+          display:'flex',
+          gap:'16px',
+          alignItems:'center',
+          fontFamily:'system-ui'
+        }}>
+          <Link href="/#browse-jobs" style={{
+            color:'#888',
+            textDecoration:'none',
+            fontSize:'13px',
+            whiteSpace:'nowrap'
+          }}>Browse Jobs</Link>
+          <Link href="/map-public" style={{
+            color:'#888',
+            textDecoration:'none',
+            fontSize:'13px',
+            whiteSpace:'nowrap'
+          }}>Map</Link>
+          <Link href="/login" style={{
+            background:'#F5A623',
+            color:'#0A0A0A',
+            textDecoration:'none',
+            fontSize:'13px',
+            fontWeight:'700',
+            padding:'10px 16px',
+            borderRadius:'4px',
+            whiteSpace:'nowrap',
+            flexShrink:0
+          }}>SIGN IN</Link>
         </div>
       </nav>
 
