@@ -1,5 +1,6 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
+import 'leaflet/dist/leaflet.css'
 import ClaimJobModal from '@/components/ClaimJobModal'
 
 interface PublicJob {
@@ -85,7 +86,6 @@ export default function PublicMapPreview() {
 
   return (
     <>
-      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
       <div className="map-preview-container" ref={elRef} style={{ height: '400px', width: '100%', borderRadius: '12px', overflow: 'hidden', border: '1px solid #272B33' }} />
       {modalJob && <ClaimJobModal job={modalJob} onClose={() => setModalJob(null)} />}
       <style>{`@media(max-width:640px){.map-preview-container{height:300px!important}}`}</style>

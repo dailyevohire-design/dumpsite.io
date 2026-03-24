@@ -23,8 +23,6 @@ export default function Home() {
         <div style={{display:'flex',gap:'16px',alignItems:'center',fontFamily:'system-ui'}}>
           <a href="#browse-jobs" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>Browse Jobs</a>
           <Link href="/map-public" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>Map</Link>
-          <a href="#for-contractors" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>For Contractors</a>
-          <Link href="/signup" style={{color:'#888',textDecoration:'none',fontSize:'13px'}}>SIGN UP</Link>
           <Link href="/login" style={{background:'#F5A623',color:'#0A0A0A',textDecoration:'none',fontSize:'13px',fontWeight:'700',padding:'10px 18px',borderRadius:'4px'}}>SIGN IN</Link>
         </div>
       </nav>
