@@ -73,7 +73,14 @@ export default function Home() {
         </div>
       </nav>
 
-      {/* S2: Hero Split — slightly shorter */}
+      {/* S2: Browsable Job Listings — top of page for conversion */}
+      <section id="browse-jobs" style={{maxWidth:'1100px',margin:'0 auto',padding:'32px 24px 48px',scrollMarginTop:'80px'}}>
+        <PublicJobsFeed limit={6} />
+      </section>
+
+      <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
+
+      {/* S3: Hero Split — slightly shorter */}
       <section style={{maxWidth:'1100px',margin:'0 auto',padding:'40px 24px 24px'}}>
         <div className="hero-split fade-in" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'40px'}}>
           <div style={{borderRight:'1px solid #1A1A1A',paddingRight:'40px'}}>
@@ -111,13 +118,6 @@ export default function Home() {
           <LiveStats />
         </div>
       </section>
-
-      {/* S4: Browsable Job Listings — the Airbnb moment */}
-      <section id="browse-jobs" style={{maxWidth:'1100px',margin:'0 auto',padding:'48px 24px',scrollMarginTop:'80px'}}>
-        <PublicJobsFeed limit={6} />
-      </section>
-
-      <div style={{borderTop:'1px solid #1A1A1A',maxWidth:'1100px',margin:'0 auto'}}/>
 
       {/* S5: Public Map Preview */}
       <section style={{maxWidth:'1100px',margin:'0 auto',padding:'48px 24px'}}>

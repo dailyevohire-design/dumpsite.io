@@ -98,11 +98,14 @@ export default function PublicJobsFeed({ limit = 6 }: { limit?: number }) {
 
       {/* Header row */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
-        <h2 style={{ fontSize: '20px', fontWeight: '700', margin: 0 }}>Available Jobs Near DFW</h2>
+        <div>
+          <h2 style={{ fontSize: '20px', fontWeight: '700', margin: 0 }}>{allJobs.length} Jobs Available Now Across DFW</h2>
+          <p style={{ fontSize: '13px', color: '#888', fontFamily: 'system-ui', marginTop: '6px', margin: '6px 0 0' }}>Sign up free to claim any job — takes 2 minutes</p>
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#27AE60', boxShadow: '0 0 8px rgba(39,174,96,0.5)', animation: 'pulse 2s infinite' }} />
           <span style={{ fontSize: '13px', color: '#606670', fontFamily: 'system-ui' }}>
-            {allJobs.length} job{allJobs.length !== 1 ? 's' : ''} available right now
+            Live
           </span>
         </div>
       </div>
