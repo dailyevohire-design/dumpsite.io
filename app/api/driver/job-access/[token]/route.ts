@@ -3,7 +3,7 @@ import { createAdminSupabase } from '@/lib/supabase'
 import { createServerSupabase } from '@/lib/supabase.server'
 import crypto from 'crypto'
 import { rateLimit } from '@/lib/rate-limit'
-import { CITY_COORDS } from '@/lib/city-coords'
+import { CITY_COORDS, geocodeLocation } from '@/lib/city-coords'
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371
@@ -98,36 +98,32 @@ export async function GET(
       deliveryLat = order.delivery_latitude
       deliveryLng = order.delivery_longitude
 
-      // Fallback to city center
+      // Resolve delivery coordinates — try every source
+      // 1. Stored on dispatch_orders (already set above)
+      // 2. City center lookup
       if (!deliveryLat && cityName && CITY_COORDS[cityName]) {
         deliveryLat = CITY_COORDS[cityName].lat
         deliveryLng = CITY_COORDS[cityName].lng
       }
+      // 3. Geocode the city name
+      if (!deliveryLat && cityName) {
+        const geo = await geocodeLocation(cityName + ', Texas')
+        if (geo) { deliveryLat = geo.lat; deliveryLng = geo.lng }
+      }
 
-      // Calculate distance from driver's pickup to delivery
-      if (deliveryLat && deliveryLng) {
-        // Use stored pickup coordinates (fast, no API call)
-        if (load.pickup_latitude && load.pickup_longitude) {
-          const km = haversineKm(load.pickup_latitude, load.pickup_longitude, deliveryLat, deliveryLng)
-          distanceMiles = Math.round(km * 0.621371 * 10) / 10
-        }
-        // Fallback: geocode location_text
-        else if (load.location_text) {
-          try {
-            const controller = new AbortController()
-            const timeout = setTimeout(() => controller.abort(), 4000)
-            const geoRes = await fetch(
-              `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(load.location_text)}`,
-              { headers: { 'User-Agent': 'DumpSite.io/1.0' }, signal: controller.signal }
-            )
-            clearTimeout(timeout)
-            const geoData = await geoRes.json()
-            if (geoData?.[0]) {
-              const km = haversineKm(parseFloat(geoData[0].lat), parseFloat(geoData[0].lon), deliveryLat, deliveryLng)
-              distanceMiles = Math.round(km * 0.621371 * 10) / 10
-            }
-          } catch {}
-        }
+      // Resolve pickup coordinates — try every source
+      let pickupLat = load.pickup_latitude
+      let pickupLng = load.pickup_longitude
+      // Geocode location_text if no stored coords
+      if (!pickupLat && load.location_text) {
+        const geo = await geocodeLocation(load.location_text)
+        if (geo) { pickupLat = geo.lat; pickupLng = geo.lng }
+      }
+
+      // Calculate distance
+      if (deliveryLat && deliveryLng && pickupLat && pickupLng) {
+        const km = haversineKm(pickupLat, pickupLng, deliveryLat, deliveryLng)
+        distanceMiles = Math.round(km * 0.621371 * 10) / 10
       }
     }
   }

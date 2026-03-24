@@ -5,7 +5,7 @@ import { sendApprovalSMS } from '@/lib/sms'
 import { sendApprovalEmail } from '@/lib/email'
 import { rateLimit } from '@/lib/rate-limit'
 import { createNotification } from '@/lib/notifications'
-import { CITY_COORDS } from '@/lib/city-coords'
+import { CITY_COORDS, geocodeLocation } from '@/lib/city-coords'
 import crypto from 'crypto'
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -85,30 +85,23 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
       let deliveryLat = order.delivery_latitude
       let deliveryLng = order.delivery_longitude
 
-      // Fallback to city center if no exact delivery coords
+      // Resolve delivery coords — try every source
       if (!deliveryLat && cityName && CITY_COORDS[cityName]) {
         deliveryLat = CITY_COORDS[cityName].lat
         deliveryLng = CITY_COORDS[cityName].lng
       }
+      if (!deliveryLat && cityName) {
+        const geo = await geocodeLocation(cityName + ', Texas')
+        if (geo) { deliveryLat = geo.lat; deliveryLng = geo.lng }
+      }
 
+      // Resolve pickup coords
       if (deliveryLat && deliveryLng && load.location_text) {
-        // Try geocoding the driver's pickup location
-        try {
-          const controller = new AbortController()
-          const timeout = setTimeout(() => controller.abort(), 4000)
-          const geoRes = await fetch(
-            `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(load.location_text)}`,
-            { headers: { 'User-Agent': 'DumpSite.io/1.0' }, signal: controller.signal }
-          )
-          clearTimeout(timeout)
-          const geoData = await geoRes.json()
-          if (geoData?.[0]) {
-            const pickupLat = parseFloat(geoData[0].lat)
-            const pickupLng = parseFloat(geoData[0].lon)
-            const km = haversineKm(pickupLat, pickupLng, deliveryLat, deliveryLng)
-            distanceMiles = Math.round(km * 0.621371 * 10) / 10
-          }
-        } catch {}
+        const geo = await geocodeLocation(load.location_text)
+        if (geo) {
+          const km = haversineKm(geo.lat, geo.lng, deliveryLat, deliveryLng)
+          distanceMiles = Math.round(km * 0.621371 * 10) / 10
+        }
       }
     }
   }
