@@ -105,11 +105,11 @@ export async function sendApprovalSMS(phone: string, opts: {
   loadId: string
   payDollars: number
   cityName: string
+  distanceMiles?: number | null
 }) {
   const normalized = normalizePhone(phone)
-  // Keep SMS short — carriers block long messages with URLs (error 30034)
-  // Target: under 160 chars = 1 segment
-  const body = `DumpSite.io: Job approved! ${opts.cityName} $${opts.payDollars}/load. Start here: ${opts.accessUrl}`
+  const distLine = opts.distanceMiles ? `\n📍 ${opts.distanceMiles} mi from your location` : ''
+  const body = `DumpSite.io: Job approved!\n\n💰 $${opts.payDollars}/load — ${opts.cityName}${distLine}\n\nStart here: ${opts.accessUrl}`
   return sendSMS(normalized, body, 'approval', opts.loadId)
 }
 

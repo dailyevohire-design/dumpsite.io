@@ -5,7 +5,16 @@ import { sendApprovalSMS } from '@/lib/sms'
 import { sendApprovalEmail } from '@/lib/email'
 import { rateLimit } from '@/lib/rate-limit'
 import { createNotification } from '@/lib/notifications'
+import { CITY_COORDS } from '@/lib/city-coords'
 import crypto from 'crypto'
+
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371
+  const dLat = (lat2 - lat1) * Math.PI / 180
+  const dLng = (lng2 - lng1) * Math.PI / 180
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
 
 function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex')
@@ -30,7 +39,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
   // 1. Load pending load_request
   const { data: load, error: loadError } = await supabase
     .from('load_requests')
-    .select('id, driver_id, dispatch_order_id, status')
+    .select('id, driver_id, dispatch_order_id, status, location_text')
     .eq('id', id)
     .eq('status', 'pending')
     .single()
@@ -57,19 +66,50 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
     errors.push(`Driver profile not found: ${driverError?.message || 'null'}`)
   }
 
-  // 3. Load pay + city
+  // 3. Load pay + city + delivery coordinates
   let payDollars = 20
   let cityName = 'DFW'
+  let distanceMiles: number | null = null
 
   if (load.dispatch_order_id) {
     const { data: order } = await supabase
       .from('dispatch_orders')
-      .select('driver_pay_cents, cities(name)')
+      .select('driver_pay_cents, delivery_latitude, delivery_longitude, cities(name)')
       .eq('id', load.dispatch_order_id)
       .single()
     if (order) {
       payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 20
       cityName = (order.cities as any)?.name || cityName
+
+      // Calculate distance from driver's pickup location to delivery site
+      let deliveryLat = order.delivery_latitude
+      let deliveryLng = order.delivery_longitude
+
+      // Fallback to city center if no exact delivery coords
+      if (!deliveryLat && cityName && CITY_COORDS[cityName]) {
+        deliveryLat = CITY_COORDS[cityName].lat
+        deliveryLng = CITY_COORDS[cityName].lng
+      }
+
+      if (deliveryLat && deliveryLng && load.location_text) {
+        // Try geocoding the driver's pickup location
+        try {
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 4000)
+          const geoRes = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(load.location_text)}`,
+            { headers: { 'User-Agent': 'DumpSite.io/1.0' }, signal: controller.signal }
+          )
+          clearTimeout(timeout)
+          const geoData = await geoRes.json()
+          if (geoData?.[0]) {
+            const pickupLat = parseFloat(geoData[0].lat)
+            const pickupLng = parseFloat(geoData[0].lon)
+            const km = haversineKm(pickupLat, pickupLng, deliveryLat, deliveryLng)
+            distanceMiles = Math.round(km * 0.621371 * 10) / 10
+          }
+        } catch {}
+      }
     }
   }
 
@@ -152,6 +192,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
         loadId: id,
         payDollars,
         cityName,
+        distanceMiles,
       })
       if (result.success) {
         smsSent = true
