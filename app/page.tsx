@@ -44,7 +44,8 @@ export default function Home() {
           display:'flex',
           gap:'16px',
           alignItems:'center',
-          fontFamily:'system-ui'
+          fontFamily:'system-ui',
+          marginLeft:'auto'
         }}>
           <Link href="/#browse-jobs" style={{
             color:'#888',
