@@ -708,7 +708,10 @@ export default function DriverDashboard() {
                     </select>
                   </div>
                   <div style={{marginBottom:'14px',position:'relative'}}>
-                    <label style={{fontSize:'11px',textTransform:'uppercase' as const,letterSpacing:'0.07em',color:'#606670',fontWeight:'700'}}>Where is the dirt coming from? *</label>
+                    <label style={{fontSize:'11px',textTransform:'uppercase' as const,letterSpacing:'0.07em',color:'#606670',fontWeight:'700'}}>Pickup Address * <span style={{fontWeight:'500',textTransform:'none',letterSpacing:'0'}}>— where the dirt is now</span></label>
+                    <div style={{background:'rgba(245,166,35,0.08)',border:'1px solid rgba(245,166,35,0.2)',borderRadius:'7px',padding:'8px 12px',marginBottom:'6px',marginTop:'6px',fontSize:'12px',color:'#F5A623',fontWeight:'600'}}>
+                      Enter your exact export site address and select it from the dropdown — we use this to calculate your mileage to the dump site
+                    </div>
                     <input style={inp} value={form.locationText} onChange={e => onLocationChange(e.target.value)} onFocus={() => { if (addressSuggestions.length > 0) setShowSuggestions(true) }} placeholder="Start typing an address..." autoComplete="off" />
                     {showSuggestions && addressSuggestions.length > 0 && (
                       <div style={{position:'absolute',top:'100%',left:0,right:0,zIndex:50,background:'#1C1F24',border:'1px solid #272B33',borderRadius:'0 0 9px 9px',maxHeight:'200px',overflowY:'auto'}}>

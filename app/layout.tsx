@@ -3,6 +3,7 @@ import './globals.css'
 import { Analytics } from '@vercel/analytics/react'
 import { SpeedInsights } from '@vercel/speed-insights/next'
 import PostHogProvider from '@/components/PostHogProvider'
+import SupportWidget from '@/components/SupportWidget'
 
 export const metadata: Metadata = {
   title: { default: 'DumpSite.io — Get Paid to Dump', template: '%s | DumpSite.io' },
@@ -51,6 +52,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         {children}
+        <SupportWidget />
         <PostHogProvider />
         <Analytics />
         <SpeedInsights />

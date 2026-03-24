@@ -343,7 +343,11 @@ export default function JobAccessPage() {
       <div style={{ textAlign: 'center', maxWidth: '400px' }}>
         <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔒</div>
         <div style={{ fontWeight: '800', fontSize: '20px', marginBottom: '8px', color: '#E74C3C' }}>{error}</div>
-        <p style={{ color: '#606670', fontSize: '14px' }}>Contact dispatch if you need help.</p>
+        <p style={{ color: '#606670', fontSize: '14px', marginBottom: '16px' }}>Need help? We're here for you.</p>
+        <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+          <a href="sms:+19452938600" style={{ background: '#1C1F24', border: '1px solid #272B33', color: '#E8E3DC', padding: '10px 18px', borderRadius: '8px', textDecoration: 'none', fontSize: '13px', fontWeight: '700' }}>Text (945) 293-8600</a>
+          <a href="mailto:support@dumpsite.io" style={{ background: '#1C1F24', border: '1px solid #272B33', color: '#E8E3DC', padding: '10px 18px', borderRadius: '8px', textDecoration: 'none', fontSize: '13px', fontWeight: '700' }}>Email Support</a>
+        </div>
       </div>
     </div>
   </ErrorBoundary>)
