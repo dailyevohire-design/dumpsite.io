@@ -98,7 +98,7 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
       dispatchId: order.id,
       cityName: city.name,
       yardsNeeded: input.yardsNeeded,
-      payDollars: input.priceQuotedCents ? Math.round(input.priceQuotedCents / 100) : 20,
+      payDollars: order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 35,
       haulDate
     }
   })
@@ -121,7 +121,7 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
   // Send push notifications to drivers in this city
   try {
     const { sendPushToCity } = await import('../push-notifications')
-    const payDollars = input.priceQuotedCents ? Math.round(input.priceQuotedCents / 100) : 20
+    const payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 35
     await sendPushToCity(
       input.cityId,
       `New Job in ${city.name}`,

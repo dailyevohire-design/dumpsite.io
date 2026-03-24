@@ -3,6 +3,7 @@ import type { NextConfig } from 'next'
 
 // IMPORTANT: Set NEXT_PUBLIC_APP_URL=https://dumpsite.io in Vercel environment variables
 // This is used in SMS links and email templates. If missing, falls back to https://dumpsite.io
+// Required: ANTHROPIC_API_KEY for AI order parser (admin dispatch page)
 //
 // PostHog Analytics (set in Vercel env vars after signing up at posthog.com):
 // NEXT_PUBLIC_POSTHOG_KEY=phc_xxxxx

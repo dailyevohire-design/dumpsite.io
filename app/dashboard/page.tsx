@@ -7,6 +7,16 @@ import { useRouter } from 'next/navigation'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import { trackEvent, identifyDriver } from '@/lib/posthog'
 
+// ── Truck access helper ──────────────────────────────────────────────────
+function getTruckAccess(truckType: string | null | undefined, yards: number | null | undefined): { label: string; color: string } {
+  const y = typeof yards === 'number' ? yards : 0
+  const t = typeof truckType === 'string' ? truckType : ''
+  if (t === 'end_dump' || t === 'semi_transfer' || y >= 100) {
+    return { label: 'End Dump · 18-Wheeler · Tandem Accepted', color: '#27AE60' }
+  }
+  return { label: 'Tandem Axle Only', color: '#606670' }
+}
+
 // ── Isolated completion form — one per load card, no shared state ──────────
 function CompletionForm({ load, user, onComplete }: {
   load: any, user: any,
