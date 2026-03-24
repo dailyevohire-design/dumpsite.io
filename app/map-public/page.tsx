@@ -20,8 +20,11 @@ export default function PublicMapPage() {
   const [jobs, setJobs] = useState<PublicJob[]>([])
   const [loading, setLoading] = useState(true)
   const [modalJob, setModalJob] = useState<PublicJob | null>(null)
+  const [mounted, setMounted] = useState(false)
   const mapRef = useRef<any>(null)
   const elRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => { setMounted(true) }, [])
 
   useEffect(() => {
     fetch('/api/public/jobs?limit=50')
@@ -32,9 +35,11 @@ export default function PublicMapPage() {
   }, [])
 
   useEffect(() => {
-    if (!elRef.current || mapRef.current || jobs.length === 0) return
+    if (!mounted || !elRef.current || mapRef.current || jobs.length === 0) return
 
     import('leaflet').then(L => {
+      if (!elRef.current || mapRef.current) return
+
       delete (L.Icon.Default.prototype as any)._getIconUrl
       L.Icon.Default.mergeOptions({
         iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
@@ -42,17 +47,19 @@ export default function PublicMapPage() {
         shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
       })
 
-      const map = L.map(elRef.current!).setView([32.82, -97.1], 9)
+      const map = L.map(elRef.current).setView([32.82, -97.1], 9)
       mapRef.current = map
+
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors',
       }).addTo(map)
 
-      // Individual pin per job — each with jittered city center coords from API
+      setTimeout(() => { map.invalidateSize() }, 200)
+
       for (const job of jobs) {
         const marker = L.marker([job.lat, job.lng]).addTo(map)
         const popupHtml =
-          `<div style='font-family:sans-serif;min-width:200px;'>` +
+          `<div style='font-family:system-ui,sans-serif;min-width:200px;'>` +
           `<div style='font-weight:700;font-size:16px;margin-bottom:6px;'>${job.cityName}</div>` +
           `<div style='color:#F5A623;font-weight:800;font-size:20px;margin-bottom:4px;'>$${job.payPerLoad}/load</div>` +
           `<div style='color:#888;font-size:13px;margin-bottom:4px;'>${job.yardsNeeded} yards &middot; ${job.truckAccessLabel}</div>` +
@@ -72,25 +79,28 @@ export default function PublicMapPage() {
     return () => {
       if (mapRef.current) { mapRef.current.remove(); mapRef.current = null }
     }
-  }, [jobs])
+  }, [mounted, jobs])
 
   return (
     <main style={{ minHeight: '100vh', background: '#0A0A0A', color: '#F0EDE8', fontFamily: '"Georgia",serif', display: 'flex', flexDirection: 'column' }}>
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <style>{`.leaflet-container{background:#1a1a2e!important}`}</style>
+
       {/* Nav */}
       <nav style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px', borderBottom: '1px solid #1A1A1A', background: '#0A0A0A', zIndex: 50, flexShrink: 0 }}>
         <Link href="/" style={{ fontSize: '18px', fontWeight: '700', letterSpacing: '0.02em', textDecoration: 'none', color: '#F0EDE8' }}>
           DUMPSITE<span style={{ color: '#F5A623' }}>.IO</span>
         </Link>
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', fontFamily: 'system-ui' }}>
-          <Link href="/map-public" style={{ color: '#F5A623', textDecoration: 'none', fontSize: '13px', fontWeight: '700' }}>MAP</Link>
-          <Link href="/signup" style={{ color: '#888', textDecoration: 'none', fontSize: '13px' }}>SIGN UP</Link>
+        <div style={{ display: 'flex', gap: '24px', alignItems: 'center', fontFamily: 'system-ui' }}>
+          <Link href="/#browse-jobs" style={{ color: '#888', textDecoration: 'none', fontSize: '13px' }}>Browse Jobs</Link>
+          <Link href="/map-public" style={{ color: '#F5A623', textDecoration: 'none', fontSize: '13px', fontWeight: '700' }}>Map</Link>
           <Link href="/login" style={{ background: '#F5A623', color: '#0A0A0A', textDecoration: 'none', fontSize: '13px', fontWeight: '700', padding: '10px 18px', borderRadius: '4px' }}>SIGN IN</Link>
         </div>
       </nav>
 
-      {/* Map area — fills remaining height */}
+      {/* Map area */}
       <div style={{ flex: 1, position: 'relative', minHeight: '500px' }}>
-        {loading ? (
+        {(loading || !mounted) ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#606670', fontFamily: 'system-ui' }}>
             Loading map...
           </div>
@@ -103,7 +113,6 @@ export default function PublicMapPage() {
           </div>
         ) : (
           <>
-            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
             <div ref={elRef} style={{ height: '100%', width: '100%' }} />
 
             {/* Floating job count badge */}

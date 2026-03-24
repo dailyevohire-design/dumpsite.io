@@ -1,6 +1,5 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
-import 'leaflet/dist/leaflet.css'
 import ClaimJobModal from '@/components/ClaimJobModal'
 
 interface PublicJob {
@@ -20,8 +19,11 @@ export default function PublicMapPreview() {
   const [jobs, setJobs] = useState<PublicJob[]>([])
   const [loading, setLoading] = useState(true)
   const [modalJob, setModalJob] = useState<PublicJob | null>(null)
+  const [mounted, setMounted] = useState(false)
   const mapRef = useRef<any>(null)
   const elRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => { setMounted(true) }, [])
 
   useEffect(() => {
     fetch('/api/public/jobs?limit=20')
@@ -32,9 +34,12 @@ export default function PublicMapPreview() {
   }, [])
 
   useEffect(() => {
-    if (!elRef.current || mapRef.current || jobs.length === 0) return
+    if (!mounted || !elRef.current || mapRef.current || jobs.length === 0) return
 
     import('leaflet').then(L => {
+      // Bail if unmounted or already initialized
+      if (!elRef.current || mapRef.current) return
+
       delete (L.Icon.Default.prototype as any)._getIconUrl
       L.Icon.Default.mergeOptions({
         iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
@@ -42,17 +47,20 @@ export default function PublicMapPreview() {
         shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
       })
 
-      const map = L.map(elRef.current!, { scrollWheelZoom: false }).setView([32.82, -97.1], 9)
+      const map = L.map(elRef.current, { scrollWheelZoom: false }).setView([32.82, -97.1], 9)
       mapRef.current = map
+
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors',
       }).addTo(map)
 
-      // Individual pin per job — each with jittered city center coords from API
+      // Force Leaflet to recalculate the container size after paint
+      setTimeout(() => { map.invalidateSize() }, 200)
+
       for (const job of jobs) {
         const marker = L.marker([job.lat, job.lng]).addTo(map)
         const popupHtml =
-          `<div style='font-family:sans-serif;min-width:200px;'>` +
+          `<div style='font-family:system-ui,sans-serif;min-width:200px;'>` +
           `<div style='font-weight:700;font-size:16px;margin-bottom:6px;'>${job.cityName}</div>` +
           `<div style='color:#F5A623;font-weight:800;font-size:20px;margin-bottom:4px;'>$${job.payPerLoad}/load</div>` +
           `<div style='color:#888;font-size:13px;margin-bottom:4px;'>${job.yardsNeeded} yards &middot; ${job.truckAccessLabel}</div>` +
@@ -72,9 +80,9 @@ export default function PublicMapPreview() {
     return () => {
       if (mapRef.current) { mapRef.current.remove(); mapRef.current = null }
     }
-  }, [jobs])
+  }, [mounted, jobs])
 
-  if (loading) {
+  if (loading || !mounted) {
     return (
       <div style={{ height: '400px', background: '#111316', borderRadius: '12px', border: '1px solid #272B33', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <span style={{ color: '#606670', fontFamily: 'system-ui', fontSize: '14px' }}>Loading map...</span>
@@ -86,9 +94,24 @@ export default function PublicMapPreview() {
 
   return (
     <>
-      <div className="map-preview-container" ref={elRef} style={{ height: '400px', width: '100%', borderRadius: '12px', overflow: 'hidden', border: '1px solid #272B33' }} />
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <div
+        className="map-preview-container"
+        ref={elRef}
+        style={{
+          height: '400px',
+          width: '100%',
+          borderRadius: '12px',
+          overflow: 'hidden',
+          border: '1px solid #272B33',
+          background: '#1a1a2e',
+        }}
+      />
       {modalJob && <ClaimJobModal job={modalJob} onClose={() => setModalJob(null)} />}
-      <style>{`@media(max-width:640px){.map-preview-container{height:300px!important}}`}</style>
+      <style>{`
+        @media(max-width:640px){.map-preview-container{height:300px!important}}
+        .leaflet-container{background:#1a1a2e!important}
+      `}</style>
     </>
   )
 }
