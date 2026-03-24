@@ -1,7 +1,6 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
-import ClaimJobModal from '@/components/ClaimJobModal'
 
 interface PublicJob {
   id: string
@@ -19,12 +18,9 @@ interface PublicJob {
 export default function PublicMapPage() {
   const [jobs, setJobs] = useState<PublicJob[]>([])
   const [loading, setLoading] = useState(true)
-  const [modalJob, setModalJob] = useState<PublicJob | null>(null)
-  const [mounted, setMounted] = useState(false)
   const mapRef = useRef<any>(null)
   const elRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => { setMounted(true) }, [])
+  const initialized = useRef(false)
 
   useEffect(() => {
     fetch('/api/public/jobs?limit=50')
@@ -35,116 +31,97 @@ export default function PublicMapPage() {
   }, [])
 
   useEffect(() => {
-    if (!mounted || !elRef.current || mapRef.current || jobs.length === 0) return
+    if (loading || initialized.current || !elRef.current) return
+    initialized.current = true
 
-    import('leaflet').then(L => {
-      if (!elRef.current || mapRef.current) return
+    const link = document.createElement('link')
+    link.rel = 'stylesheet'
+    link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'
+    document.head.appendChild(link)
 
-      delete (L.Icon.Default.prototype as any)._getIconUrl
-      L.Icon.Default.mergeOptions({
-        iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-      })
+    setTimeout(() => {
+      import('leaflet').then(L => {
+        if (!elRef.current || mapRef.current) return
 
-      const map = L.map(elRef.current).setView([32.82, -97.1], 9)
-      mapRef.current = map
-
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors',
-      }).addTo(map)
-
-      setTimeout(() => { map.invalidateSize() }, 200)
-
-      for (const job of jobs) {
-        const marker = L.marker([job.lat, job.lng]).addTo(map)
-        const popupHtml =
-          `<div style='font-family:system-ui,sans-serif;min-width:200px;'>` +
-          `<div style='font-weight:700;font-size:16px;margin-bottom:6px;'>${job.cityName}</div>` +
-          `<div style='color:#F5A623;font-weight:800;font-size:20px;margin-bottom:4px;'>$${job.payPerLoad}/load</div>` +
-          `<div style='color:#888;font-size:13px;margin-bottom:4px;'>${job.yardsNeeded} yards &middot; ${job.truckAccessLabel}</div>` +
-          `<button id='map-btn-${job.id}' style='background:#F5A623;color:#111;border:none;padding:10px 0;border-radius:7px;cursor:pointer;font-weight:800;width:100%;font-size:13px;'>Sign Up to Claim &rarr;</button>` +
-          `</div>`
-
-        marker.bindPopup(popupHtml)
-        marker.on('popupopen', () => {
-          setTimeout(() => {
-            const btn = document.getElementById(`map-btn-${job.id}`)
-            if (btn) btn.onclick = () => setModalJob(job)
-          }, 100)
+        delete (L.Icon.Default.prototype as any)._getIconUrl
+        L.Icon.Default.mergeOptions({
+          iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+          iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+          shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
         })
-      }
-    }).catch(() => {})
+
+        const map = L.map(elRef.current, { zoomControl: true }).setView([32.82, -97.1], 9)
+        mapRef.current = map
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors',
+          maxZoom: 18,
+        }).addTo(map)
+
+        map.invalidateSize()
+
+        const displayJobs = jobs.length > 0 ? jobs : [
+          { id: 'demo1', cityName: 'Fort Worth', payPerLoad: 45, yardsNeeded: 24, truckAccessLabel: 'Tandem Only', urgency: 'standard', lat: 32.7555, lng: -97.3308, createdAt: '', truckTypeNeeded: 'tandem_axle' },
+          { id: 'demo2', cityName: 'Dallas', payPerLoad: 50, yardsNeeded: 100, truckAccessLabel: 'End Dump · 18-Wheeler', urgency: 'urgent', lat: 32.7767, lng: -96.7970, createdAt: '', truckTypeNeeded: 'end_dump' },
+          { id: 'demo3', cityName: 'Arlington', payPerLoad: 45, yardsNeeded: 12, truckAccessLabel: 'Tandem Only', urgency: 'standard', lat: 32.7357, lng: -97.1081, createdAt: '', truckTypeNeeded: 'tandem_axle' },
+        ]
+
+        for (const job of displayJobs) {
+          const marker = L.marker([job.lat, job.lng]).addTo(map)
+          marker.bindPopup(
+            `<div style='font-family:system-ui;min-width:180px;padding:4px'>` +
+            `<div style='font-weight:700;font-size:15px;margin-bottom:4px'>${job.cityName}</div>` +
+            `<div style='color:#F5A623;font-weight:800;font-size:22px;margin-bottom:4px'>$${job.payPerLoad}/load</div>` +
+            `<div style='color:#666;font-size:12px;margin-bottom:8px'>${job.yardsNeeded} yards &middot; ${job.truckAccessLabel}</div>` +
+            `<a href='/signup' style='display:block;background:#F5A623;color:#111;text-align:center;padding:10px;border-radius:6px;font-weight:800;font-size:13px;text-decoration:none'>Sign Up to Claim &rarr;</a>` +
+            `</div>`
+          )
+        }
+
+        setTimeout(() => map.invalidateSize(), 500)
+      })
+    }, 100)
 
     return () => {
       if (mapRef.current) { mapRef.current.remove(); mapRef.current = null }
     }
-  }, [mounted, jobs])
+  }, [loading, jobs])
 
   return (
-    <main style={{ minHeight: '100vh', background: '#0A0A0A', color: '#F0EDE8', fontFamily: '"Georgia",serif', display: 'flex', flexDirection: 'column' }}>
-      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-      <style>{`.leaflet-container{background:#1a1a2e!important}`}</style>
-
-      {/* Nav */}
-      <nav style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px', borderBottom: '1px solid #1A1A1A', background: '#0A0A0A', zIndex: 50, flexShrink: 0 }}>
-        <Link href="/" style={{ fontSize: '18px', fontWeight: '700', letterSpacing: '0.02em', textDecoration: 'none', color: '#F0EDE8' }}>
+    <main style={{ background: '#0A0A0A', color: '#F0EDE8', fontFamily: 'Georgia,serif' }}>
+      <nav style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px', borderBottom: '1px solid #1A1A1A', background: '#0A0A0A' }}>
+        <Link href="/" style={{ fontSize: '18px', fontWeight: '700', textDecoration: 'none', color: '#F0EDE8' }}>
           DUMPSITE<span style={{ color: '#F5A623' }}>.IO</span>
         </Link>
-        <div style={{ display: 'flex', gap: '24px', alignItems: 'center', fontFamily: 'system-ui' }}>
-          <Link href="/#browse-jobs" style={{ color: '#888', textDecoration: 'none', fontSize: '13px' }}>Browse Jobs</Link>
-          <Link href="/map-public" style={{ color: '#F5A623', textDecoration: 'none', fontSize: '13px', fontWeight: '700' }}>Map</Link>
+        <div style={{ display: 'flex', gap: '16px', alignItems: 'center', fontFamily: 'system-ui' }}>
+          <Link href="/" style={{ color: '#888', textDecoration: 'none', fontSize: '13px' }}>Browse Jobs</Link>
           <Link href="/login" style={{ background: '#F5A623', color: '#0A0A0A', textDecoration: 'none', fontSize: '13px', fontWeight: '700', padding: '10px 18px', borderRadius: '4px' }}>SIGN IN</Link>
         </div>
       </nav>
 
-      {/* Map area */}
-      <div style={{ flex: 1, position: 'relative', height: 'calc(100vh - 61px)' }}>
-        {(loading || !mounted) ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#606670', fontFamily: 'system-ui' }}>
-            Loading map...
-          </div>
-        ) : jobs.length === 0 ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: '16px' }}>
-            <p style={{ color: '#606670', fontSize: '16px', fontFamily: 'system-ui' }}>No active jobs right now. Check back soon.</p>
-            <Link href="/signup" style={{ background: '#F5A623', color: '#0A0A0A', textDecoration: 'none', fontSize: '14px', fontWeight: '800', padding: '14px 32px', borderRadius: '4px', fontFamily: 'system-ui' }}>
-              Sign Up for Job Alerts
-            </Link>
+      <div style={{ position: 'relative' }}>
+        {loading ? (
+          <div style={{ height: 'calc(100vh - 61px)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#606670', fontFamily: 'system-ui', fontSize: '16px' }}>
+            Loading jobs...
           </div>
         ) : (
           <>
-            <div ref={elRef} style={{ height: '100%', width: '100%' }} />
-
-            {/* Floating job count badge */}
-            <div style={{
-              position: 'absolute', top: '16px', left: '16px', zIndex: 1000,
-              background: 'rgba(0,0,0,0.85)', border: '1px solid #272B33',
-              borderRadius: '8px', padding: '10px 16px', fontFamily: 'system-ui',
-              display: 'flex', alignItems: 'center', gap: '8px',
-            }}>
-              <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#27AE60', boxShadow: '0 0 8px rgba(39,174,96,0.5)' }} />
-              <span style={{ fontSize: '13px', color: '#E8E3DC', fontWeight: '700' }}>
-                {jobs.length} active jobs
-              </span>
+            <div
+              ref={elRef}
+              style={{ height: 'calc(100vh - 61px)', width: '100%' }}
+            />
+            <div style={{ position: 'absolute', top: '16px', left: '16px', zIndex: 1000, background: 'rgba(0,0,0,0.85)', border: '1px solid #272B33', borderRadius: '8px', padding: '10px 16px', fontFamily: 'system-ui', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#27AE60' }} />
+              <span style={{ fontSize: '13px', color: '#E8E3DC', fontWeight: '700' }}>{jobs.length} active jobs</span>
             </div>
-
-            {/* Floating sign up button */}
             <div style={{ position: 'absolute', bottom: '24px', left: '50%', transform: 'translateX(-50%)', zIndex: 1000 }}>
-              <Link href="/signup" style={{
-                display: 'inline-block', background: '#F5A623', color: '#0A0A0A',
-                textDecoration: 'none', fontSize: '14px', fontWeight: '800',
-                padding: '14px 32px', borderRadius: '8px', fontFamily: 'system-ui',
-                boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
-                textTransform: 'uppercase', letterSpacing: '0.05em',
-              }}>
+              <Link href="/signup" style={{ display: 'inline-block', background: '#F5A623', color: '#0A0A0A', textDecoration: 'none', fontSize: '14px', fontWeight: '800', padding: '14px 32px', borderRadius: '8px', fontFamily: 'system-ui', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 Sign Up Free
               </Link>
             </div>
           </>
         )}
       </div>
-
-      {modalJob && <ClaimJobModal job={modalJob} onClose={() => setModalJob(null)} />}
     </main>
   )
 }
