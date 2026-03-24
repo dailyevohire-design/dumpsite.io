@@ -1,5 +1,5 @@
 'use client'
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import Link from 'next/link'
 
 interface ParsedOrder {
@@ -27,50 +27,7 @@ interface ParsedOrder {
   driversNotified?: number
 }
 
-const CITIES = [
-  {id:"29f39e32-0692-4208-9d28-d241c3c69ef5",name:"Alvarado"},
-  {id:"ce7d27ec-9df8-4fdd-bc51-309442893a42",name:"Arlington"},
-  {id:"ea58fbed-826d-4f0a-92f7-abe3b757e419",name:"Austin"},
-  {id:"1527cdd8-061e-4447-87fb-70a64057056e",name:"Azle"},
-  {id:"6bdb0af5-7247-4aad-96fb-0b190ef49626",name:"Bonham"},
-  {id:"a3a9bb90-b72c-4311-8743-3dd212f51a21",name:"Carrollton"},
-  {id:"36c683d4-2759-4b22-ad4b-668af29c4220",name:"Carthage"},
-  {id:"0213177f-8a77-44a6-805f-2599845ee42e",name:"Cedar Hill"},
-  {id:"af5563b4-8b7b-4e3a-9565-37e0147376fa",name:"Cleburne"},
-  {id:"d8aa7b49-2370-4b3f-9f7b-56f2f9841773",name:"Colleyville"},
-  {id:"5dc99abb-8ac6-435a-91a6-f2c22ec5c85e",name:"Covington"},
-  {id:"0bbd35f1-7c96-443d-9854-489e844e16d7",name:"Dallas"},
-  {id:"28170a02-c7bb-4f6b-b773-1a9e928e1dd5",name:"Denison"},
-  {id:"70fa3326-4116-4c7c-94cb-b8ae03e7252c",name:"Denton"},
-  {id:"7bc3086d-3b43-493c-ac45-195c3c693413",name:"DeSoto"},
-  {id:"cd7b1980-8027-43f9-b5c9-c2975259b9b8",name:"Everman"},
-  {id:"d5066e50-7517-46f4-a5e5-78abcd4d76be",name:"Ferris"},
-  {id:"a8bc9b0f-9491-44d3-93b1-946271557eff",name:"Fort Worth"},
-  {id:"7ce9dbd7-96f4-4bbc-aaac-e79495c6fe2e",name:"Garland"},
-  {id:"5c46d6fd-2ddc-4af6-8c78-3b45b400063a",name:"Godley"},
-  {id:"ebdb0a42-848a-4a87-8dbb-5d46540a619c",name:"Grand Prairie"},
-  {id:"3cbb265e-51f6-4958-98c8-485d73605e1f",name:"Haslet"},
-  {id:"1cf2100b-7e74-4349-9d03-deec3c091e2c",name:"Hillsboro"},
-  {id:"c55cc12a-5f4e-4ff0-91d8-f56859c449e0",name:"Houston"},
-  {id:"df322cd0-098b-44b5-a968-41beeb8b6480",name:"Hutchins"},
-  {id:"75865806-091d-453d-bf2b-0337aa6c9f60",name:"Irving"},
-  {id:"eee61caa-f853-47d8-8fda-1c69ed130c02",name:"Joshua"},
-  {id:"e345bfd8-0e97-403a-bddc-2a41f3dfe90e",name:"Justin"},
-  {id:"125d2a3c-1c43-4fbd-9633-12b3dde8f573",name:"Kaufman"},
-  {id:"20a69674-3248-4bc3-ae2c-8b073fc1b555",name:"Lake Worth"},
-  {id:"35bd27ed-46bb-4da0-82a1-108d151853b8",name:"Little Elm"},
-  {id:"5fb50f77-efeb-47d8-90f8-01ff7924a97d",name:"Mabank"},
-  {id:"a8739e77-43a5-4ecf-a964-9b0096bcbb9b",name:"Mansfield"},
-  {id:"3585f8fe-7896-4176-80e2-938b66a17ef6",name:"McKinney"},
-  {id:"8dd32d64-42e5-42d4-9806-4a118a1bccc7",name:"Mesquite"},
-  {id:"ee76f6f5-cf5c-4b6d-9570-065d630529ad",name:"Midlothian"},
-  {id:"fa967b09-9370-42ce-8235-f4e1605ff049",name:"Plano"},
-  {id:"96e1a833-d434-4779-b519-9be76675fba0",name:"Ponder"},
-  {id:"8bbd555c-07c0-4264-994c-04b7a7432f3d",name:"Princeton"},
-  {id:"3771f020-accd-483f-835a-44818ef8a86d",name:"Rockwall"},
-  {id:"849c2c41-877d-42a5-b74f-e13bc7c0c798",name:"Terrell"},
-  {id:"febee5cb-46a8-40a9-b145-8c033703af02",name:"Venus"},
-]
+// Cities loaded dynamically from the database
 
 const inp: React.CSSProperties = {width:'100%',background:'#111',border:'1px solid #272B33',borderRadius:'6px',padding:'10px 14px',color:'#F0EDE8',fontSize:'14px',fontFamily:'system-ui,sans-serif',boxSizing:'border-box'}
 const lbl: React.CSSProperties = {display:'block',fontSize:'11px',letterSpacing:'0.1em',color:'#606670',fontFamily:'system-ui,sans-serif',textTransform:'uppercase',marginBottom:'6px',fontWeight:'700'}
@@ -125,6 +82,15 @@ function formatBytes(bytes: number): string {
 }
 
 export default function NewDispatch() {
+  // ── Cities from DB ──
+  const [CITIES, setCities] = useState<{id:string,name:string}[]>([])
+  useEffect(() => {
+    fetch('/api/admin/cities')
+      .then(r => r.json())
+      .then(d => { if (d.success) setCities(d.data) })
+      .catch(() => {})
+  }, [])
+
   // ── Existing form state (unchanged) ──
   const [form, setForm] = useState({
     clientName:'', clientPhone:'', clientAddress:'', cityId:'',
