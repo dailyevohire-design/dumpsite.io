@@ -69,6 +69,7 @@ interface Job {
   cities?: { name: string };
   yards_needed?: number;
   driver_pay_cents?: number;
+  truck_type_needed?: string;
 }
 
 interface Props {
@@ -100,11 +101,15 @@ export default function MapView({ jobs, onSubmitInterest }: Props) {
         const coords = getCoords(city);
         const pay = Math.round((job.driver_pay_cents || 2000) / 100);
         const yards = job.yards_needed || "?";
+        const isEndDump = job.truck_type_needed === 'end_dump' || (job.yards_needed && job.yards_needed >= 100);
+        const truckLabel = isEndDump ? 'End Dump · 18-Wheeler · Tandem' : 'Tandem Only';
+        const truckColor = isEndDump ? '#27AE60' : '#888';
         const marker = L.marker(coords).addTo(map);
         marker.bindPopup(
           "<div style='font-family:sans-serif;min-width:190px;'>" +
           "<div style='font-weight:700;font-size:14px;margin-bottom:6px;'>Delivery Job - " + city + "</div>" +
           "<div style='color:#888;font-size:12px;margin-bottom:4px;'>" + yards + " yards needed</div>" +
+          "<div style='color:" + truckColor + ";font-size:11px;margin-bottom:6px;'>🚛 " + truckLabel + "</div>" +
           "<div style='color:#F5A623;font-weight:700;font-size:22px;margin-bottom:12px;'>$" + pay + " / load</div>" +
           "<button id='btn-" + job.id + "' style='background:#F5A623;color:#111;border:none;padding:9px 0;border-radius:7px;cursor:pointer;font-weight:800;width:100%;font-size:13px;'>Submit Interest</button>" +
           "</div>"
