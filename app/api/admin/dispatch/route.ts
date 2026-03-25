@@ -34,6 +34,7 @@ export async function POST(req: NextRequest) {
     cityId: body.cityId,
     yardsNeeded: parseInt(body.yardsNeeded),
     priceQuotedCents: Math.round(parseFloat(body.priceQuoted || '0') * 100),
+    driverPayCents: Math.round(parseFloat(body.driverPay || '45') * 100),
     truckTypeNeeded: body.truckTypeNeeded,
     notes: body.notes,
     urgency: body.urgency || 'standard',
@@ -60,7 +61,7 @@ export async function GET(req: NextRequest) {
     .from('dispatch_orders')
     .select(`
       id, client_name, client_address, yards_needed,
-      price_quoted_cents, status, urgency, drivers_notified,
+      price_quoted_cents, driver_pay_cents, status, urgency, drivers_notified,
       created_at, source, cities(name)
     `, { count: 'exact' })
     .eq('status', statusFilter)

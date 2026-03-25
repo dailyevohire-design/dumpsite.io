@@ -9,6 +9,7 @@ export interface CreateDispatchInput {
   cityId: string
   yardsNeeded: number
   priceQuotedCents: number
+  driverPayCents: number
   truckTypeNeeded?: string
   notes?: string
   urgency?: 'standard' | 'urgent'
@@ -42,9 +43,9 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
   // Resolve delivery coordinates — city center as fallback
   const cityCoords = CITY_COORDS[city.name]
 
-  // Calculate driver pay: default to price_quoted or fallback to $45/load
-  const driverPayCents = input.priceQuotedCents > 0
-    ? input.priceQuotedCents
+  // Driver pay must be set explicitly — never copy from price_quoted (company rate)
+  const driverPayCents = input.driverPayCents && input.driverPayCents > 0
+    ? input.driverPayCents
     : 4500
 
   const { data: order, error: orderError } = await supabase

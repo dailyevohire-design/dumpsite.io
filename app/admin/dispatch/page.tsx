@@ -9,6 +9,7 @@ interface ParsedOrder {
   cityName: string | null
   yardsNeeded: number | null
   pricePerLoad: number | null
+  driverPay: number | null
   truckTypeNeeded: 'tandem_axle' | 'end_dump'
   notes: string | null
   isDelivered: boolean
@@ -94,7 +95,7 @@ export default function NewDispatch() {
   // ── Existing form state (unchanged) ──
   const [form, setForm] = useState({
     clientName:'', clientPhone:'', clientAddress:'', cityId:'',
-    yardsNeeded:'', priceQuoted:'', truckTypeNeeded:'tandem_axle',
+    yardsNeeded:'', priceQuoted:'', driverPay:'', truckTypeNeeded:'tandem_axle',
     urgency:'standard', notes:'', salesRep:''
   })
   const [loading, setLoading] = useState(false)
@@ -134,6 +135,7 @@ export default function NewDispatch() {
           cityId: form.cityId,
           yardsNeeded: form.yardsNeeded,
           priceQuoted: form.priceQuoted,
+          driverPay: form.driverPay,
           truckTypeNeeded: form.truckTypeNeeded,
           urgency: form.urgency,
           notes: form.notes,
@@ -144,7 +146,14 @@ export default function NewDispatch() {
       const data = await res.json()
       if (data.success) {
         setResult(data)
-        setForm({clientName:'',clientPhone:'',clientAddress:'',cityId:'',yardsNeeded:'',priceQuoted:'',truckTypeNeeded:'tandem_axle',urgency:'standard',notes:'',salesRep:''})
+        setForm({clientName:'',clientPhone:'',clientAddress:'',cityId:'',yardsNeeded:'',priceQuoted:'',driverPay:'',truckTypeNeeded:'tandem_axle',urgency:'standard',notes:'',salesRep:''})
+        setParsedOrders([])
+        setSubmittedIndexes(new Set())
+        setParserImages([])
+        setImagePreviews([])
+        setPasteText('')
+        setParseSuccess('')
+        if (imageInputRef.current) imageInputRef.current.value = ''
       } else {
         setError(data.error || 'Failed to create dispatch')
       }
@@ -205,6 +214,7 @@ export default function NewDispatch() {
     set('cityId', matchedCity?.id || '')
     set('yardsNeeded', order.yardsNeeded ? String(order.yardsNeeded) : '')
     set('priceQuoted', order.pricePerLoad ? String(order.pricePerLoad) : '')
+    set('driverPay', order.driverPay ? String(order.driverPay) : '')
     set('truckTypeNeeded', order.truckTypeNeeded || 'tandem_axle')
     set('notes', order.notes || '')
     document.getElementById('manual-dispatch-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -226,6 +236,7 @@ export default function NewDispatch() {
           cityId: matchedCity.id,
           yardsNeeded: String(order.yardsNeeded || 12),
           priceQuoted: String(order.pricePerLoad || 144),
+          driverPay: String(order.driverPay || 45),
           truckTypeNeeded: order.truckTypeNeeded || 'tandem_axle',
           urgency: 'standard',
           notes: order.notes || '',
@@ -235,8 +246,24 @@ export default function NewDispatch() {
       })
       const data = await res.json()
       if (data.success) {
-        setSubmittedIndexes(prev => new Set([...prev, index]))
-        setParsedOrders(prev => prev.map((o, i) => i === index ? {...o, submitSuccess: true, driversNotified: data.driversNotified, submitError: undefined} : o))
+        const newSubmitted = new Set([...submittedIndexes, index])
+        setSubmittedIndexes(newSubmitted)
+        setParsedOrders(prev => {
+          const updated = prev.map((o, i) => i === index ? {...o, submitSuccess: true, driversNotified: data.driversNotified, submitError: undefined} : o)
+          // Clear everything if all orders are submitted
+          if (updated.every((o, i) => o.submitSuccess || newSubmitted.has(i))) {
+            setTimeout(() => {
+              setParsedOrders([])
+              setSubmittedIndexes(new Set())
+              setParserImages([])
+              setImagePreviews([])
+              setPasteText('')
+              setParseSuccess('')
+              if (imageInputRef.current) imageInputRef.current.value = ''
+            }, 1500)
+          }
+          return updated
+        })
       } else {
         setParsedOrders(prev => prev.map((o, i) => i === index ? {...o, submitError: data.error || 'Submit failed'} : o))
       }
@@ -471,8 +498,9 @@ export default function NewDispatch() {
               </div>
               <div><label style={lbl}>Yards Needed *</label><input style={inp} value={form.yardsNeeded} onChange={e=>set('yardsNeeded',e.target.value)} placeholder="24" type="number" min="1" /></div>
             </div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'16px'}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:'16px'}}>
               <div><label style={lbl}>Price Quoted ($)</label><input style={inp} value={form.priceQuoted} onChange={e=>set('priceQuoted',e.target.value)} placeholder="350.00" type="number" /></div>
+              <div><label style={{...lbl,color:'#F5A623'}}>Driver Pay ($) *</label><input style={{...inp,borderColor:'#F5A623'}} value={form.driverPay} onChange={e=>set('driverPay',e.target.value)} placeholder="45.00" type="number" /></div>
               <div>
                 <label style={lbl}>Truck Type</label>
                 <select style={inp} value={form.truckTypeNeeded} onChange={e=>set('truckTypeNeeded',e.target.value)}>
