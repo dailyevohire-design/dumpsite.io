@@ -29,7 +29,7 @@ export async function GET(req: NextRequest) {
       cities(name)
     `)
     .eq('status', 'dispatching')
-    .order('driver_pay_cents', { ascending: false })
+    .order('created_at', { ascending: false })
     .limit(limit)
 
   if (cityFilter) {
