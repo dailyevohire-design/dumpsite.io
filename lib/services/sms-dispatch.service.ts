@@ -11,128 +11,53 @@ interface IncomingSMS {
   messageSid: string
 }
 
-// ─── Job number ───────────────────────────────────────────────────────
+// ─── Job number ───────────────────────────────────────────────────────────────
 export function generateJobNumber(dispatchId: string): string {
   const short = dispatchId.replace(/-/g, '').slice(0, 6).toUpperCase()
   return `DS-${short}`
 }
 
-// ─── Human-like reply via Claude Haiku ───────────────────────────────
-async function humanReply(
-  situation: string,
-  driverName: string,
-  context: Record<string, any> = {}
-): Promise<string> {
+// ─── AI only for done/cancel — hardcoded everything else ─────────────────────
+async function doneReply(firstName: string, loads: number, dollars: number, job: string): Promise<string> {
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-    const system = [
-      'You text exactly like Juan, a dirt broker in DFW/Colorado.',
-      'Style: ultra short, 1-2 sentences max, no period at end, casual.',
-      'Real examples of his texts: Yes sir | 10.4 | Ok np | Perfect | Morning | Send pic of dirt | Being sent rn | Give me hour max | 3 miles | Fs that | Yo | How many yards | Sounds good | Got you',
-      'NEVER sound like customer service. NEVER use emojis. NEVER say "I". Use first name occasionally not every message. Typos ok.',
-      'Situation: ' + situation,
-      'Driver name: ' + driverName,
-      'Context: ' + JSON.stringify(context)
-    ].join(' ')
     const msg = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 60,
-      system,
-      messages: [{ role: 'user', content: 'Write only the SMS text. Nothing else.' }]
+      max_tokens: 50,
+      system: 'You are texting as Juan, a laid-back dirt broker. Style: 1 sentence, no punctuation at end, casual. Real examples: "10.4 got you" | "Perfect" | "Ok np" | "Got it". Acknowledge the loads were completed and payment is coming. Keep it under 10 words.',
+      messages: [{ role: 'user', content: `Driver ${firstName} just completed ${loads} loads. Payout is $${dollars}. Job ${job}. Write the reply.` }]
     })
     const block = msg.content[0]
     return (block.type === 'text' ? block.text : '').trim()
-  } catch (err: any) {
-    console.error('[humanReply] error:', err?.message)
-    return 'One sec'
-  }
-}
-
-// ─── AI text parser ───────────────────────────────────────────────────
-async function parseText(body: string): Promise<{
-  intent: 'need_site' | 'have_dirt' | 'unknown'
-  zip: string | null
-  material: string | null
-  yards: number | null
-}> {
-  try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-    const system = [
-      'Parse a dirt hauling SMS. Return ONLY valid JSON.',
-      'Detect:',
-      '  intent: need_site (driver has dirt and needs somewhere to dump it), have_dirt (someone has free dirt to give away), unknown',
-      '  zip: 5-digit US zip code if mentioned, else null',
-      '  material: clean fill|clay|sandy loam|caliche|topsoil|mixed|concrete|rock — if "dirt" or "fill dirt" = clean fill, else null',
-      '  yards: number if mentioned, tons x 0.7 = yards, else null',
-      'Return: {"intent":"need_site|have_dirt|unknown","zip":string or null,"material":string or null,"yards":number or null}',
-      'Examples:',
-      '  "I need a dumpsite" -> need_site',
-      '  "got a load ready" -> need_site',
-      '  "75201" -> zip=75201',
-      '  "clean fill" -> material=clean fill',
-      '  "100 yards" -> yards=100',
-    ].join(' ')
-    const msg = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 80,
-      system,
-      messages: [{ role: 'user', content: body }]
-    })
-    const block = msg.content[0]
-    const raw = block.type === 'text' ? block.text : '{}'
-    return JSON.parse(raw.replace(/```json|```/g, '').trim())
   } catch {
-    return { intent: 'unknown', zip: null, material: null, yards: null }
+    return `10.4 — ${loads} load${loads > 1 ? 's' : ''}. $${dollars} otw`
   }
 }
 
-// ─── Zip code to city lookup ──────────────────────────────────────────
-async function zipToCity(zip: string): Promise<{ cityId: string | null, cityName: string }> {
+// ─── Zip to city ──────────────────────────────────────────────────────────────
+const ZIP_MAP: Record<string, string> = {
+  '750': 'Dallas', '751': 'Dallas', '752': 'Dallas',
+  '760': 'Fort Worth', '761': 'Fort Worth',
+  '762': 'Denton',
+  '800': 'Denver', '801': 'Denver', '802': 'Lakewood',
+  '803': 'Boulder', '808': 'Colorado Springs', '809': 'Colorado Springs',
+}
+
+async function zipToCity(zip: string): Promise<{ cityId: string | null; cityName: string }> {
   const supabase = createAdminSupabase()
-  const zipPrefixMap: Record<string, string[]> = {
-    'dallas': ['750','751','752'],
-    'fort worth': ['760','761'],
-    'arlington': ['760'],
-    'plano': ['750'],
-    'frisco': ['750'],
-    'mckinney': ['750'],
-    'garland': ['750'],
-    'irving': ['750'],
-    'denton': ['762'],
-    'carrollton': ['750'],
-    'lewisville': ['750'],
-    'grand prairie': ['750'],
-    'mansfield': ['760'],
-    'denver': ['802'],
-    'colorado springs': ['808','809'],
-    'aurora': ['800','801'],
-    'lakewood': ['802'],
-    'arvada': ['800'],
-    'boulder': ['803'],
-    'thornton': ['802'],
-    'westminster': ['800'],
-  }
-  
-  const prefix3 = zip.slice(0, 3)
-  let matchedCity = 'Dallas'
-  
-  for (const [city, prefixes] of Object.entries(zipPrefixMap)) {
-    if (prefixes.includes(prefix3)) {
-      matchedCity = city.charAt(0).toUpperCase() + city.slice(1)
-      break
-    }
-  }
+  const prefix = zip.slice(0, 3)
+  const guessedCity = ZIP_MAP[prefix] || 'Dallas'
 
   const { data: city } = await supabase
     .from('cities')
     .select('id, name')
-    .ilike('name', '%' + matchedCity + '%')
+    .ilike('name', `%${guessedCity}%`)
     .maybeSingle()
 
-  return { cityId: city?.id || null, cityName: city?.name || matchedCity }
+  return { cityId: city?.id || null, cityName: city?.name || guessedCity }
 }
 
-// ─── Session management ───────────────────────────────────────────────
+// ─── Session management ───────────────────────────────────────────────────────
 async function getSession(phone: string) {
   const supabase = createAdminSupabase()
   const { data } = await supabase
@@ -147,27 +72,81 @@ async function setSession(phone: string, updates: Record<string, any>) {
   const supabase = createAdminSupabase()
   await supabase
     .from('sms_sessions')
-    .upsert({ phone, ...updates, updated_at: new Date().toISOString() }, { onConflict: 'phone' })
+    .upsert(
+      { phone, ...updates, updated_at: new Date().toISOString() },
+      { onConflict: 'phone' }
+    )
 }
 
 async function clearSession(phone: string) {
   const supabase = createAdminSupabase()
   await supabase
     .from('sms_sessions')
-    .upsert({
-      phone,
-      state: 'idle',
-      zip_code: null,
-      city_name: null,
-      material_type: null,
-      estimated_yards: null,
-      sites_shown: null,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'phone' })
+    .upsert(
+      {
+        phone,
+        state: 'idle',
+        zip_code: null,
+        city_name: null,
+        material_type: null,
+        estimated_yards: null,
+        sites_shown: null,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'phone' }
+    )
 }
 
-// ─── Site finder ──────────────────────────────────────────────────────
-async function findSites(cityId: string | null, cityName: string, material: string, yards: number | null) {
+// ─── Material detector ────────────────────────────────────────────────────────
+function detectMaterial(text: string): string | null {
+  const t = text.toLowerCase()
+  if (t.includes('clean fill') || t.includes('cleanfill')) return 'clean fill'
+  if (t.includes('sandy loam') || t.includes('sandy')) return 'sandy loam'
+  if (t.includes('caliche')) return 'caliche'
+  if (t.includes('topsoil') || t.includes('top soil')) return 'topsoil'
+  if (t.includes('clay')) return 'clay'
+  if (t.includes('concrete') || t.includes('demo')) return 'concrete'
+  if (t.includes('rock') || t.includes('gravel')) return 'rock'
+  if (t.includes('mixed') || t.includes('mix')) return 'mixed'
+  if (t.includes('fill dirt') || t.includes('fill') || t.includes('dirt')) return 'clean fill'
+  return null
+}
+
+// ─── Zip detector ─────────────────────────────────────────────────────────────
+function detectZip(text: string): string | null {
+  const match = text.match(/\b(\d{5})\b/)
+  return match ? match[1] : null
+}
+
+// ─── Yards detector ───────────────────────────────────────────────────────────
+function detectYards(text: string): number | null {
+  const yardMatch = text.match(/(\d+)\s*(?:yards?|yds?|cubic|cy)/i)
+  if (yardMatch) return parseInt(yardMatch[1])
+  const tonMatch = text.match(/(\d+)\s*(?:tons?|t\b)/i)
+  if (tonMatch) return Math.round(parseInt(tonMatch[1]) * 0.7)
+  const numMatch = text.match(/\b(\d{2,5})\b/)
+  if (numMatch) {
+    const n = parseInt(numMatch[1])
+    if (n >= 10 && n <= 50000) return n
+  }
+  return null
+}
+
+// ─── Intent detector ─────────────────────────────────────────────────────────
+function detectIntent(text: string): 'need_site' | 'yes' | 'no' | 'unknown' {
+  const t = text.toLowerCase().trim()
+  const needSite = ['need','dumpsite','dump site','dump','site','haul','hauling','load','loaded','ready','got dirt','moving dirt','where can','where do','i have dirt','disposal','dispose']
+  const yes = ['yes','yeah','yep','yup','yea','correct','sure','ok','okay','affirmative','roger','10-4','104','10.4','fs','for sure','absolutely','definitely']
+  const no = ['no','nope','nah','not yet','cancel','nevermind','never mind']
+
+  if (no.some(w => t === w || t.startsWith(w + ' '))) return 'no'
+  if (yes.some(w => t === w || t.startsWith(w + ' '))) return 'yes'
+  if (needSite.some(w => t.includes(w))) return 'need_site'
+  return 'unknown'
+}
+
+// ─── Site finder ──────────────────────────────────────────────────────────────
+async function findSites(cityId: string | null, material: string, yards: number | null) {
   const supabase = createAdminSupabase()
 
   let query = supabase
@@ -177,361 +156,375 @@ async function findSites(cityId: string | null, cityName: string, material: stri
 
   if (cityId) query = query.eq('city_id', cityId)
 
-  const { data: sites } = await query
+  const { data: sites, error } = await query
 
+  if (error) console.error('[findSites] error:', error)
   if (!sites || sites.length === 0) return []
 
   const yardsNeeded = yards || 1
   const mt = material.toLowerCase()
 
-  return sites.filter(s => {
-    const cap = (s.capacity_yards || 0) - (s.filled_yards || 0)
-    if (cap < yardsNeeded) return false
-    const accepted: string[] = s.accepted_materials || ['clean fill']
-    return accepted.some((m: string) =>
-      m.toLowerCase() === 'all' ||
-      m.toLowerCase().includes(mt) ||
-      mt.includes(m.toLowerCase())
+  return sites
+    .filter(s => {
+      const cap = (s.capacity_yards || 0) - (s.filled_yards || 0)
+      if (cap < yardsNeeded) return false
+      const accepted: string[] = s.accepted_materials || ['clean fill']
+      // If no restrictions, accept anything
+      if (accepted.length === 0) return true
+      return accepted.some((m: string) => {
+        const ml = m.toLowerCase()
+        return ml === 'all' || ml.includes(mt) || mt.includes(ml) || ml === 'clean fill'
+      })
+    })
+    .sort(
+      (a, b) =>
+        ((b.capacity_yards || 0) - (b.filled_yards || 0)) -
+        ((a.capacity_yards || 0) - (a.filled_yards || 0))
     )
-  }).sort((a, b) =>
-    ((b.capacity_yards || 0) - (b.filled_yards || 0)) -
-    ((a.capacity_yards || 0) - (a.filled_yards || 0))
-  ).slice(0, 3)
+    .slice(0, 3)
 }
 
-// ─── Main conversation handler ────────────────────────────────────────
+// ─── Main conversation handler ────────────────────────────────────────────────
 async function handleConversation(sms: IncomingSMS): Promise<string> {
   const supabase = createAdminSupabase()
   const { from, body, messageSid } = sms
-  const bodyLower = body.trim().toLowerCase()
+  const trimmed = body.trim()
+  const lower = trimmed.toLowerCase()
 
   // Log inbound
   try {
-    await supabase.from('sms_logs').insert({
-      phone: from, body, message_sid: messageSid, direction: 'inbound'
-    })
+    await supabase
+      .from('sms_logs')
+      .insert({ phone: from, body: trimmed, message_sid: messageSid, direction: 'inbound' })
   } catch {}
 
-  // Get driver profile
+  // ── Opt-out handling ──────────────────────────────────────────────────────
+  if (lower === 'stop' || lower === 'unsubscribe') {
+    await supabase.from('driver_profiles').update({ sms_opted_out: true }).eq('phone', from)
+    return ''
+  }
+  if (lower === 'start' || lower === 'subscribe') {
+    await supabase.from('driver_profiles').update({ sms_opted_out: false }).eq('phone', from)
+    return "You're back on. Text us when you got a load"
+  }
+
+  // ── Driver lookup ─────────────────────────────────────────────────────────
   const { data: profile } = await supabase
     .from('driver_profiles')
-    .select('user_id, first_name, status')
+    .select('user_id, first_name, status, sms_opted_out')
     .eq('phone', from)
     .maybeSingle()
 
   if (!profile) {
     return 'Sign up at dumpsite.io to get access to dump sites'
   }
-
+  if (profile.sms_opted_out) return ''
   if (profile.status !== 'active') {
-    return 'Your account isn\'t active yet, hit us up at dumpsite.io'
+    return "Your account isn't active yet. Hit us up at dumpsite.io"
   }
 
-  const firstName = profile.first_name || ''
+  const firstName = profile.first_name || 'Driver'
 
-  // ── Hard commands always work regardless of state ──
-  if (bodyLower === 'stop' || bodyLower === 'unsubscribe') {
-    await supabase.from('driver_profiles').update({ sms_opted_out: true }).eq('phone', from)
-    return ''
+  // ── Help ──────────────────────────────────────────────────────────────────
+  if (lower === 'help' || lower === '?') {
+    return 'Text your zip + material when you got a load ready\nReply DONE [loads] when finished\nReply CANCEL to cancel\ndumpsite.io/dashboard'
   }
 
-  if (bodyLower === 'start' || bodyLower === 'subscribe') {
-    await supabase.from('driver_profiles').update({ sms_opted_out: false }).eq('phone', from)
-    return 'You\'re back on. Text us when you got a load ready'
-  }
-
-  // Check opt-out
-  const { data: driverCheck } = await supabase
-    .from('driver_profiles')
-    .select('sms_opted_out')
-    .eq('phone', from)
-    .maybeSingle()
-  if (driverCheck?.sms_opted_out) return ''
-
-  if (bodyLower === 'help' || bodyLower === '?') {
-    return 'Text your zip code + material when you got a load. Reply DONE [loads] when finished. Reply CANCEL to cancel. dumpsite.io/dashboard'
-  }
-
-  // ── Check for active load ──
+  // ── Check active load ─────────────────────────────────────────────────────
   const { data: activeLoad } = await supabase
     .from('load_requests')
-    .select('id, status, dispatch_order_id, dispatch_orders(cities(name))')
+    .select('id, status, dispatch_order_id, dispatch_orders(driver_pay_cents, cities(name))')
     .eq('driver_id', profile.user_id)
     .in('status', ['pending', 'approved'])
     .order('created_at', { ascending: false })
     .maybeSingle()
 
-  // DONE
-  if (bodyLower.startsWith('done') || bodyLower.startsWith('complete') || bodyLower.startsWith('finished')) {
-    return handleDone(from, body, profile, activeLoad)
+  // ── DONE ──────────────────────────────────────────────────────────────────
+  if (lower.startsWith('done') || lower.startsWith('complete') || lower.startsWith('finished')) {
+    if (!activeLoad) return 'No active job found. Check dumpsite.io/dashboard'
+    const loadMatch = trimmed.match(/(\d+)/)
+    const loads = loadMatch ? Math.min(parseInt(loadMatch[1], 10), 50) : 1
+    const payPerLoad = (activeLoad.dispatch_orders as any)?.driver_pay_cents || 3500
+    const totalCents = payPerLoad * loads
+    const totalDollars = Math.round(totalCents / 100)
+    const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
+
+    await supabase.from('load_requests').update({
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      payout_cents: totalCents,
+      truck_count: loads,
+    }).eq('id', activeLoad.id)
+
+    try {
+      await supabase.from('driver_payments').insert({
+        driver_id: profile.user_id,
+        load_request_id: activeLoad.id,
+        amount_cents: totalCents,
+        status: 'pending',
+      })
+    } catch {}
+
+    try { await sendAdminAlert(`${jobNum} complete — ${firstName} ${loads} loads $${totalDollars}`) } catch {}
+    await clearSession(from)
+    return await doneReply(firstName, loads, totalDollars, jobNum)
   }
 
-  // CANCEL  
-  if (bodyLower === 'cancel' || bodyLower === 'stop job') {
-    return handleCancel(from, profile, activeLoad)
+  // ── CANCEL ────────────────────────────────────────────────────────────────
+  if (lower === 'cancel' || lower === 'stop job') {
+    await clearSession(from)
+    if (!activeLoad) return 'No active job to cancel'
+    const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
+    await supabase.from('load_requests').update({
+      status: 'rejected',
+      rejected_reason: 'Cancelled by driver via SMS',
+      reviewed_at: new Date().toISOString(),
+    }).eq('id', activeLoad.id)
+    try { await sendAdminAlert(`${jobNum} cancelled via SMS — ${firstName}`) } catch {}
+    return `${jobNum} cancelled. Text us when you got another load`
   }
 
-  // STATUS
-  if (bodyLower === 'status' || bodyLower === 'job') {
-    return handleStatus(from, profile, activeLoad)
+  // ── STATUS ────────────────────────────────────────────────────────────────
+  if (lower === 'status' || lower === 'job') {
+    if (!activeLoad) return 'No active jobs. Text your zip when you got a load ready'
+    const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
+    const city = (activeLoad.dispatch_orders as any)?.cities?.name || ''
+    return `${jobNum} — ${city} — ${activeLoad.status}\nReply DONE [loads] when finished`
   }
 
-  // Already has active load
+  // ── Already has active load ───────────────────────────────────────────────
   if (activeLoad) {
     const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
-    return await humanReply(
-      'Driver already has an active job and texted something random',
-      firstName,
-      { job: jobNum }
-    )
+    return `You got ${jobNum} active. Reply DONE [loads] when finished or CANCEL to cancel`
   }
 
-  // ── Get or create session ──
-  let session = await getSession(from)
+  // ── Get session ───────────────────────────────────────────────────────────
+  const session = await getSession(from)
+  const currentState = session?.state || 'idle'
 
-  // Parse what they sent
-  const parsed = await parseText(body)
+  // ── Detect everything from current message ────────────────────────────────
+  const detectedZip = detectZip(trimmed)
+  const detectedMaterial = detectMaterial(trimmed)
+  const detectedYards = detectYards(trimmed)
+  const detectedIntent = detectIntent(trimmed)
 
-  // ── Site selection: driver replied 1, 2, or 3 ──
-  if ((bodyLower === '1' || bodyLower === '2' || bodyLower === '3') && session?.state === 'sites_shown' && session?.sites_shown?.length) {
-    return handleSiteSelection(from, parseInt(bodyLower), session, profile)
+  // ── Site selection (1, 2, 3) ──────────────────────────────────────────────
+  if (
+    (lower === '1' || lower === '2' || lower === '3') &&
+    currentState === 'sites_shown' &&
+    session?.sites_shown?.length
+  ) {
+    const choice = parseInt(lower)
+    const siteId = session.sites_shown[choice - 1]
+    if (!siteId) return `Reply 1${session.sites_shown.length > 1 ? '-' + session.sites_shown.length : ''} to pick a site`
+
+    const { data: site } = await supabase.from('dump_sites').select('*').eq('id', siteId).single()
+    if (!site) return 'That site just went offline. Text your zip for new options'
+
+    const cap = (site.capacity_yards || 0) - (site.filled_yards || 0)
+    if (cap <= 0) return 'That one just filled up. Text your zip for new options'
+
+    const jobNumber = 'DS-' + Date.now().toString().slice(-6)
+    try {
+      await supabase.from('dispatch_jobs').insert({
+        job_number: jobNumber,
+        driver_id: profile.user_id,
+        site_id: site.id,
+        city_name: session.city_name,
+        material_type: session.material_type,
+        estimated_yards: session.estimated_yards,
+        driver_phone: from,
+        status: 'in_progress',
+        source: 'sms',
+        updated_at: new Date().toISOString(),
+      })
+    } catch {}
+
+    if (session.estimated_yards) {
+      try {
+        await supabase.rpc('reserve_site_capacity', { p_site_id: site.id, p_yards: session.estimated_yards })
+      } catch {}
+    }
+
+    await clearSession(from)
+
+    const token = generateSiteToken({ siteId: site.id, jobId: siteId, driverPhone: from, expiresInMinutes: 240 })
+    const gate = site.gate_code ? `\nGate: ${site.gate_code}` : ''
+    const hours = site.hours_text ? `\nHours: ${site.hours_text}` : ''
+
+    return `${jobNumber} — locked in\n${APP_URL}/api/sites/reveal?t=${token}${gate}${hours}\nReply DONE [loads] when finished`
   }
 
-  // ── Merge parsed data into session ──
-  const updates: Record<string, any> = {}
-
-  if (parsed.zip) updates.zip_code = parsed.zip
-  if (parsed.material) updates.material_type = parsed.material
-  if (parsed.yards) updates.estimated_yards = parsed.yards
-
-  // Merge with existing session data
-  const zip = updates.zip_code || session?.zip_code || null
-  const material = updates.material_type || session?.material_type || null
-  const yards = updates.estimated_yards || session?.estimated_yards || null
-
-  // ── State machine ──
-
-  // Step 1: No intent detected and nothing useful — ask if they need a site
-  if (parsed.intent === 'unknown' && !zip && !material && !session?.zip_code) {
-    await setSession(from, { ...updates, state: 'asking_intent' })
-    return await humanReply(
-      'Driver texted something vague, not clear if they need a dump site. Ask in a natural way.',
-      firstName,
-      { theyTexted: body }
-    )
+  // ── State: asking_intent — waiting for yes/no ─────────────────────────────
+  if (currentState === 'asking_intent') {
+    if (detectedIntent === 'no') {
+      await clearSession(from)
+      return 'Ok np. Text us when you need a site'
+    }
+    // Any affirmative or if they provided zip/material, move forward
+    if (detectedIntent === 'yes' || detectedIntent === 'need_site' || detectedZip || detectedMaterial) {
+      if (detectedZip) {
+        // They gave us zip already
+        const { cityName } = await zipToCity(detectedZip)
+        await setSession(from, { state: 'asking_material', zip_code: detectedZip, city_name: cityName, estimated_yards: detectedYards })
+        return `${cityName} — what material? clean fill, clay, topsoil, mixed, caliche`
+      }
+      await setSession(from, { state: 'asking_zip' })
+      return "What's the zip you hauling from"
+    }
+    // Still unclear
+    await setSession(from, { state: 'asking_zip' })
+    return "What's the zip you hauling from"
   }
 
-  // Step 2: We know they need a site but no zip yet
-  if (!zip) {
-    await setSession(from, { ...updates, state: 'asking_zip' })
-    return 'What\'s the zip code you\'re hauling from'
+  // ── State: asking_zip — waiting for zip code ──────────────────────────────
+  if (currentState === 'asking_zip') {
+    if (detectedZip) {
+      const { cityName } = await zipToCity(detectedZip)
+      // Check if they also included material
+      if (detectedMaterial) {
+        await setSession(from, { state: 'finding_sites', zip_code: detectedZip, city_name: cityName, material_type: detectedMaterial, estimated_yards: detectedYards })
+        return await showSites(from, cityName, detectedMaterial, detectedYards, profile.user_id)
+      }
+      await setSession(from, { state: 'asking_material', zip_code: detectedZip, city_name: cityName, estimated_yards: detectedYards })
+      return `${cityName} — what material? clean fill, clay, topsoil, mixed, caliche`
+    }
+    // No zip detected — ask again clearly
+    return "Need your 5-digit zip code"
   }
 
-  // Step 3: Have zip but no material
-  if (!material) {
-    await setSession(from, { ...updates, state: 'asking_material', zip_code: zip })
-    const { cityName } = await zipToCity(zip)
-    return cityName + ' — what material? clean fill, clay, topsoil, mixed, or caliche'
+  // ── State: asking_material — waiting for material ─────────────────────────
+  if (currentState === 'asking_material') {
+    if (detectedMaterial) {
+      const zip = session?.zip_code || detectedZip
+      const cityName = session?.city_name || 'Dallas'
+      const yards = detectedYards || session?.estimated_yards || null
+      await setSession(from, { state: 'finding_sites', material_type: detectedMaterial, estimated_yards: yards })
+      return await showSites(from, cityName, detectedMaterial, yards, profile.user_id)
+    }
+    // Still no material
+    return 'What material? clean fill, clay, topsoil, mixed, or caliche'
   }
 
-  // Step 4: Have zip + material — find sites
-  await setSession(from, { ...updates, state: 'finding_sites', zip_code: zip, material_type: material })
+  // ── State: sites_shown — waiting for selection ────────────────────────────
+  if (currentState === 'sites_shown') {
+    // They texted something other than 1/2/3
+    const count = session?.sites_shown?.length || 1
+    return `Reply ${count === 1 ? '1' : '1-' + count} to claim a site`
+  }
 
-  const { cityId, cityName } = await zipToCity(zip)
-  const sites = await findSites(cityId, cityName, material, yards)
+  // ── Fresh message — detect everything ─────────────────────────────────────
+  // Case 1: They gave us zip + material in one message
+  if (detectedZip && detectedMaterial) {
+    const { cityName } = await zipToCity(detectedZip)
+    await setSession(from, { state: 'finding_sites', zip_code: detectedZip, city_name: cityName, material_type: detectedMaterial, estimated_yards: detectedYards })
+    return await showSites(from, cityName, detectedMaterial, detectedYards, profile.user_id)
+  }
+
+  // Case 2: They gave zip only
+  if (detectedZip) {
+    const { cityName } = await zipToCity(detectedZip)
+    await setSession(from, { state: 'asking_material', zip_code: detectedZip, city_name: cityName, estimated_yards: detectedYards })
+    return `${cityName} — what material? clean fill, clay, topsoil, mixed, caliche`
+  }
+
+  // Case 3: They gave material only
+  if (detectedMaterial) {
+    await setSession(from, { state: 'asking_zip', material_type: detectedMaterial, estimated_yards: detectedYards })
+    return "What's the zip you hauling from"
+  }
+
+  // Case 4: Clear intent to need a site
+  if (detectedIntent === 'need_site') {
+    await setSession(from, { state: 'asking_zip' })
+    return "What's the zip you hauling from"
+  }
+
+  // Case 5: Totally unknown — ask if they need a site
+  await setSession(from, { state: 'asking_intent' })
+  return 'Need a dump site?'
+}
+
+// ─── Show sites helper ────────────────────────────────────────────────────────
+async function showSites(
+  phone: string,
+  cityName: string,
+  material: string,
+  yards: number | null,
+  driverUserId: string
+): Promise<string> {
+  const supabase = createAdminSupabase()
+
+  const { data: cityRow } = await supabase
+    .from('cities')
+    .select('id')
+    .ilike('name', `%${cityName}%`)
+    .maybeSingle()
+
+  const sites = await findSites(cityRow?.id || null, material, yards)
 
   if (sites.length === 0) {
+    // Add to waitlist
     try {
       await supabase.from('dispatch_waitlist').insert({
-        driver_id: profile.user_id,
-        city_id: cityId,
+        driver_id: driverUserId,
+        city_id: cityRow?.id || null,
         city_name: cityName,
         material_type: material,
         estimated_yards: yards,
-        notified: false
+        notified: false,
       })
     } catch {}
-    await clearSession(from)
-    return await humanReply(
-      'No dump sites available right now for that material in that area. Driver added to waitlist.',
-      firstName,
-      { city: cityName, material }
-    )
+    await clearSession(phone)
+    return `Nothing available right now in ${cityName} for ${material}. Got you on the list — will text soon as one opens`
   }
 
-  // Build multi-site response
-  const yardsText = yards ? ' (' + yards + ' yds)' : ''
-  const lines: string[] = [cityName + ' — ' + material + yardsText, '']
+  const yardsText = yards ? ` (${yards} yds)` : ''
+  const lines: string[] = [`${cityName} — ${material}${yardsText}`, '']
 
   for (let i = 0; i < sites.length; i++) {
     const s = sites[i]
     const cap = (s.capacity_yards || 0) - (s.filled_yards || 0)
-    const token = generateSiteToken({
-      siteId: s.id,
-      jobId: s.id,
-      driverPhone: from,
-      expiresInMinutes: 240
-    })
-    lines.push('Site ' + (i + 1) + ' — ' + cap + ' yds')
-    lines.push(APP_URL + '/api/sites/reveal?t=' + token)
+    const token = generateSiteToken({ siteId: s.id, jobId: s.id, driverPhone: phone, expiresInMinutes: 240 })
+    lines.push(`Site ${i + 1} — ${cap} yds available`)
+    lines.push(`${APP_URL}/api/sites/reveal?t=${token}`)
     if (i < sites.length - 1) lines.push('')
   }
 
   lines.push('')
-  lines.push('Reply ' + (sites.length === 1 ? '1' : '1-' + sites.length) + ' to claim')
+  lines.push(`Reply ${sites.length === 1 ? '1' : '1-' + sites.length} to claim`)
 
-  // Save sites to session
-  await setSession(from, {
-    ...updates,
+  // Save site IDs to session
+  await setSession(phone, {
     state: 'sites_shown',
-    zip_code: zip,
-    material_type: material,
     city_name: cityName,
-    sites_shown: sites.map(s => s.id)
+    material_type: material,
+    sites_shown: sites.map(s => s.id),
   })
 
   return lines.join('\n')
 }
 
-// ─── Site selection handler ───────────────────────────────────────────
-async function handleSiteSelection(
-  phone: string,
-  choice: number,
-  session: any,
-  profile: any
-): Promise<string> {
-  const supabase = createAdminSupabase()
-  const siteId = session.sites_shown[choice - 1]
-
-  if (!siteId) return 'Reply 1, 2, or 3 to pick a site'
-
-  const { data: site } = await supabase
-    .from('dump_sites')
-    .select('*')
-    .eq('id', siteId)
-    .single()
-
-  if (!site) return 'That site isn\'t available. Text your zip again for new options'
-
-  const cap = (site.capacity_yards || 0) - (site.filled_yards || 0)
-  if (cap <= 0) return 'That one just filled up. Text your zip again'
-
-  const jobNumber = 'DS-' + Date.now().toString().slice(-6)
-  try {
-    await supabase.from('dispatch_jobs').insert({
-      job_number: jobNumber,
-      driver_id: profile.user_id,
-      site_id: site.id,
-      city_name: session.city_name,
-      material_type: session.material_type,
-      estimated_yards: session.estimated_yards,
-      driver_phone: phone,
-      status: 'in_progress',
-      source: 'sms',
-      updated_at: new Date().toISOString()
-    })
-  } catch {}
-
-  if (session.estimated_yards) {
-    try {
-      await supabase.rpc('reserve_site_capacity', {
-        p_site_id: site.id,
-        p_yards: session.estimated_yards
-      })
-    } catch {}
-  }
-
-  await clearSession(phone)
-
-  const token = generateSiteToken({
-    siteId: site.id,
-    jobId: siteId,
-    driverPhone: phone,
-    expiresInMinutes: 240
-  })
-  const gate = site.gate_code ? '\nGate: ' + site.gate_code : ''
-  const hours = site.hours_text ? '\nHours: ' + site.hours_text : ''
-
-  return jobNumber + ' — locked in\n' + APP_URL + '/api/sites/reveal?t=' + token + gate + hours + '\nReply DONE [loads] when finished'
+// ─── Existing exports (unchanged for compatibility) ───────────────────────────
+export interface DispatchStatus {
+  dispatchId: string
+  jobNumber: string
+  status: string
+  driversNotified: number
+  driversAccepted: number
+  cityName: string
+  createdAt: string
 }
 
-// ─── Done handler ─────────────────────────────────────────────────────
-async function handleDone(phone: string, body: string, profile: any, activeLoad: any): Promise<string> {
-  if (!activeLoad) {
-    return await humanReply('Driver said done but no active job found', profile.first_name || '', {})
-  }
-  const supabase = createAdminSupabase()
-  const loadMatch = body.match(/(\d+)/)
-  const loads = loadMatch ? Math.min(parseInt(loadMatch[1], 10), 50) : 1
-  const payPerLoad = (activeLoad.dispatch_orders as any)?.driver_pay_cents || 3500
-  const totalCents = payPerLoad * loads
-  const totalDollars = Math.round(totalCents / 100)
-  const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
-
-  await supabase.from('load_requests').update({
-    status: 'completed',
-    completed_at: new Date().toISOString(),
-    payout_cents: totalCents,
-    truck_count: loads
-  }).eq('id', activeLoad.id)
-
-  try {
-    await supabase.from('driver_payments').insert({
-      driver_id: profile.user_id,
-      load_request_id: activeLoad.id,
-      amount_cents: totalCents,
-      status: 'pending'
-    })
-  } catch {}
-
-  try { await sendAdminAlert(jobNum + ' complete — ' + profile.first_name + ' ' + loads + ' loads $' + totalDollars) } catch {}
-
-  await clearSession(phone)
-
-  return await humanReply(
-    'Driver just completed job and reported loads. Acknowledge briefly, tell them payment is coming.',
-    profile.first_name || '',
-    { loads, pay: '$' + totalDollars, job: jobNum }
-  )
-}
-
-// ─── Cancel handler ───────────────────────────────────────────────────
-async function handleCancel(phone: string, profile: any, activeLoad: any): Promise<string> {
-  await clearSession(phone)
-  if (!activeLoad) {
-    return await humanReply('Driver said cancel but no active job', profile.first_name || '', {})
-  }
-  const supabase = createAdminSupabase()
-  const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
-  await supabase.from('load_requests').update({
-    status: 'rejected',
-    rejected_reason: 'Cancelled by driver via SMS',
-    reviewed_at: new Date().toISOString()
-  }).eq('id', activeLoad.id)
-  try { await sendAdminAlert(jobNum + ' cancelled via SMS — ' + profile.first_name) } catch {}
-  return await humanReply('Driver cancelled their job', profile.first_name || '', { job: jobNum })
-}
-
-// ─── Status handler ───────────────────────────────────────────────────
-async function handleStatus(phone: string, profile: any, activeLoad: any): Promise<string> {
-  if (!activeLoad) {
-    return 'No active jobs. Text your zip when you got a load ready'
-  }
-  const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
-  const city = (activeLoad.dispatch_orders as any)?.cities?.name || ''
-  return jobNum + ' — ' + city + ' — ' + activeLoad.status + '\nReply DONE [loads] when finished'
-}
-
-// ─── Exports ──────────────────────────────────────────────────────────
-export async function getDispatchStatus(dispatchId: string) {
+export async function getDispatchStatus(dispatchId: string): Promise<{ success: boolean; data?: DispatchStatus; error?: string }> {
   const supabase = createAdminSupabase()
   const { data: order, error } = await supabase
     .from('dispatch_orders')
     .select('id, status, drivers_notified, city_id, created_at, cities(name)')
     .eq('id', dispatchId)
     .single()
-  if (error || !order) return { success: false, error: 'Not found' }
-  const { count } = await supabase
+  if (error || !order) return { success: false, error: 'Dispatch order not found' }
+  const { count: acceptedCount } = await supabase
     .from('load_requests')
     .select('id', { count: 'exact', head: true })
     .eq('dispatch_order_id', dispatchId)
@@ -543,44 +536,52 @@ export async function getDispatchStatus(dispatchId: string) {
       jobNumber: generateJobNumber(order.id),
       status: order.status,
       driversNotified: order.drivers_notified || 0,
-      driversAccepted: count || 0,
+      driversAccepted: acceptedCount || 0,
       cityName: (order.cities as any)?.name || 'Unknown',
       createdAt: order.created_at,
-    }
+    },
   }
 }
 
-export async function redispatchOrder(dispatchId: string, adminUserId: string) {
+export async function redispatchOrder(dispatchId: string, adminUserId: string): Promise<{ success: boolean; driversNotified?: number; error?: string }> {
   const supabase = createAdminSupabase()
   const { data: order, error: orderErr } = await supabase
     .from('dispatch_orders')
-    .select('id, city_id, yards_needed, driver_pay_cents, status, cities(name)')
+    .select('id, city_id, yards_needed, driver_pay_cents, status, drivers_notified, cities(name)')
     .eq('id', dispatchId)
     .single()
-  if (orderErr || !order) return { success: false, error: 'Not found' }
-  if (order.status === 'completed' || order.status === 'cancelled') return { success: false, error: 'Cannot re-dispatch a ' + order.status + ' order' }
+  if (orderErr || !order) return { success: false, error: 'Dispatch order not found' }
+  if (order.status === 'completed' || order.status === 'cancelled') return { success: false, error: `Cannot re-dispatch a ${order.status} order` }
   const { data: alreadyNotified } = await supabase.from('sms_log').select('to_phone').eq('related_id', dispatchId).eq('message_type', 'dispatch')
   const notifiedPhones = new Set((alreadyNotified || []).map((s: any) => s.to_phone))
   const { data: drivers } = await supabase.from('driver_profiles').select('user_id, phone, phone_verified, tiers(slug, dispatch_priority)').eq('city_id', order.city_id).eq('status', 'active').eq('phone_verified', true).limit(500)
-  if (!drivers || drivers.length === 0) return { success: false, error: 'No active drivers' }
+  if (!drivers || drivers.length === 0) return { success: false, error: 'No active drivers in this city' }
   const newDrivers = drivers.filter((d: any) => !notifiedPhones.has(d.phone))
-  if (newDrivers.length === 0) return { success: false, error: 'All drivers already notified' }
+  if (newDrivers.length === 0) return { success: false, error: 'All drivers in this city have already been notified' }
   const { batchDispatchSMS } = await import('../sms')
   const haulDate = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
   const cityName = (order.cities as any)?.name || 'DFW'
   const payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 35
-  const dispatchDrivers = newDrivers.map((d: any) => ({ phone: d.phone, tierSlug: (d.tiers as any)?.slug || 'trial', dispatchId: order.id, cityName, yardsNeeded: order.yards_needed, payDollars, haulDate }))
+  const dispatchDrivers = newDrivers.map((d: any) => ({
+    phone: d.phone,
+    tierSlug: (d.tiers as any)?.slug || 'trial',
+    dispatchId: order.id,
+    cityName,
+    yardsNeeded: order.yards_needed,
+    payDollars,
+    haulDate,
+  }))
   const { sent, failed } = await batchDispatchSMS(dispatchDrivers)
   await supabase.from('dispatch_orders').update({ drivers_notified: ((order as any).drivers_notified || 0) + sent, status: 'dispatching' }).eq('id', dispatchId)
   await supabase.from('audit_logs').insert({ actor_id: adminUserId, action: 'dispatch_order.redispatched', entity_type: 'dispatch_order', entity_id: dispatchId, metadata: { new_drivers_notified: sent, failed, city: cityName } })
-  try { await sendAdminAlert('Re-dispatch ' + generateJobNumber(dispatchId) + ': ' + sent + ' new drivers in ' + cityName) } catch {}
+  try { await sendAdminAlert(`Re-dispatch ${generateJobNumber(dispatchId)}: ${sent} new drivers notified in ${cityName}`) } catch {}
   return { success: true, driversNotified: sent }
 }
 
-export async function cancelDispatch(dispatchId: string, adminUserId: string, reason: string) {
+export async function cancelDispatch(dispatchId: string, adminUserId: string, reason: string): Promise<{ success: boolean; error?: string }> {
   const supabase = createAdminSupabase()
   const { data: order, error } = await supabase.from('dispatch_orders').update({ status: 'cancelled' }).eq('id', dispatchId).not('status', 'eq', 'completed').select('id, cities(name)').single()
-  if (error || !order) return { success: false, error: 'Not found or already completed' }
+  if (error || !order) return { success: false, error: 'Order not found or already completed' }
   await supabase.from('audit_logs').insert({ actor_id: adminUserId, action: 'dispatch_order.cancelled', entity_type: 'dispatch_order', entity_id: dispatchId, metadata: { reason, city: (order.cities as any)?.name } })
   return { success: true }
 }
