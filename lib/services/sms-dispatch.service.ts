@@ -147,7 +147,8 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
   if (lower === 'start' || lower === 'subscribe') { await supabase.from('driver_profiles').update({ sms_opted_out: false }).eq('phone', phone); return "You're back on. Text us when you got a load" }
   if (lower === 'help' || lower === '?') return 'Text zip + material when you got a load\nReply DONE [loads] when finished\nReply CANCEL to cancel'
 
-  const { data: profile } = await supabase.from('driver_profiles').select('user_id,first_name,status,sms_opted_out').eq('phone', phone).maybeSingle()
+  const { data: profile, error: profileError } = await supabase.from('driver_profiles').select('user_id,first_name,status,sms_opted_out').eq('phone', phone).maybeSingle()
+  console.error('[SMS DEBUG] phone:', phone, 'profile:', JSON.stringify(profile), 'error:', profileError?.message)
 
   // NEW DRIVER
   if (!profile) {
