@@ -9,7 +9,7 @@ import { CITY_COORDS } from '@/lib/city-coords'
  * NEVER uses client_address, delivery_latitude, or delivery_longitude.
  */
 function getCityCoords(city: string): [number, number] {
-  const coords = CITY_COORDS[city] || CITY_COORDS['Dallas']
+  const coords = CITY_COORDS[city] || { lat: 32.82, lng: -97.1 }
   // Add jitter so pins don't stack exactly
   const jitter = (Math.random() - 0.5) * 0.02
   return [coords.lat + jitter, coords.lng + jitter]

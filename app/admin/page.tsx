@@ -22,16 +22,45 @@ export default function AdminDashboard() {
 
   useEffect(() => { fetchLoads() }, [activeTab])
 
-  // Realtime subscription for new load submissions
+  // Request browser notification permission on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission()
+    }
+  }, [])
+
+  // Enhanced realtime subscriptions for loads and dispatch orders
   useEffect(() => {
     const supabase = createBrowserSupabase()
     const channel = supabase
-      .channel('admin-load-inserts')
+      .channel('admin-realtime')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'load_requests' }, () => {
+        // New load submitted — refresh if on pending tab, otherwise show badge
         if (activeTabRef.current === 'pending') {
           fetchLoads()
         } else {
           setNewCount(c => c + 1)
+        }
+        // Browser notification for new loads
+        if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+          new Notification('New Load Submission', {
+            body: 'A driver submitted a new load request.',
+            icon: '/favicon.ico',
+          })
+        }
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'load_requests' }, () => {
+        // Status change (approved, rejected, completed) — refresh current view
+        fetchLoads()
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'dispatch_orders' }, () => {
+        if (activeTabRef.current === 'orders') {
+          fetchActiveOrders()
+        }
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'dispatch_orders' }, () => {
+        if (activeTabRef.current === 'orders') {
+          fetchActiveOrders()
         }
       })
       .subscribe()

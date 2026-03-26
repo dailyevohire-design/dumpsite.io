@@ -69,7 +69,7 @@ export async function GET(req: NextRequest) {
   // delivery_latitude, delivery_longitude
   const safeJobs = (data || []).map((job: any) => {
     const cityName = job.cities?.name || 'DFW'
-    const coords = CITY_COORDS[cityName] || CITY_COORDS['Dallas']
+    const coords = CITY_COORDS[cityName] || { lat: 32.82, lng: -97.1 }
     // Add small jitter so pins don't stack exactly
     const jitter = () => (Math.random() - 0.5) * 0.02
 

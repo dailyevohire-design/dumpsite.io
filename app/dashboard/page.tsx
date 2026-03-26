@@ -394,6 +394,10 @@ export default function DriverDashboard() {
   const [addressSuggestions, setAddressSuggestions] = useState<any[]>([])
   const [showSuggestions, setShowSuggestions] = useState(false)
   const addressDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [cityBannerDismissed, setCityBannerDismissed] = useState(() => {
+    if (typeof window !== 'undefined') return localStorage.getItem('cityBannerDismissed') === 'true'
+    return false
+  })
 
   function onLocationChange(value: string) {
     setForm(f => ({ ...f, locationText: value, pickupLat: '', pickupLng: '' }))
@@ -459,7 +463,7 @@ export default function DriverDashboard() {
     supabase.auth.getUser().then(({ data }) => {
       if (!data.user) { router.push('/login'); return }
       setUser(data.user)
-      supabase.from('driver_profiles').select('*, tiers(name,slug,pay_boost_pct,trial_load_limit)').eq('user_id', data.user.id).single().then(({ data: p }) => {
+      supabase.from('driver_profiles').select('*, tiers(name,slug,pay_boost_pct,trial_load_limit), cities(name)').eq('user_id', data.user.id).single().then(({ data: p }) => {
         setProfile(p)
         identifyDriver(data.user!.id, { tier: (p?.tiers as any)?.slug, city: p?.city_id, truckType: p?.truck_type })
         trackEvent('dashboard_viewed', { tier: (p?.tiers as any)?.slug })
@@ -639,6 +643,22 @@ export default function DriverDashboard() {
               Trial: {profile.trial_loads_used}/{tier.trial_load_limit} loads used
             </div>
           )}
+        </div>
+      )}
+
+      {profile && !cityBannerDismissed && (!profile.city_id || (profile.cities as any)?.name === 'Dallas') && (
+        <div style={{margin:'14px 20px',padding:'14px 18px',borderRadius:'10px',background:'rgba(245,166,35,0.1)',border:'1px solid rgba(245,166,35,0.35)',display:'flex',alignItems:'center',justifyContent:'space-between',gap:'12px',flexWrap:'wrap'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'10px',flex:1,minWidth:0}}>
+            <span style={{fontSize:'20px',flexShrink:0}}>&#9888;&#65039;</span>
+            <div>
+              <div style={{fontWeight:'800',fontSize:'14px',color:'#F5A623',marginBottom:'2px'}}>Please update your city so you get the right jobs</div>
+              <div style={{fontSize:'12px',color:'#606670'}}>Your city determines which jobs you see. Make sure it is set correctly.</div>
+            </div>
+          </div>
+          <div style={{display:'flex',gap:'8px',flexShrink:0}}>
+            <a href="/account" style={{background:'#F5A623',color:'#111',padding:'8px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px',whiteSpace:'nowrap'}}>Update City</a>
+            <button onClick={() => { setCityBannerDismissed(true); localStorage.setItem('cityBannerDismissed', 'true') }} style={{background:'transparent',border:'1px solid rgba(245,166,35,0.3)',color:'#F5A623',padding:'8px 12px',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontWeight:'600',whiteSpace:'nowrap'}}>Dismiss</button>
+          </div>
         </div>
       )}
 

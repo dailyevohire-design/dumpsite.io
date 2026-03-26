@@ -193,7 +193,6 @@ async function handleStatusRequest(phone: string): Promise<string> {
     .eq('driver_id', profile.user_id)
     .in('status', ['pending', 'approved'])
     .order('created_at', { ascending: false })
-    .limit(1)
     .maybeSingle()
 
   if (!activeLoad) {
@@ -229,7 +228,6 @@ async function handleDoneRequest(phone: string, body: string): Promise<string> {
     .eq('driver_id', profile.user_id)
     .eq('status', 'approved')
     .order('created_at', { ascending: false })
-    .limit(1)
     .maybeSingle()
 
   if (!activeLoad) {
@@ -293,7 +291,6 @@ async function handleCancelRequest(phone: string): Promise<string> {
     .eq('driver_id', profile.user_id)
     .in('status', ['pending', 'approved'])
     .order('created_at', { ascending: false })
-    .limit(1)
     .maybeSingle()
 
   if (!activeLoad) {
@@ -340,7 +337,6 @@ async function handleFreeTextRequest(phone: string, body: string): Promise<strin
     .select('id')
     .eq('driver_id', profile.user_id)
     .in('status', ['pending', 'approved'])
-    .limit(1)
     .maybeSingle()
 
   if (existingLoad) {

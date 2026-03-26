@@ -49,6 +49,8 @@ export const mockSupabase = {
   range: vi.fn(() => mockSupabase),
   single: vi.fn(() => mockSupabase),
   maybeSingle: vi.fn(() => mockSupabase),
+  not: vi.fn(() => mockSupabase),
+  rpc: vi.fn(() => mockSupabase),
   storage: {
     from: vi.fn(() => ({
       upload: vi.fn(),
