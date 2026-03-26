@@ -1,6 +1,6 @@
 import { createAdminSupabase } from '../supabase'
 import { sendAdminAlert } from '../sms'
-import OpenAI from 'openai'
+import Anthropic from '@anthropic-ai/sdk'
 import { generateSiteToken } from '@/lib/utils/site-token'
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
@@ -180,7 +180,7 @@ export async function cancelDispatch(dispatchId: string, adminUserId: string, re
 
 async function humanReply(situation: string, driverName: string, context: Record<string, any> = {}): Promise<string> {
   try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
     const systemPrompt = [
       "You text exactly like Juan, a dirt broker in DFW/Colorado.",
       "Style: ultra short 1-2 sentences max, no punctuation at end, casual and direct.",
@@ -190,17 +190,28 @@ async function humanReply(situation: string, driverName: string, context: Record
       "Driver name: " + driverName,
       "Context: " + JSON.stringify(context)
     ].join(" ")
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini', max_tokens: 80, temperature: 0.7,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: 'Write only the SMS reply text, nothing else.' }
-      ]
+    const message = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 80,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: 'Write only the SMS reply text, nothing else.' }]
     })
-    return completion.choices[0].message.content?.trim() || 'One sec'
-  } catch (err) {
-    console.error('[humanReply] OpenAI error:', err)
-    return 'One sec'
+    const block = message.content[0]
+    return (block.type === 'text' ? block.text : '').trim() || 'One sec'
+  } catch (err: any) {
+    console.error('[humanReply] FAILED:', err?.message || err)
+    const fallbacks: Record<string, string> = {
+      'active job': 'You got an active job already. Reply STATUS to check it',
+      'no active jobs': 'No active jobs rn. Text city + material to get a site',
+      'city': 'What city you in',
+      'material': 'What material type',
+      'completed': '10.4 got it. Payment coming',
+      'cancelled': 'Ok cancelled',
+      'waitlist': 'Nothing available rn, got you on the list',
+      'no account': 'Sign up at dumpsite.io first'
+    }
+    const key = Object.keys(fallbacks).find(k => situation.toLowerCase().includes(k))
+    return key ? fallbacks[key] : 'Give me a sec'
   }
 }
 
@@ -350,22 +361,22 @@ async function handleCancelRequest(phone: string): Promise<string> {
 
 async function parseIncomingText(body: string): Promise<{ cityName: string | null, materialType: string | null, estimatedYards: number | null }> {
   try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
     const systemPrompt = [
-      "Parse a dirt hauling SMS. Return ONLY valid JSON, no markdown.",
+      "Parse a dirt hauling SMS. Return ONLY valid JSON, no markdown, no explanation.",
       "DFW cities: dallas, fort worth, frisco, mckinney, allen, plano, arlington, irving, garland, denton, lewisville, flower mound, mansfield, grand prairie, hutchins, carrollton, mesquite, rowlett, cedar hill, desoto, duncanville, coppell, grapevine, keller, southlake",
       "Colorado cities: denver, colorado springs, aurora, lakewood, arvada, westminster, centennial, parker, longmont, boulder, golden, monument, hudson, thornton, englewood, pueblo, castle rock",
-      'Return: {"cityName":"matched city or null","materialType":"clean fill|clay|sandy loam|caliche|topsoil|mixed|concrete|rock or null","estimatedYards":number or null}',
-      "Rules: fill dirt or dirt alone = clean fill. tons x 0.7 = yards. City not in list = null."
+      'Return exactly: {"cityName":"matched city or null","materialType":"clean fill|clay|sandy loam|caliche|topsoil|mixed|concrete|rock or null","estimatedYards":number or null}',
+      "Rules: fill dirt or dirt alone = clean fill. tons x 0.7 = yards. City not in list = null. I need a dumpsite in Dallas = cityName dallas, materialType null."
     ].join(" ")
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini', max_tokens: 100, temperature: 0,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: body }
-      ]
+    const message = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 100,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: body }]
     })
-    const raw = completion.choices[0].message.content || '{}'
+    const block = message.content[0]
+    const raw = block.type === 'text' ? block.text : '{}'
     return JSON.parse(raw.replace(/```json|```/g, '').trim())
   } catch {
     return { cityName: null, materialType: null, estimatedYards: null }
