@@ -1,5 +1,9 @@
 import { createAdminSupabase } from '../supabase'
 import { sendAdminAlert } from '../sms'
+import OpenAI from 'openai'
+import { generateSiteToken } from '@/lib/utils/site-token'
+
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
 
 /**
  * SMS Dispatch Service — handles advanced dispatch workflows:
@@ -174,6 +178,20 @@ export async function cancelDispatch(dispatchId: string, adminUserId: string, re
   return { success: true }
 }
 
+async function humanReply(situation: string, driverName: string, context: Record<string, any> = {}): Promise<string> {
+  try {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini', max_tokens: 80, temperature: 0.7,
+      messages: [
+        { role: 'system', content: `You text exactly like Juan, a dirt broker in DFW. His style: ultra short 1-2 sentences, no punctuation at end, casual and direct. Examples of his messages: "Yes sir", "10.4", "Ok np", "Perfect", "Morning", "Send pic of dirt", "Being sent rn", "Give me hour max", "3 miles", "Fs that". Never sound like customer service. No emojis. Use driver first name rarely. Situation: ${situation}. Driver name: ${driverName}. Context: ${JSON.stringify(context)}` },
+        { role: 'user', content: 'Write only the SMS reply text, nothing else.' }
+      ]
+    })
+    return completion.choices[0].message.content?.trim() || 'Give me a sec'
+  } catch { return 'Give me a sec' }
+}
+
 async function handleStatusRequest(phone: string): Promise<string> {
   const supabase = createAdminSupabase()
 
@@ -196,17 +214,17 @@ async function handleStatusRequest(phone: string): Promise<string> {
     .maybeSingle()
 
   if (!activeLoad) {
-    return `Hi ${profile.first_name || 'Driver'}! No active jobs right now. Visit dumpsite.io/dashboard to find available jobs.`
+    return humanReply('Driver asked for job status, has no active jobs right now', profile.first_name || 'Driver')
   }
 
   const cityName = (activeLoad.dispatch_orders as any)?.cities?.name || 'DFW'
   const jobNumber = generateJobNumber(activeLoad.dispatch_order_id)
 
   if (activeLoad.status === 'pending') {
-    return `Hi ${profile.first_name}! Job ${jobNumber} in ${cityName} is pending approval. You'll get an SMS with the address once approved.`
+    return humanReply('Driver job is pending approval, let them know briefly', profile.first_name || '', { job: jobNumber, city: cityName })
   }
 
-  return `Hi ${profile.first_name}! Job ${jobNumber} in ${cityName} is approved. ${activeLoad.yards_estimated || 0} yards. Reply DONE when complete or CANCEL to cancel.`
+  return humanReply('Driver has active approved job, let them know', profile.first_name || '', { job: jobNumber, city: cityName, yards: activeLoad.yards_estimated || 0 })
 }
 
 async function handleDoneRequest(phone: string, body: string): Promise<string> {
@@ -269,7 +287,7 @@ async function handleDoneRequest(phone: string, body: string): Promise<string> {
     )
   } catch {}
 
-  return `Job ${jobNumber} marked complete! ${loadsDelivered} load(s) delivered — $${totalPayDollars} payout pending. Upload completion photo at dumpsite.io/dashboard for faster processing.`
+  return humanReply('Driver just completed their job, acknowledge loads and say payment is coming, be brief like a real person', profile.first_name || '', { loads: loadsDelivered, pay: '$' + totalPayDollars, job: jobNumber })
 }
 
 async function handleCancelRequest(phone: string): Promise<string> {
@@ -315,7 +333,7 @@ async function handleCancelRequest(phone: string): Promise<string> {
     )
   } catch {}
 
-  return `Job ${jobNumber} in ${cityName} has been cancelled. Visit dumpsite.io/dashboard for other available jobs.`
+  return humanReply('Driver cancelled their job', profile.first_name || '', { job: jobNumber, city: cityName })
 }
 
 async function handleFreeTextRequest(phone: string, body: string): Promise<string> {
@@ -358,7 +376,7 @@ async function handleFreeTextRequest(phone: string, body: string): Promise<strin
     .limit(3)
 
   if (!availableJobs || availableJobs.length === 0) {
-    return `No available jobs in ${(profile.cities as any)?.name || 'your area'} right now. We'll text you when new jobs come in. Check dumpsite.io/dashboard for updates.`
+    return humanReply('No jobs available in driver city right now, they are on the list and will be texted when something comes in', profile.first_name || '', { city: (profile.cities as any)?.name || 'your area' })
   }
 
   const job = availableJobs[0]
@@ -366,7 +384,9 @@ async function handleFreeTextRequest(phone: string, body: string): Promise<strin
   const payDollars = job.driver_pay_cents ? Math.round(job.driver_pay_cents / 100) : 35
   const cityName = (job.cities as any)?.name || 'DFW'
 
-  return `${profile.first_name}, we have a job in ${cityName}: ${job.yards_needed || '?'} yards at $${payDollars}/load (${jobNumber}). Reply YES to claim it or visit dumpsite.io/dashboard for more details.`
+  const token = generateSiteToken({ siteId: job.id, jobId: job.id, driverPhone: phone, expiresInMinutes: 240 })
+  const siteLink = `${APP_URL}/api/sites/reveal?t=${token}`
+  return `${cityName} — ${job.yards_needed || '?'} yds @ $${payDollars}/load\n${siteLink}\nReply YES to claim (${jobNumber})`
 }
 
 async function handleIncoming(sms: IncomingSMS): Promise<string> {

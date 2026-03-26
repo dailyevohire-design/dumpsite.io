@@ -52,7 +52,7 @@ function getTwilioConfig() {
   return { sid: accountSid, key: authKey, secret: authSecret, from, admin }
 }
 
-async function sendSMS(to: string, body: string, messageType: string, relatedId?: string) {
+async function sendSMS(to: string, body: string, messageType: string, relatedId?: string, fromOverride?: string) {
   // FIX: Wrap getTwilioConfig in try/catch — never crash the calling route
   let config: ReturnType<typeof getTwilioConfig>
   try {
@@ -63,7 +63,8 @@ async function sendSMS(to: string, body: string, messageType: string, relatedId?
   }
 
   const supabase = createAdminSupabase()
-  const { sid, key, secret, from } = config
+  const { sid, key, secret, from: defaultFrom } = config
+  const from = fromOverride || defaultFrom
   try {
     const response = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
@@ -130,7 +131,8 @@ export async function sendDispatchSMS(phone: string, opts: {
   const normalized = normalizePhone(phone)
   const urgencyLine = opts.tierSlug === 'elite' ? '🔥 PRIORITY JOB — ' : ''
   const body = `${urgencyLine}DumpSite.io Job Available!\n\n📍 ${opts.cityName}\n📦 ${opts.yardsNeeded} yards needed\n💰 $${opts.payDollars}/load\n📅 ${opts.haulDate}\n\nLog in to claim: dumpsite.io/dashboard\n\nReply STOP to unsubscribe.`
-  return sendSMS(normalized, body, 'dispatch', opts.dispatchId)
+  const dispatchNumber = process.env.TWILIO_DISPATCH_NUMBER
+  return sendSMS(normalized, body, 'dispatch', opts.dispatchId, dispatchNumber)
 }
 
 export async function sendAdminAlert(message: string) {
