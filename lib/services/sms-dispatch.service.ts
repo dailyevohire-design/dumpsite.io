@@ -181,15 +181,27 @@ export async function cancelDispatch(dispatchId: string, adminUserId: string, re
 async function humanReply(situation: string, driverName: string, context: Record<string, any> = {}): Promise<string> {
   try {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    const systemPrompt = [
+      "You text exactly like Juan, a dirt broker in DFW/Colorado.",
+      "Style: ultra short 1-2 sentences max, no punctuation at end, casual and direct.",
+      "His actual messages: Yes sir | 10.4 | Ok np | Perfect | Morning | Send pic of dirt | Being sent rn | Give me hour max | 3 miles | Fs that | Yo | How many yards do you have | Whats address your coming from | Were you able to get 3",
+      "Never sound like customer service. No emojis. Use first name occasionally not every time. Typos ok.",
+      "Situation: " + situation,
+      "Driver name: " + driverName,
+      "Context: " + JSON.stringify(context)
+    ].join(" ")
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini', max_tokens: 80, temperature: 0.7,
       messages: [
-        { role: 'system', content: `You text exactly like Juan, a dirt broker in DFW. His style: ultra short 1-2 sentences, no punctuation at end, casual and direct. Examples of his messages: "Yes sir", "10.4", "Ok np", "Perfect", "Morning", "Send pic of dirt", "Being sent rn", "Give me hour max", "3 miles", "Fs that". Never sound like customer service. No emojis. Use driver first name rarely. Situation: ${situation}. Driver name: ${driverName}. Context: ${JSON.stringify(context)}` },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: 'Write only the SMS reply text, nothing else.' }
       ]
     })
-    return completion.choices[0].message.content?.trim() || 'Give me a sec'
-  } catch { return 'Give me a sec' }
+    return completion.choices[0].message.content?.trim() || 'One sec'
+  } catch (err) {
+    console.error('[humanReply] OpenAI error:', err)
+    return 'One sec'
+  }
 }
 
 async function handleStatusRequest(phone: string): Promise<string> {
@@ -336,6 +348,30 @@ async function handleCancelRequest(phone: string): Promise<string> {
   return humanReply('Driver cancelled their job', profile.first_name || '', { job: jobNumber, city: cityName })
 }
 
+async function parseIncomingText(body: string): Promise<{ cityName: string | null, materialType: string | null, estimatedYards: number | null }> {
+  try {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+    const systemPrompt = [
+      "Parse a dirt hauling SMS. Return ONLY valid JSON, no markdown.",
+      "DFW cities: dallas, fort worth, frisco, mckinney, allen, plano, arlington, irving, garland, denton, lewisville, flower mound, mansfield, grand prairie, hutchins, carrollton, mesquite, rowlett, cedar hill, desoto, duncanville, coppell, grapevine, keller, southlake",
+      "Colorado cities: denver, colorado springs, aurora, lakewood, arvada, westminster, centennial, parker, longmont, boulder, golden, monument, hudson, thornton, englewood, pueblo, castle rock",
+      'Return: {"cityName":"matched city or null","materialType":"clean fill|clay|sandy loam|caliche|topsoil|mixed|concrete|rock or null","estimatedYards":number or null}',
+      "Rules: fill dirt or dirt alone = clean fill. tons x 0.7 = yards. City not in list = null."
+    ].join(" ")
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini', max_tokens: 100, temperature: 0,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: body }
+      ]
+    })
+    const raw = completion.choices[0].message.content || '{}'
+    return JSON.parse(raw.replace(/```json|```/g, '').trim())
+  } catch {
+    return { cityName: null, materialType: null, estimatedYards: null }
+  }
+}
+
 async function handleFreeTextRequest(phone: string, body: string): Promise<string> {
   const supabase = createAdminSupabase()
 
@@ -346,10 +382,10 @@ async function handleFreeTextRequest(phone: string, body: string): Promise<strin
     .maybeSingle()
 
   if (!profile) {
-    return 'No driver account found for this number. Sign up at dumpsite.io to get started.'
+    return 'No account found for this number. Sign up at dumpsite.io'
   }
 
-  // Check if driver already has an active job
+  // Check for existing active job
   const { data: existingLoad } = await supabase
     .from('load_requests')
     .select('id')
@@ -358,35 +394,135 @@ async function handleFreeTextRequest(phone: string, body: string): Promise<strin
     .maybeSingle()
 
   if (existingLoad) {
-    return 'You already have an active job. Reply STATUS to check it, DONE when complete, or CANCEL to cancel first.'
+    return await humanReply('Driver already has active job and is texting again', profile.first_name || '', {})
   }
 
-  // Try to parse city, material, yards from free text
-  // e.g. "Fort Worth, clean fill, 200 yards"
-  const yardsMatch = body.match(/(\d+)\s*(?:yards?|yds?|cubic)/i)
-  const yards = yardsMatch ? parseInt(yardsMatch[1], 10) : null
+  // Parse the incoming message with AI
+  const parsed = await parseIncomingText(body)
 
-  // Look for available dispatch orders in their city
-  const { data: availableJobs } = await supabase
-    .from('dispatch_orders')
-    .select('id, yards_needed, driver_pay_cents, cities(name)')
-    .eq('city_id', profile.city_id)
-    .in('status', ['dispatching', 'active'])
-    .order('created_at', { ascending: false })
-    .limit(3)
+  // Determine city to search
+  const searchCity = parsed.cityName || (profile.cities as any)?.name || null
 
-  if (!availableJobs || availableJobs.length === 0) {
-    return humanReply('No jobs available in driver city right now, they are on the list and will be texted when something comes in', profile.first_name || '', { city: (profile.cities as any)?.name || 'your area' })
+  if (!searchCity) {
+    return await humanReply('Driver texted but we cannot tell what city they are in. Ask what city and material type.', profile.first_name || '', { theyTexted: body })
   }
 
-  const job = availableJobs[0]
-  const jobNumber = generateJobNumber(job.id)
-  const payDollars = job.driver_pay_cents ? Math.round(job.driver_pay_cents / 100) : 35
-  const cityName = (job.cities as any)?.name || 'DFW'
+  if (!parsed.materialType) {
+    return await humanReply('We know the city but need to know material type to find a site', profile.first_name || '', { city: searchCity })
+  }
 
-  const token = generateSiteToken({ siteId: job.id, jobId: job.id, driverPhone: phone, expiresInMinutes: 240 })
-  const siteLink = `${APP_URL}/api/sites/reveal?t=${token}`
-  return `${cityName} — ${job.yards_needed || '?'} yds @ $${payDollars}/load\n${siteLink}\nReply YES to claim (${jobNumber})`
+  // Find best available dump site directly
+  const { data: cityRow } = await supabase
+    .from('cities')
+    .select('id')
+    .ilike('name', '%' + searchCity + '%')
+    .maybeSingle()
+
+  let siteQuery = supabase
+    .from('dump_sites')
+    .select('id, capacity_yards, filled_yards, accepted_materials, gate_code, hours_text, access_instructions, operator_name')
+    .eq('is_active', true)
+    .eq('status', 'active')
+
+  if (cityRow?.id) {
+    siteQuery = siteQuery.eq('city_id', cityRow.id)
+  }
+
+  const { data: sites } = await siteQuery
+
+  if (!sites || sites.length === 0) {
+    // Add to waitlist
+    try {
+      await supabase.from('dispatch_waitlist').insert({
+        driver_id: profile.user_id,
+        city_id: cityRow?.id || null,
+        city_name: searchCity,
+        material_type: parsed.materialType,
+        estimated_yards: parsed.estimatedYards,
+        notified: false
+      })
+    } catch {}
+
+    return await humanReply('No dump sites available right now in that city for that material. Driver added to waitlist and will be texted when a site opens.', profile.first_name || '', { city: searchCity, material: parsed.materialType })
+  }
+
+  // Filter by capacity and material
+  const yardsNeeded = parsed.estimatedYards || 1
+  const mt = parsed.materialType.toLowerCase()
+  const available = sites.filter(s => {
+    const cap = (s.capacity_yards || 0) - (s.filled_yards || 0)
+    if (cap < yardsNeeded) return false
+    const accepted: string[] = s.accepted_materials || ['clean fill']
+    return accepted.some((m: string) => m.toLowerCase() === 'all' || m.toLowerCase().includes(mt) || mt.includes(m.toLowerCase()))
+  })
+
+  if (available.length === 0) {
+    try {
+      await supabase.from('dispatch_waitlist').insert({
+        driver_id: profile.user_id,
+        city_id: cityRow?.id || null,
+        city_name: searchCity,
+        material_type: parsed.materialType,
+        estimated_yards: parsed.estimatedYards,
+        notified: false
+      })
+    } catch {}
+
+    return await humanReply('No sites with capacity available right now for that material. Driver added to waitlist.', profile.first_name || '', { city: searchCity })
+  }
+
+  const site = available.sort((a, b) =>
+    ((b.capacity_yards || 0) - (b.filled_yards || 0)) -
+    ((a.capacity_yards || 0) - (a.filled_yards || 0))
+  )[0]
+
+  // Create a dispatch job record
+  const jobNumber = 'DS-' + Date.now().toString().slice(-6)
+  let job: any = null
+  try {
+    const result = await supabase
+      .from('dispatch_jobs')
+      .insert({
+        job_number: jobNumber,
+        driver_id: profile.user_id,
+        site_id: site.id,
+        city_name: searchCity,
+        material_type: parsed.materialType,
+        estimated_yards: parsed.estimatedYards,
+        driver_phone: phone,
+        status: 'in_progress',
+        source: 'sms',
+        updated_at: new Date().toISOString()
+      })
+      .select()
+      .single()
+    job = result.data
+  } catch {}
+
+  // Reserve capacity
+  if (parsed.estimatedYards && site.id) {
+    try {
+      await supabase.rpc('reserve_site_capacity', {
+        p_site_id: site.id,
+        p_yards: parsed.estimatedYards
+      })
+    } catch {}
+  }
+
+  // Generate encrypted link
+  const token = generateSiteToken({
+    siteId: site.id,
+    jobId: job?.id || site.id,
+    driverPhone: phone,
+    expiresInMinutes: 240
+  })
+  const siteLink = APP_URL + '/api/sites/reveal?t=' + token
+
+  const gate = site.gate_code ? '\nGate: ' + site.gate_code : ''
+  const hours = site.hours_text ? '\nHours: ' + site.hours_text : ''
+  const yardsText = parsed.estimatedYards ? ' ~' + parsed.estimatedYards + ' yds' : ''
+
+  return searchCity + ' — ' + parsed.materialType + yardsText + '\n' + siteLink + gate + hours + '\nReply DONE [loads] when finished'
 }
 
 async function handleIncoming(sms: IncomingSMS): Promise<string> {
