@@ -6,7 +6,14 @@ import { sendAdminAlert } from '../sms'
  * - Re-dispatch to additional drivers
  * - Dispatch status tracking
  * - Job number generation (DS- prefix)
+ * - Inbound SMS handling (status, done, cancel, free-text requests)
  */
+
+interface IncomingSMS {
+  from: string
+  body: string
+  messageSid: string
+}
 
 export function generateJobNumber(dispatchId: string): string {
   // Use first 6 chars of UUID for human-readable job number
@@ -165,4 +172,234 @@ export async function cancelDispatch(dispatchId: string, adminUserId: string, re
   })
 
   return { success: true }
+}
+
+async function handleStatusRequest(phone: string): Promise<string> {
+  const supabase = createAdminSupabase()
+
+  const { data: profile } = await supabase
+    .from('driver_profiles')
+    .select('user_id, first_name')
+    .eq('phone', phone)
+    .maybeSingle()
+
+  if (!profile) {
+    return 'No driver account found for this number. Sign up at dumpsite.io'
+  }
+
+  const { data: activeLoad } = await supabase
+    .from('load_requests')
+    .select('id, status, dispatch_order_id, yards_estimated, dispatch_orders(status, cities(name))')
+    .eq('driver_id', profile.user_id)
+    .in('status', ['pending', 'approved'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!activeLoad) {
+    return `Hi ${profile.first_name || 'Driver'}! No active jobs right now. Visit dumpsite.io/dashboard to find available jobs.`
+  }
+
+  const cityName = (activeLoad.dispatch_orders as any)?.cities?.name || 'DFW'
+  const jobNumber = generateJobNumber(activeLoad.dispatch_order_id)
+
+  if (activeLoad.status === 'pending') {
+    return `Hi ${profile.first_name}! Job ${jobNumber} in ${cityName} is pending approval. You'll get an SMS with the address once approved.`
+  }
+
+  return `Hi ${profile.first_name}! Job ${jobNumber} in ${cityName} is approved. ${activeLoad.yards_estimated || 0} yards. Reply DONE when complete or CANCEL to cancel.`
+}
+
+async function handleDoneRequest(phone: string, body: string): Promise<string> {
+  const supabase = createAdminSupabase()
+
+  const { data: profile } = await supabase
+    .from('driver_profiles')
+    .select('user_id, first_name')
+    .eq('phone', phone)
+    .maybeSingle()
+
+  if (!profile) {
+    return 'No driver account found for this number. Sign up at dumpsite.io'
+  }
+
+  const { data: activeLoad } = await supabase
+    .from('load_requests')
+    .select('id, dispatch_order_id, yards_estimated, dispatch_orders(driver_pay_cents, cities(name))')
+    .eq('driver_id', profile.user_id)
+    .eq('status', 'approved')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!activeLoad) {
+    return 'No active approved job found. Visit dumpsite.io/dashboard to check your jobs.'
+  }
+
+  // Parse load count from message like "done 3" or "complete 5 loads"
+  const loadMatch = body.match(/(\d+)/)
+  const loadsDelivered = loadMatch ? Math.min(parseInt(loadMatch[1], 10), 50) : 1
+
+  const payPerLoad = (activeLoad.dispatch_orders as any)?.driver_pay_cents || 3500
+  const totalPayCents = payPerLoad * loadsDelivered
+  const totalPayDollars = Math.round(totalPayCents / 100)
+  const jobNumber = generateJobNumber(activeLoad.dispatch_order_id)
+  const cityName = (activeLoad.dispatch_orders as any)?.cities?.name || 'DFW'
+
+  // Mark load as completed
+  await supabase
+    .from('load_requests')
+    .update({
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      payout_cents: totalPayCents,
+      truck_count: loadsDelivered,
+    })
+    .eq('id', activeLoad.id)
+
+  // Create payment record
+  await supabase.from('driver_payments').insert({
+    driver_id: profile.user_id,
+    load_request_id: activeLoad.id,
+    amount_cents: totalPayCents,
+    status: 'pending',
+  })
+
+  try {
+    await sendAdminAlert(
+      `Job ${jobNumber} completed via SMS by ${profile.first_name || 'driver'} in ${cityName}. ${loadsDelivered} load(s), $${totalPayDollars} payout pending.`
+    )
+  } catch {}
+
+  return `Job ${jobNumber} marked complete! ${loadsDelivered} load(s) delivered — $${totalPayDollars} payout pending. Upload completion photo at dumpsite.io/dashboard for faster processing.`
+}
+
+async function handleCancelRequest(phone: string): Promise<string> {
+  const supabase = createAdminSupabase()
+
+  const { data: profile } = await supabase
+    .from('driver_profiles')
+    .select('user_id, first_name')
+    .eq('phone', phone)
+    .maybeSingle()
+
+  if (!profile) {
+    return 'No driver account found for this number. Sign up at dumpsite.io'
+  }
+
+  const { data: activeLoad } = await supabase
+    .from('load_requests')
+    .select('id, dispatch_order_id, status, dispatch_orders(cities(name))')
+    .eq('driver_id', profile.user_id)
+    .in('status', ['pending', 'approved'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!activeLoad) {
+    return 'No active job to cancel. Visit dumpsite.io/dashboard to view your jobs.'
+  }
+
+  const jobNumber = generateJobNumber(activeLoad.dispatch_order_id)
+  const cityName = (activeLoad.dispatch_orders as any)?.cities?.name || 'DFW'
+
+  await supabase
+    .from('load_requests')
+    .update({
+      status: 'rejected',
+      rejected_reason: 'Cancelled by driver via SMS',
+      reviewed_at: new Date().toISOString(),
+    })
+    .eq('id', activeLoad.id)
+
+  try {
+    await sendAdminAlert(
+      `Job ${jobNumber} cancelled via SMS by ${profile.first_name || 'driver'} in ${cityName}.`
+    )
+  } catch {}
+
+  return `Job ${jobNumber} in ${cityName} has been cancelled. Visit dumpsite.io/dashboard for other available jobs.`
+}
+
+async function handleFreeTextRequest(phone: string, body: string): Promise<string> {
+  const supabase = createAdminSupabase()
+
+  const { data: profile } = await supabase
+    .from('driver_profiles')
+    .select('user_id, first_name, city_id, cities(name)')
+    .eq('phone', phone)
+    .maybeSingle()
+
+  if (!profile) {
+    return 'No driver account found for this number. Sign up at dumpsite.io to get started.'
+  }
+
+  // Check if driver already has an active job
+  const { data: existingLoad } = await supabase
+    .from('load_requests')
+    .select('id')
+    .eq('driver_id', profile.user_id)
+    .in('status', ['pending', 'approved'])
+    .limit(1)
+    .maybeSingle()
+
+  if (existingLoad) {
+    return 'You already have an active job. Reply STATUS to check it, DONE when complete, or CANCEL to cancel first.'
+  }
+
+  // Try to parse city, material, yards from free text
+  // e.g. "Fort Worth, clean fill, 200 yards"
+  const yardsMatch = body.match(/(\d+)\s*(?:yards?|yds?|cubic)/i)
+  const yards = yardsMatch ? parseInt(yardsMatch[1], 10) : null
+
+  // Look for available dispatch orders in their city
+  const { data: availableJobs } = await supabase
+    .from('dispatch_orders')
+    .select('id, yards_needed, driver_pay_cents, cities(name)')
+    .eq('city_id', profile.city_id)
+    .in('status', ['dispatching', 'active'])
+    .order('created_at', { ascending: false })
+    .limit(3)
+
+  if (!availableJobs || availableJobs.length === 0) {
+    return `No available jobs in ${(profile.cities as any)?.name || 'your area'} right now. We'll text you when new jobs come in. Check dumpsite.io/dashboard for updates.`
+  }
+
+  const job = availableJobs[0]
+  const jobNumber = generateJobNumber(job.id)
+  const payDollars = job.driver_pay_cents ? Math.round(job.driver_pay_cents / 100) : 35
+  const cityName = (job.cities as any)?.name || 'DFW'
+
+  return `${profile.first_name}, we have a job in ${cityName}: ${job.yards_needed || '?'} yards at $${payDollars}/load (${jobNumber}). Reply YES to claim it or visit dumpsite.io/dashboard for more details.`
+}
+
+async function handleIncoming(sms: IncomingSMS): Promise<string> {
+  const bodyLower = sms.body.toLowerCase().trim()
+
+  if (bodyLower === 'status' || bodyLower === 'job') {
+    return handleStatusRequest(sms.from)
+  }
+
+  if (
+    bodyLower.startsWith('done') ||
+    bodyLower.startsWith('complete') ||
+    bodyLower.startsWith('finished')
+  ) {
+    return handleDoneRequest(sms.from, sms.body)
+  }
+
+  if (bodyLower === 'cancel' || bodyLower === 'stop job') {
+    return handleCancelRequest(sms.from)
+  }
+
+  // Free-text — try to match to available jobs
+  return handleFreeTextRequest(sms.from, sms.body)
+}
+
+export const smsDispatchService = {
+  handleIncoming,
+  generateJobNumber,
+  getDispatchStatus,
+  redispatchOrder,
+  cancelDispatch,
 }
