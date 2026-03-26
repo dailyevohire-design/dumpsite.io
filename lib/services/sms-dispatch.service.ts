@@ -383,6 +383,81 @@ async function parseIncomingText(body: string): Promise<{ cityName: string | nul
   }
 }
 
+async function handleSiteSelection(phone: string, choice: number, body: string): Promise<string> {
+  const supabase = createAdminSupabase()
+
+  const { data: profile } = await supabase
+    .from('driver_profiles')
+    .select('user_id, first_name')
+    .eq('phone', phone)
+    .maybeSingle()
+
+  if (!profile) return 'Sign up at dumpsite.io first'
+
+  // Get the last sites shown to this driver
+  const { data: lastLog } = await supabase
+    .from('sms_logs')
+    .select('body')
+    .eq('phone', phone)
+    .like('body', 'SITES_SHOWN:%')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!lastLog) return await humanReply('Driver replied with a number but no recent sites were shown to them', profile.first_name || '', {})
+
+  const siteIds = lastLog.body.replace('SITES_SHOWN:', '').split(',')
+  const selectedSiteId = siteIds[choice - 1]
+
+  if (!selectedSiteId) return 'Invalid choice. Reply 1, 2, or 3'
+
+  const { data: site } = await supabase
+    .from('dump_sites')
+    .select('*')
+    .eq('id', selectedSiteId)
+    .single()
+
+  if (!site) return 'Site no longer available. Text your city + material for new options'
+
+  // Check capacity still available
+  const cap = (site.capacity_yards || 0) - (site.filled_yards || 0)
+  if (cap <= 0) return 'That site just filled up. Text your city + material for new options'
+
+  // Create job
+  const jobNumber = 'DS-' + Date.now().toString().slice(-6)
+  let job: any = null
+  try {
+    const result = await supabase
+      .from('dispatch_jobs')
+      .insert({
+        job_number: jobNumber,
+        driver_id: profile.user_id,
+        site_id: site.id,
+        city_name: site.city_id,
+        material_type: 'clean fill',
+        driver_phone: phone,
+        status: 'in_progress',
+        source: 'sms',
+        updated_at: new Date().toISOString()
+      })
+      .select()
+      .single()
+    job = result.data
+  } catch {}
+
+  const token = generateSiteToken({
+    siteId: site.id,
+    jobId: job?.id || site.id,
+    driverPhone: phone,
+    expiresInMinutes: 240
+  })
+  const siteLink = APP_URL + '/api/sites/reveal?t=' + token
+  const gate = site.gate_code ? '\nGate: ' + site.gate_code : ''
+  const hours = site.hours_text ? '\nHours: ' + site.hours_text : ''
+
+  return jobNumber + ' — site ' + choice + ' confirmed\n' + siteLink + gate + hours + '\nReply DONE [loads] when finished'
+}
+
 async function handleFreeTextRequest(phone: string, body: string): Promise<string> {
   const supabase = createAdminSupabase()
 
@@ -415,11 +490,11 @@ async function handleFreeTextRequest(phone: string, body: string): Promise<strin
   const searchCity = parsed.cityName || (profile.cities as any)?.name || null
 
   if (!searchCity) {
-    return await humanReply('Driver texted but we cannot tell what city they are in. Ask what city and material type.', profile.first_name || '', { theyTexted: body })
+    return 'What city you in? (DFW or Colorado)'
   }
 
   if (!parsed.materialType) {
-    return await humanReply('We know the city but need to know material type to find a site', profile.first_name || '', { city: searchCity })
+    return searchCity + ' — what material? clean fill, clay, topsoil, mixed, or caliche'
   }
 
   // Find best available dump site directly
@@ -431,9 +506,8 @@ async function handleFreeTextRequest(phone: string, body: string): Promise<strin
 
   let siteQuery = supabase
     .from('dump_sites')
-    .select('id, capacity_yards, filled_yards, accepted_materials, gate_code, hours_text, access_instructions, operator_name')
+    .select('id, capacity_yards, filled_yards, accepted_materials, gate_code, hours_text, access_instructions, operator_name, city_id')
     .eq('is_active', true)
-    .eq('status', 'active')
 
   if (cityRow?.id) {
     siteQuery = siteQuery.eq('city_id', cityRow.id)
@@ -489,51 +563,50 @@ async function handleFreeTextRequest(phone: string, body: string): Promise<strin
 
   // Create a dispatch job record
   const jobNumber = 'DS-' + Date.now().toString().slice(-6)
-  let job: any = null
-  try {
-    const result = await supabase
-      .from('dispatch_jobs')
-      .insert({
-        job_number: jobNumber,
-        driver_id: profile.user_id,
-        site_id: site.id,
-        city_name: searchCity,
-        material_type: parsed.materialType,
-        estimated_yards: parsed.estimatedYards,
-        driver_phone: phone,
-        status: 'in_progress',
-        source: 'sms',
-        updated_at: new Date().toISOString()
-      })
-      .select()
-      .single()
-    job = result.data
-  } catch {}
+  // Sort by most available capacity
+  const sorted = available.sort((a, b) =>
+    ((b.capacity_yards || 0) - (b.filled_yards || 0)) -
+    ((a.capacity_yards || 0) - (a.filled_yards || 0))
+  )
 
-  // Reserve capacity
-  if (parsed.estimatedYards && site.id) {
-    try {
-      await supabase.rpc('reserve_site_capacity', {
-        p_site_id: site.id,
-        p_yards: parsed.estimatedYards
-      })
-    } catch {}
+  // Show up to 3 sites
+  const topSites = sorted.slice(0, 3)
+  const yardsText = parsed.estimatedYards ? parsed.estimatedYards + ' yds ' : ''
+
+  // Build multi-site response
+  const lines: string[] = []
+  lines.push(searchCity + ' — ' + parsed.materialType + (yardsText ? ' (' + yardsText + ')' : ''))
+  lines.push('')
+
+  for (let i = 0; i < topSites.length; i++) {
+    const s = topSites[i]
+    const cap = (s.capacity_yards || 0) - (s.filled_yards || 0)
+    const token = generateSiteToken({
+      siteId: s.id,
+      jobId: s.id,
+      driverPhone: phone,
+      expiresInMinutes: 240
+    })
+    const link = APP_URL + '/api/sites/reveal?t=' + token
+    lines.push('Site ' + (i + 1) + ' — ' + cap + ' yds available')
+    lines.push(link)
+    if (i < topSites.length - 1) lines.push('')
   }
 
-  // Generate encrypted link
-  const token = generateSiteToken({
-    siteId: site.id,
-    jobId: job?.id || site.id,
-    driverPhone: phone,
-    expiresInMinutes: 240
-  })
-  const siteLink = APP_URL + '/api/sites/reveal?t=' + token
+  lines.push('')
+  lines.push('Reply 1, 2, or 3 to claim a site')
 
-  const gate = site.gate_code ? '\nGate: ' + site.gate_code : ''
-  const hours = site.hours_text ? '\nHours: ' + site.hours_text : ''
-  const yardsText = parsed.estimatedYards ? ' ~' + parsed.estimatedYards + ' yds' : ''
+  // Log sites shown to driver for follow-up
+  try {
+    await supabase.from('sms_logs').insert({
+      phone: phone,
+      body: 'SITES_SHOWN: ' + topSites.map(s => s.id).join(','),
+      direction: 'outbound',
+      message_sid: 'system-' + Date.now()
+    })
+  } catch {}
 
-  return searchCity + ' — ' + parsed.materialType + yardsText + '\n' + siteLink + gate + hours + '\nReply DONE [loads] when finished'
+  return lines.join('\n')
 }
 
 async function handleIncoming(sms: IncomingSMS): Promise<string> {
@@ -553,6 +626,11 @@ async function handleIncoming(sms: IncomingSMS): Promise<string> {
 
   if (bodyLower === 'cancel' || bodyLower === 'stop job') {
     return handleCancelRequest(sms.from)
+  }
+
+  // Handle site selection reply (1, 2, or 3)
+  if (bodyLower === '1' || bodyLower === '2' || bodyLower === '3') {
+    return handleSiteSelection(sms.from, parseInt(bodyLower), sms.body)
   }
 
   // Free-text — try to match to available jobs
