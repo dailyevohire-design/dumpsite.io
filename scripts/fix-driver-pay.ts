@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import * as dotenv from 'dotenv'
 import path from 'path'
+import { getDriverPayCents, CITY_DRIVER_PAY_CENTS, DEFAULT_DRIVER_PAY_CENTS } from '../lib/driver-pay-rates'
 
 dotenv.config({ path: path.resolve(__dirname, '../.env.local') })
 
@@ -9,15 +10,11 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-const CITY_DRIVER_PAY: Record<string, number> = {
-  'burleson': 6500,
-  'mckinney': 6500,
-  'plano': 6500,
-  'dallas': 5000,
-}
-
+/**
+ * Fix ALL dispatching orders to use the correct city flat rate.
+ * Uses the centralized rate config from lib/driver-pay-rates.ts.
+ */
 async function fix() {
-  // Get all dispatching orders with their city names
   const { data: orders, error } = await supabase
     .from('dispatch_orders')
     .select('id, driver_pay_cents, price_quoted_cents, cities(name)')
@@ -28,21 +25,19 @@ async function fix() {
 
   console.log(`Found ${orders.length} dispatching orders:\n`)
 
-  for (const order of orders) {
-    const cityName = (order.cities as any)?.name?.toLowerCase() || 'unknown'
-    const correctPay = CITY_DRIVER_PAY[cityName]
+  let fixed = 0
+  let alreadyCorrect = 0
 
-    if (!correctPay) {
-      console.log(`⚠️  ${order.id} — city "${cityName}" not in fix list, skipping`)
-      continue
-    }
+  for (const order of orders) {
+    const cityName = (order.cities as any)?.name || 'unknown'
+    const correctPay = getDriverPayCents(cityName)
 
     if (order.driver_pay_cents === correctPay) {
-      console.log(`✓  ${order.id} — ${cityName} — already $${correctPay/100}/load`)
+      alreadyCorrect++
       continue
     }
 
-    console.log(`🔧 ${order.id} — ${cityName} — $${order.driver_pay_cents/100} → $${correctPay/100}/load`)
+    console.log(`🔧 ${order.id} — ${cityName} — $${(order.driver_pay_cents || 0)/100} → $${correctPay/100}/load`)
 
     const { error: updateErr } = await supabase
       .from('dispatch_orders')
@@ -53,10 +48,11 @@ async function fix() {
       console.error(`   ❌ Failed to update ${order.id}:`, updateErr)
     } else {
       console.log(`   ✅ Fixed`)
+      fixed++
     }
   }
 
-  console.log('\nDone.')
+  console.log(`\nDone. Fixed: ${fixed}, Already correct: ${alreadyCorrect}, Total: ${orders.length}`)
 }
 
 fix()

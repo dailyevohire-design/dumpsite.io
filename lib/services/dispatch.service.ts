@@ -1,6 +1,7 @@
 import { createAdminSupabase } from '../supabase'
 import { batchDispatchSMS, sendAdminAlert } from '../sms'
 import { CITY_COORDS } from '../city-coords'
+import { getDriverPayCents } from '../driver-pay-rates'
 
 export interface CreateDispatchInput {
   clientName: string
@@ -9,7 +10,7 @@ export interface CreateDispatchInput {
   cityId: string
   yardsNeeded: number
   priceQuotedCents: number
-  driverPayCents: number
+  driverPayCents?: number // Ignored — driver pay is ALWAYS calculated from city rate
   truckTypeNeeded?: string
   notes?: string
   urgency?: 'standard' | 'urgent'
@@ -32,21 +33,35 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
     }
   }
 
-  const { data: city } = await supabase
+  // Try to fetch with driver pay column; fall back to without if column doesn't exist yet
+  let city: { id: string; name: string; default_driver_pay_cents?: number } | null = null
+  const { data: cityWithPay, error: cityErr } = await supabase
     .from('cities')
-    .select('id, name')
+    .select('id, name, default_driver_pay_cents')
     .eq('id', input.cityId)
     .single()
+
+  if (cityErr?.message?.includes('default_driver_pay_cents')) {
+    // Column doesn't exist yet — fetch without it
+    const { data: cityBasic } = await supabase
+      .from('cities')
+      .select('id, name')
+      .eq('id', input.cityId)
+      .single()
+    city = cityBasic ? { ...cityBasic, default_driver_pay_cents: undefined } : null
+  } else {
+    city = cityWithPay
+  }
 
   if (!city) return { success: false, driversNotified: 0, cityName: '', error: 'City not found' }
 
   // Resolve delivery coordinates — city center as fallback
   const cityCoords = CITY_COORDS[city.name]
 
-  // Driver pay must be set explicitly — never copy from price_quoted (company rate)
-  const driverPayCents = input.driverPayCents && input.driverPayCents > 0
-    ? input.driverPayCents
-    : 4500
+  // PERMANENT FIX: Driver pay is ALWAYS determined by city rate.
+  // Never use the customer quote or admin input — prevents showing
+  // company revenue to drivers. DB column overrides config fallback.
+  const driverPayCents = getDriverPayCents(city.name, city.default_driver_pay_cents)
 
   const { data: order, error: orderError } = await supabase
     .from('dispatch_orders')

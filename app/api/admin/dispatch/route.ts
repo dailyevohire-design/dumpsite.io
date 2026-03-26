@@ -27,6 +27,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
   }
 
+  // driverPay is intentionally NOT passed — it's always calculated from
+  // the city's flat rate in dispatch.service.ts. This prevents the customer
+  // quote from leaking to drivers as their pay.
   const result = await createDispatchOrder({
     clientName: body.clientName,
     clientPhone: body.clientPhone,
@@ -34,7 +37,6 @@ export async function POST(req: NextRequest) {
     cityId: body.cityId,
     yardsNeeded: parseInt(body.yardsNeeded),
     priceQuotedCents: Math.round(parseFloat(body.priceQuoted || '0') * 100),
-    driverPayCents: Math.round(parseFloat(body.driverPay || '45') * 100),
     truckTypeNeeded: body.truckTypeNeeded,
     notes: body.notes,
     urgency: body.urgency || 'standard',

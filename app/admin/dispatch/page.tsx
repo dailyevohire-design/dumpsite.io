@@ -9,7 +9,7 @@ interface ParsedOrder {
   cityName: string | null
   yardsNeeded: number | null
   pricePerLoad: number | null
-  driverPay: number | null
+  driverPay?: number | null // Ignored — driver pay comes from city rate
   truckTypeNeeded: 'tandem_axle' | 'end_dump'
   notes: string | null
   isDelivered: boolean
@@ -84,7 +84,7 @@ function formatBytes(bytes: number): string {
 
 export default function NewDispatch() {
   // ── Cities from DB ──
-  const [CITIES, setCities] = useState<{id:string,name:string}[]>([])
+  const [CITIES, setCities] = useState<{id:string,name:string,driverPayCents?:number}[]>([])
   useEffect(() => {
     fetch('/api/admin/cities')
       .then(r => r.json())
@@ -95,7 +95,7 @@ export default function NewDispatch() {
   // ── Existing form state (unchanged) ──
   const [form, setForm] = useState({
     clientName:'', clientPhone:'', clientAddress:'', cityId:'',
-    yardsNeeded:'', priceQuoted:'', driverPay:'', truckTypeNeeded:'tandem_axle',
+    yardsNeeded:'', priceQuoted:'', truckTypeNeeded:'tandem_axle',
     urgency:'standard', notes:'', salesRep:''
   })
   const [loading, setLoading] = useState(false)
@@ -135,7 +135,6 @@ export default function NewDispatch() {
           cityId: form.cityId,
           yardsNeeded: form.yardsNeeded,
           priceQuoted: form.priceQuoted,
-          driverPay: form.driverPay,
           truckTypeNeeded: form.truckTypeNeeded,
           urgency: form.urgency,
           notes: form.notes,
@@ -146,7 +145,7 @@ export default function NewDispatch() {
       const data = await res.json()
       if (data.success) {
         setResult(data)
-        setForm({clientName:'',clientPhone:'',clientAddress:'',cityId:'',yardsNeeded:'',priceQuoted:'',driverPay:'',truckTypeNeeded:'tandem_axle',urgency:'standard',notes:'',salesRep:''})
+        setForm({clientName:'',clientPhone:'',clientAddress:'',cityId:'',yardsNeeded:'',priceQuoted:'',truckTypeNeeded:'tandem_axle',urgency:'standard',notes:'',salesRep:''})
         setParsedOrders([])
         setSubmittedIndexes(new Set())
         setParserImages([])
@@ -214,7 +213,6 @@ export default function NewDispatch() {
     set('cityId', matchedCity?.id || '')
     set('yardsNeeded', order.yardsNeeded ? String(order.yardsNeeded) : '')
     set('priceQuoted', order.pricePerLoad ? String(order.pricePerLoad) : '')
-    set('driverPay', order.driverPay ? String(order.driverPay) : '')
     set('truckTypeNeeded', order.truckTypeNeeded || 'tandem_axle')
     set('notes', order.notes || '')
     document.getElementById('manual-dispatch-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -236,7 +234,6 @@ export default function NewDispatch() {
           cityId: matchedCity.id,
           yardsNeeded: String(order.yardsNeeded || 12),
           priceQuoted: String(order.pricePerLoad || 144),
-          driverPay: String(order.driverPay || 45),
           truckTypeNeeded: order.truckTypeNeeded || 'tandem_axle',
           urgency: 'standard',
           notes: order.notes || '',
@@ -500,7 +497,7 @@ export default function NewDispatch() {
             </div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:'16px'}}>
               <div><label style={lbl}>Price Quoted ($)</label><input style={inp} value={form.priceQuoted} onChange={e=>set('priceQuoted',e.target.value)} placeholder="350.00" type="number" /></div>
-              <div><label style={{...lbl,color:'#F5A623'}}>Driver Pay ($) *</label><input style={{...inp,borderColor:'#F5A623'}} value={form.driverPay} onChange={e=>set('driverPay',e.target.value)} placeholder="45.00" type="number" /></div>
+              <div><label style={{...lbl,color:'#27AE60'}}>Driver Pay (auto)</label><div style={{...inp,borderColor:'#27AE60',background:'#0a1a0f',color:'#27AE60',fontWeight:'900',fontSize:'18px'}}>{form.cityId ? `$${(CITIES.find(c=>c.id===form.cityId)?.driverPayCents||4000)/100}/load` : 'Select city'}</div></div>
               <div>
                 <label style={lbl}>Truck Type</label>
                 <select style={inp} value={form.truckTypeNeeded} onChange={e=>set('truckTypeNeeded',e.target.value)}>

@@ -5,6 +5,7 @@ import { encryptAddress } from '@/lib/crypto'
 import { sanitizeText, sanitizeNumber } from '@/lib/validation'
 import { sendAdminAlert } from '@/lib/sms'
 import { rateLimit } from '@/lib/rate-limit'
+import { getDriverPayCents } from '@/lib/driver-pay-rates'
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerSupabase()
@@ -35,6 +36,9 @@ export async function POST(req: NextRequest) {
     try { encryptedInstructions = JSON.stringify(encryptAddress(accessInstructions)) } catch {}
   }
 
+  // Driver pay is ALWAYS the city flat rate — never the contractor's budget
+  const driverPayCents = getDriverPayCents(city.name)
+
   const { data: order, error: insertErr } = await admin.from('dispatch_orders').insert({
     client_name: sanitizeText(contactName).slice(0, 200),
     client_phone: sanitizeText(contactPhone).slice(0, 20),
@@ -42,7 +46,7 @@ export async function POST(req: NextRequest) {
     city_id: city.id,
     yards_needed: sanitizeNumber(yardsEstimated, 1, 100000) || 10,
     price_quoted_cents: Math.round(Math.max(0, Math.min(1000000, parseFloat(budgetPerLoad) || 30)) * 100),
-    driver_pay_cents: Math.round(Math.max(0, Math.min(1000000, parseFloat(budgetPerLoad) || 30)) * 100),
+    driver_pay_cents: driverPayCents,
     truck_type_needed: materialType,
     notes: sanitizeText(title).slice(0, 500) + (encryptedInstructions ? '\n[Access instructions encrypted]' : ''),
     urgency: urgency === 'urgent' ? 'urgent' : 'standard',
