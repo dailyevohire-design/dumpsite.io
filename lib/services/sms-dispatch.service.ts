@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import { createAdminSupabase } from '../supabase'
 import { sendAdminAlert } from '../sms'
 import Anthropic from '@anthropic-ai/sdk'
@@ -150,28 +151,41 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
   const { data: profile, error: profileError } = await supabase.from('driver_profiles').select('user_id,first_name,status,sms_opted_out').eq('phone', phone).maybeSingle()
   console.error('[SMS DEBUG] phone:', phone, 'profile:', JSON.stringify(profile), 'error:', profileError?.message)
 
-  // NEW DRIVER
+  // NEW DRIVER — no auth required, insert directly with random UUID
   if (!profile) {
     const session = await getSession(phone)
     const state = session?.state || 'idle'
+
     if (state !== 'getting_name') {
       await setSession(phone, { state: 'getting_name' })
       return "Hey — what's your name"
     }
+
     if (trimmed.length < 2 || trimmed.length > 50) return "What's your name"
     const firstName = trimmed.split(' ')[0]
     const lastName = trimmed.split(' ').slice(1).join(' ') || 'Driver'
-    const email = `sms_${phone}@dumpsite.io`
-    let authUser: any = null
-    try {
-      const { data: au } = await supabase.auth.admin.createUser({ email, password: Math.random().toString(36).slice(-16) + 'Aa1!', email_confirm: true })
-      authUser = au?.user
-    } catch {}
-    if (authUser) {
-      try {
-        await supabase.from('driver_profiles').insert({ user_id: authUser.id, phone, first_name: firstName, last_name: lastName, tier_id: 'c51d1a6c-7572-4ca1-8424-e05786a0116b', truck_type: 'dump truck', phone_verified: true, status: 'active', trial_loads_used: 0, truck_count: 1, gps_score: 100 })
-      } catch (e: any) { console.error('[profile]', e.message) }
+
+    // Insert profile directly — no auth user needed for SMS drivers
+    const { error: insertErr } = await supabase.from('driver_profiles').insert({
+      user_id: crypto.randomUUID(),
+      phone,
+      first_name: firstName,
+      last_name: lastName,
+      tier_id: 'c51d1a6c-7572-4ca1-8424-e05786a0116b',
+      truck_type: 'dump truck',
+      phone_verified: true,
+      status: 'active',
+      trial_loads_used: 0,
+      truck_count: 1,
+      gps_score: 100,
+    })
+
+    if (insertErr) {
+      console.error('[profile insert failed]', insertErr.message)
+      await clearSession(phone)
+      return `${firstName} got you. What's the zip you hauling from`
     }
+
     await setSession(phone, { state: 'asking_zip' })
     return `${firstName} got you. What's the zip you hauling from`
   }
