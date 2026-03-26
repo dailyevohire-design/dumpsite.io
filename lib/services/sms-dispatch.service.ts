@@ -215,12 +215,56 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
     .eq('phone', from)
     .maybeSingle()
 
+  // Auto-create driver if they don't exist — SMS IS the signup
   if (!profile) {
-    return 'Sign up at dumpsite.io to get access to dump sites'
+    const supabaseAc = createAdminSupabase()
+
+    // Check session for name collection
+    const newSession = await getSession(from)
+
+    if (!newSession?.state || newSession.state === 'idle') {
+      await setSession(from, { state: 'getting_name' })
+      return "Hey — what's your name"
+    }
+
+    if (newSession.state === 'getting_name') {
+      const name = trimmed.trim()
+      if (name.length < 2 || name.length > 40) {
+        return "What's your name"
+      }
+      const firstName = name.split(' ')[0]
+      const lastName = name.split(' ').slice(1).join(' ') || ''
+
+      // Auto-create driver profile
+      try {
+        await supabaseAc.from('driver_profiles').insert({
+          phone: from,
+          first_name: firstName,
+          last_name: lastName,
+          status: 'active',
+          phone_verified: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+      } catch {}
+
+      await setSession(from, { state: 'asking_zip' })
+      return firstName + ' got you. What\'s the zip you hauling from'
+    }
+
+    // Still in name flow
+    await setSession(from, { state: 'getting_name' })
+    return "What's your name"
   }
+
   if (profile.sms_opted_out) return ''
+
+  // Auto-activate if somehow inactive
   if (profile.status !== 'active') {
-    return "Your account isn't active yet. Hit us up at dumpsite.io"
+    await createAdminSupabase()
+      .from('driver_profiles')
+      .update({ status: 'active' })
+      .eq('phone', from)
   }
 
   const firstName = profile.first_name || 'Driver'
