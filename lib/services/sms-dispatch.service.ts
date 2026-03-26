@@ -190,6 +190,7 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
   const { from, body, messageSid } = sms
   const trimmed = body.trim()
   const lower = trimmed.toLowerCase()
+  const normalizedPhone = from.replace(/^\+1/, '').replace(/\D/g, '')
 
   // Log inbound
   try {
@@ -200,11 +201,11 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
 
   // ── Opt-out handling ──────────────────────────────────────────────────────
   if (lower === 'stop' || lower === 'unsubscribe') {
-    await supabase.from('driver_profiles').update({ sms_opted_out: true }).eq('phone', from)
+    await supabase.from('driver_profiles').update({ sms_opted_out: true }).eq('phone', normalizedPhone)
     return ''
   }
   if (lower === 'start' || lower === 'subscribe') {
-    await supabase.from('driver_profiles').update({ sms_opted_out: false }).eq('phone', from)
+    await supabase.from('driver_profiles').update({ sms_opted_out: false }).eq('phone', normalizedPhone)
     return "You're back on. Text us when you got a load"
   }
 
@@ -212,7 +213,7 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
   const { data: profile } = await supabase
     .from('driver_profiles')
     .select('user_id, first_name, status, sms_opted_out')
-    .eq('phone', from)
+    .eq('phone', normalizedPhone)
     .maybeSingle()
 
   // Auto-create driver if they don't exist — SMS IS the signup
@@ -264,7 +265,7 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
     await createAdminSupabase()
       .from('driver_profiles')
       .update({ status: 'active' })
-      .eq('phone', from)
+      .eq('phone', normalizedPhone)
   }
 
   const firstName = profile.first_name || 'Driver'
