@@ -1,4 +1,3 @@
-import crypto from 'crypto'
 import { createAdminSupabase } from '../supabase'
 import { sendAdminAlert } from '../sms'
 import Anthropic from '@anthropic-ai/sdk'
@@ -151,7 +150,7 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
   const { data: profile, error: profileError } = await supabase.from('driver_profiles').select('user_id,first_name,status,sms_opted_out').eq('phone', phone).maybeSingle()
   console.error('[SMS DEBUG] phone:', phone, 'profile:', JSON.stringify(profile), 'error:', profileError?.message)
 
-  // NEW DRIVER — no auth required, insert directly with random UUID
+  // NEW DRIVER
   if (!profile) {
     const session = await getSession(phone)
     const state = session?.state || 'idle'
@@ -165,25 +164,15 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
     const firstName = trimmed.split(' ')[0]
     const lastName = trimmed.split(' ').slice(1).join(' ') || 'Driver'
 
-    // Insert profile directly — no auth user needed for SMS drivers
-    const { error: insertErr } = await supabase.from('driver_profiles').insert({
-      user_id: crypto.randomUUID(),
-      phone,
-      first_name: firstName,
-      last_name: lastName,
-      tier_id: 'c51d1a6c-7572-4ca1-8424-e05786a0116b',
-      truck_type: 'dump truck',
-      phone_verified: true,
-      status: 'active',
-      trial_loads_used: 0,
-      truck_count: 1,
-      gps_score: 100,
+    // Use SECURITY DEFINER RPC to bypass RLS on insert
+    const { error: rpcErr } = await supabase.rpc('create_sms_driver', {
+      p_phone: phone,
+      p_first_name: firstName,
+      p_last_name: lastName,
     })
 
-    if (insertErr) {
-      console.error('[profile insert failed]', insertErr.message)
-      await clearSession(phone)
-      return `${firstName} got you. What's the zip you hauling from`
+    if (rpcErr) {
+      console.error('[create_sms_driver rpc failed]', rpcErr.message)
     }
 
     await setSession(phone, { state: 'asking_zip' })
