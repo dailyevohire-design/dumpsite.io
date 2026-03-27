@@ -91,6 +91,49 @@ function isNo(t: string): boolean {
   return ['no','nope','nah','not yet','nevermind','never mind'].some(w => t.toLowerCase().trim() === w)
 }
 
+async function findOpenJobs(cityId?: string | null) {
+  const s = createAdminSupabase()
+  const { data, error } = await s
+    .from('dispatch_orders')
+    .select('id, city_id, yards_needed, driver_pay_cents, truck_type_needed, cities(name)')
+    .in('status', ['dispatching', 'active'])
+    .order('created_at', { ascending: false })
+    .limit(10)
+
+  if (error) console.error('[findOpenJobs]', error.message)
+  if (!data || data.length === 0) return []
+
+  if (cityId) {
+    const sameCity = data.filter(o => o.city_id === cityId)
+    const other = data.filter(o => o.city_id !== cityId)
+    return [...sameCity, ...other].slice(0, 5)
+  }
+
+  return data.slice(0, 5)
+}
+
+async function showOpenJobs(phone: string, cityId?: string | null): Promise<string> {
+  const jobs = await findOpenJobs(cityId)
+  if (jobs.length === 0) return 'No open jobs right now. Text your zip + material when you got a load'
+
+  const lines: string[] = ['Open jobs:', '']
+  for (let i = 0; i < jobs.length; i++) {
+    const j = jobs[i]
+    const city = (j.cities as any)?.name || 'DFW'
+    const pay = j.driver_pay_cents ? Math.round(j.driver_pay_cents / 100) : 35
+    const truck = j.truck_type_needed === 'end_dump' || j.truck_type_needed === 'semi_transfer'
+      ? 'end dump' : 'tandem axle'
+    lines.push(`${i + 1}. ${city} — ${j.yards_needed} yds`)
+    lines.push(`   $${pay}/load — ${truck}`)
+    if (i < jobs.length - 1) lines.push('')
+  }
+  lines.push('')
+  lines.push(`Reply ${jobs.length === 1 ? '1' : '1-' + jobs.length} to claim`)
+
+  await setSession(phone, { state: 'jobs_shown', jobs_shown: jobs.map(j => j.id) })
+  return lines.join('\n')
+}
+
 async function findSites(cityId: string | null, material: string, yards: number | null) {
   const s = createAdminSupabase()
   let q = s.from('dump_sites').select('id,capacity_yards,filled_yards,accepted_materials,gate_code,hours_text,access_instructions,operator_name,city_id').eq('is_active', true)
@@ -236,6 +279,23 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
   const dm = mat(trimmed)
   const dy = yds(trimmed)
 
+  // Job selection (from dispatch_orders)
+  if (/^[1-5]$/.test(lower) && state === 'jobs_shown' && session?.jobs_shown?.length) {
+    const choice = parseInt(lower)
+    const jobId = session.jobs_shown[choice - 1]
+    if (!jobId) return `Reply 1${session.jobs_shown.length > 1 ? '-' + session.jobs_shown.length : ''} to claim`
+    const { data: order } = await supabase.from('dispatch_orders').select('id, city_id, yards_needed, driver_pay_cents, truck_type_needed, client_address, cities(name)').eq('id', jobId).single()
+    if (!order) return 'That job is no longer available. Reply YES to see open jobs'
+    const jn = generateJobNumber(order.id)
+    const city = (order.cities as any)?.name || 'DFW'
+    const pay = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 35
+    try { await supabase.from('dispatch_jobs').insert({ job_number: jn, driver_id: profile.user_id, dispatch_order_id: order.id, city_name: city, driver_phone: phone, status: 'in_progress', source: 'sms', updated_at: new Date().toISOString() }) } catch (e: any) { console.error('[job claim]', e.message) }
+    try { await supabase.from('load_requests').insert({ driver_id: profile.user_id, dispatch_order_id: order.id, status: 'approved' }) } catch (e: any) { console.error('[load_request]', e.message) }
+    await clearSession(phone)
+    const token = generateSiteToken({ siteId: order.id, jobId: order.id, driverPhone: phone, expiresInMinutes: 240 })
+    return `${jn} — ${city} — ${order.yards_needed} yds\nPay: $${pay}/load\nAddress: ${APP_URL}/job-access/${token}\nReply DONE [loads] when finished`
+  }
+
   // Site selection
   if ((lower === '1' || lower === '2' || lower === '3') && state === 'sites_shown' && session?.sites_shown?.length) {
     const choice = parseInt(lower)
@@ -272,14 +332,16 @@ async function handleConversation(sms: IncomingSMS): Promise<string> {
     return 'What material? clean fill, clay, topsoil, mixed, or caliche'
   }
 
+  if (state === 'jobs_shown') { const count = session?.jobs_shown?.length || 1; return `Reply ${count === 1 ? '1' : '1-' + count} to claim` }
+
   if (state === 'sites_shown') { const count = session?.sites_shown?.length || 1; return `Reply ${count === 1 ? '1' : '1-' + count} to claim a site` }
 
   if (dz && dm) { const { cityName } = await zipToCity(dz); await setSession(phone, { state: 'finding_sites', zip_code: dz, city_name: cityName, material_type: dm, estimated_yards: dy }); return await showSites(phone, cityName, dm, dy, profile.user_id) }
   if (dz) { const { cityName } = await zipToCity(dz); await setSession(phone, { state: 'asking_material', zip_code: dz, city_name: cityName, estimated_yards: dy }); return `${cityName} — what material? clean fill, clay, topsoil, mixed, caliche` }
   if (dm) { await setSession(phone, { state: 'asking_zip', material_type: dm, estimated_yards: dy }); return "What's the zip you hauling from" }
-  if (isYes(lower)) { await setSession(phone, { state: 'asking_zip' }); return "What's the zip you hauling from" }
+  if (isYes(lower)) { return await showOpenJobs(phone) }
   await setSession(phone, { state: 'asking_intent' })
-  return 'Need a dump site?'
+  return 'Got a load to haul? Reply YES to see open jobs'
 }
 
 export interface DispatchStatus { dispatchId: string; jobNumber: string; status: string; driversNotified: number; driversAccepted: number; cityName: string; createdAt: string }
