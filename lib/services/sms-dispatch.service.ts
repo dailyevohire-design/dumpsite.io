@@ -333,13 +333,10 @@ async function handleConversation(sms: {
     return `${jobNum} cancelled. Text when you got another load`
   }
 
-  // ── HANDLE ADDRESS REQUEST ─────────────────────────────────────────────────
-  if (extracted.intent === 'ADDRESS_REQUEST') {
-    if (activeLoad && convState === 'ACTIVE') {
-      const link = await sendJobLink(phone, activeLoad.dispatch_order_id, generateJobNumber(activeLoad.dispatch_order_id))
-      return `Address: ${link}`
-    }
-    return 'No active approved job. Text when you got a load ready'
+  // ── HANDLE ADDRESS REQUEST (only when driver has active job) ────────────────
+  if (extracted.intent === 'ADDRESS_REQUEST' && activeLoad && convState === 'ACTIVE') {
+    const link = await sendJobLink(phone, activeLoad.dispatch_order_id, generateJobNumber(activeLoad.dispatch_order_id))
+    return `Address: ${link}`
   }
 
   // ── ALREADY HAS ACTIVE JOB ─────────────────────────────────────────────────
@@ -495,7 +492,7 @@ async function handleConversation(sms: {
   if (extracted.truckType) updates.extracted_truck_type = extracted.truckType
   if (extracted.material) updates.extracted_material = extracted.material
 
-  if (city && (extracted.intent === 'NEED_DUMPSITE' || extracted.intent === 'HAUL_OFF' || convState !== 'DISCOVERY' || lower === 'yes' || lower === 'yeah' || isNaN(parseInt(lower)))) {
+  if (city) {
 
     if (!truckType) {
       await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
@@ -523,32 +520,12 @@ async function handleConversation(sms: {
     return `${city}${yardsText}\n\n${jobList}`
   }
 
-  if (!city) {
-    await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
-    if (extracted.intent === 'NEED_DUMPSITE' || extracted.intent === 'HAUL_OFF' || lower.includes('load') || lower.includes('dirt') || lower.includes('dump')) {
-      return 'What city you hauling from'
-    }
-    return 'Got a load to haul? Text your city when ready'
+  // No city extracted — ask for it
+  await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
+  if (extracted.intent === 'NEED_DUMPSITE' || extracted.intent === 'HAUL_OFF' || lower.includes('load') || lower.includes('dirt') || lower.includes('dump')) {
+    return 'What city you hauling from'
   }
-
-  if (!truckType) {
-    await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
-    return `${city} — what type of truck you running`
-  }
-
-  const jobs = await findNearbyJobs(city, truckType)
-  if (!jobs.length) {
-    await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
-    return `Nothing near ${city} right now. Will text you when something opens up`
-  }
-
-  await supabase.from('sms_sessions').upsert({
-    phone, state: 'JOBS_SHOWN', sites_shown: jobs.map(j => j.id), updated_at: new Date().toISOString()
-  }, { onConflict: 'phone' })
-
-  await saveConversation(phone, { ...updates, state: 'JOBS_SHOWN' })
-
-  return await buildJobListMessage(jobs, phone)
+  return 'Got a load to haul? Text your city when ready'
 }
 
 // ─── EXPORTS ──────────────────────────────────────────────────────────────────
