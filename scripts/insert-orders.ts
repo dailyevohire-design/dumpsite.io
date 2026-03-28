@@ -212,10 +212,21 @@ async function insertOrders(existingOrders: any[], cities: any[]) {
       notes: order.notes,
     }
 
-    const { error } = await supabase.from('dispatch_orders').insert(insertData)
+    const { data: inserted_order, error } = await supabase.from('dispatch_orders').insert(insertData).select('id').single()
     if (error) {
       console.error(`  INSERT ERROR for ${order.client_name}: ${error.message}`)
     } else {
+      // Auto-geocode the address
+      try {
+        await new Promise(r => setTimeout(r, 1100)) // Nominatim rate limit
+        const geoUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(order.client_address)}&countrycodes=us&limit=1`
+        const geoRes = await fetch(geoUrl, { headers: { 'User-Agent': 'DumpSite.io/1.0' } })
+        const geoData = await geoRes.json()
+        if (geoData?.[0] && inserted_order?.id) {
+          await supabase.from('dispatch_orders').update({ delivery_latitude: parseFloat(geoData[0].lat), delivery_longitude: parseFloat(geoData[0].lon) }).eq('id', inserted_order.id)
+          console.log(`    → Geocoded: ${parseFloat(geoData[0].lat).toFixed(4)}, ${parseFloat(geoData[0].lon).toFixed(4)}`)
+        }
+      } catch {}
       console.log(`  INSERTED: ${order.client_name} — ${order.client_address} — ${order.yards_needed}yd — $${order.driver_pay_cents/100}/load — ${order.truck_type_needed}`)
       inserted++
     }

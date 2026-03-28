@@ -6,6 +6,7 @@ import { sanitizeText, sanitizeNumber } from '@/lib/validation'
 import { sendAdminAlert } from '@/lib/sms'
 import { rateLimit } from '@/lib/rate-limit'
 import { getDriverPayCents } from '@/lib/driver-pay-rates'
+import { geocodeLocation } from '@/lib/city-coords'
 
 export async function POST(req: NextRequest) {
   const supabase = await createServerSupabase()
@@ -56,6 +57,14 @@ export async function POST(req: NextRequest) {
   }).select('id').single()
 
   if (insertErr) return NextResponse.json({ error: 'Failed to create job' }, { status: 500 })
+
+  // Auto-geocode the address for proximity matching
+  try {
+    const coords = await geocodeLocation(sanitizeText(address))
+    if (coords && order?.id) {
+      await admin.from('dispatch_orders').update({ delivery_latitude: coords.lat, delivery_longitude: coords.lng }).eq('id', order.id)
+    }
+  } catch {}
 
   try {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'

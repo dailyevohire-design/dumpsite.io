@@ -1,8 +1,19 @@
 import { createAdminSupabase } from '../supabase'
 import { sendAdminAlert } from '../sms'
-import Anthropic from '@anthropic-ai/sdk'
+import { extractIntent, ExtractionResult } from './extraction.service'
+import { findNearbyJobs, atomicClaimJob, releaseReservation, JobMatch } from './routing.service'
+import {
+  downloadAndStorePhoto,
+  sendCustomerApprovalRequest,
+  makeVoiceCallToCustomer,
+  sendAdminEscalation,
+  processAdminApproval,
+  processCustomerApproval
+} from './approval.service'
+import twilio from 'twilio'
 
-interface IncomingSMS { from: string; body: string; messageSid: string }
+const ADMIN_PHONE = '7134439223'
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
 
 export function generateJobNumber(id: string): string {
   return `DS-${id.replace(/-/g, '').slice(0, 6).toUpperCase()}`
@@ -12,236 +23,535 @@ function normalizePhone(phone: string): string {
   return phone.replace(/^\+1/, '').replace(/\D/g, '')
 }
 
+function formatPhoneE164(phone: string): string {
+  const digits = phone.replace(/\D/g, '')
+  if (digits.length === 10) return `+1${digits}`
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`
+  return `+1${digits}`
+}
+
+async function logEvent(type: string, payload: Record<string, any>, jobId?: string) {
+  try {
+    await createAdminSupabase().from('event_log').insert({
+      event_type: type, job_id: jobId, payload, created_at: new Date().toISOString()
+    })
+  } catch {}
+}
+
 async function getProfile(phone: string) {
   const { data } = await createAdminSupabase().rpc('get_sms_driver', { p_phone: phone })
   return data?.[0] || null
 }
 
-async function getConversationHistory(phone: string): Promise<{role: 'user'|'assistant', content: string}[]> {
-  const { data } = await createAdminSupabase()
-    .from('sms_logs')
-    .select('body, direction, created_at')
-    .eq('phone', phone)
-    .order('created_at', { ascending: false })
-    .limit(10)
-  if (!data) return []
-  return data
-    .reverse()
-    .slice(-8)
-    .map(m => ({
-      role: m.direction === 'inbound' ? 'user' : 'assistant',
-      content: m.body
-    }))
+async function getConversation(phone: string) {
+  const { data } = await createAdminSupabase().rpc('get_conversation', { p_phone: phone })
+  return data?.[0] || null
 }
 
-async function getOpenJobs(): Promise<any[]> {
-  const { data } = await createAdminSupabase()
-    .from('dispatch_orders')
-    .select('id, city_id, yards_needed, driver_pay_cents, truck_type_needed, status, cities(name)')
-    .in('status', ['dispatching', 'active', 'pending'])
-    .order('created_at', { ascending: false })
-    .limit(10)
-  return data || []
+async function saveConversation(phone: string, updates: Record<string, any>) {
+  await createAdminSupabase().rpc('upsert_conversation', {
+    p_phone: phone,
+    p_state: updates.state,
+    p_job_state: updates.job_state || null,
+    p_active_order_id: updates.active_order_id || null,
+    p_extracted_city: updates.extracted_city || null,
+    p_extracted_yards: updates.extracted_yards || null,
+    p_extracted_truck_type: updates.extracted_truck_type || null,
+    p_extracted_material: updates.extracted_material || null,
+    p_photo_storage_path: updates.photo_storage_path || null,
+    p_photo_public_url: updates.photo_public_url || null,
+    p_reservation_id: updates.reservation_id || null,
+    p_pending_approval_order_id: updates.pending_approval_order_id || null,
+    p_approval_sent_at: updates.approval_sent_at || null,
+    p_voice_call_made: updates.voice_call_made || null,
+    p_last_message_sid: updates.last_message_sid || null,
+  })
 }
 
-async function handleConversation(sms: IncomingSMS): Promise<string> {
+async function resetConversation(phone: string) {
+  await saveConversation(phone, { state: 'DISCOVERY', job_state: 'NONE' })
+}
+
+async function sendJobLink(driverPhone: string, orderId: string, jobNumber: string): Promise<string> {
   const supabase = createAdminSupabase()
-  const { from, body, messageSid } = sms
-  const trimmed = body.trim()
-  const lower = trimmed.toLowerCase()
+  const profile = await getProfile(driverPhone)
+  if (!profile) return `${APP_URL}/driver/dashboard`
+
+  // Create load request
+  const { data: order } = await supabase.from('dispatch_orders').select('*').eq('id', orderId).single()
+  if (!order) return `${APP_URL}/driver/dashboard`
+
+  const { data: loadReq } = await supabase.from('load_requests').insert({
+    driver_id: profile.user_id,
+    dispatch_order_id: orderId,
+    status: 'approved',
+    yards_estimated: order.yards_needed
+  }).select().single()
+
+  if (!loadReq) return `${APP_URL}/driver/dashboard`
+
+  // Create access token
+  let link = `${APP_URL}/driver/dashboard`
+  try {
+    const { data: tokenRow } = await supabase.from('job_access_tokens').insert({
+      load_request_id: loadReq.id,
+      dispatch_order_id: orderId,
+      driver_id: profile.user_id,
+      expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString()
+    }).select('token').single()
+    if (tokenRow?.token) link = `${APP_URL}/driver/job/${(tokenRow as any).token}`
+  } catch {}
+
+  return link
+}
+
+async function buildJobListMessage(jobs: JobMatch[], phone: string): Promise<string> {
+  const lines: string[] = []
+  for (let i = 0; i < jobs.length; i++) {
+    const j = jobs[i]
+    const pay = Math.round(j.driverPayCents / 100)
+    const truck = j.truckTypeNeeded.replace(/_/g, ' ')
+    const dist = j.distanceMiles > 0 ? ` — ${j.distanceMiles} mi away` : ''
+    lines.push(`${i + 1}. ${j.cityName}${dist}`)
+    lines.push(`   ${j.yardsNeeded} yds — $${pay}/load — ${truck}`)
+  }
+  return lines.join('\n') + `\n\nReply ${jobs.length === 1 ? '1' : '1-' + jobs.length} to claim`
+}
+
+// ─── MAIN HANDLER ─────────────────────────────────────────────────────────────
+async function handleConversation(sms: {
+  from: string
+  body: string
+  messageSid: string
+  mediaUrl?: string
+  numMedia?: number
+}): Promise<string> {
+  const supabase = createAdminSupabase()
+  const { from, body, messageSid, mediaUrl, numMedia } = sms
+  const trimmed = (body || '').trim()
   const phone = normalizePhone(from)
+  const hasMedia = (numMedia || 0) > 0
 
-  try { await supabase.from('sms_logs').insert({ phone, body: trimmed, message_sid: messageSid, direction: 'inbound' }) } catch {}
+  // ── DEDUPLICATION ──────────────────────────────────────────────────────────
+  const { data: isDupe } = await supabase.rpc('check_and_mark_message', { p_sid: messageSid })
+  if (!isDupe) {
+    console.log('[dedup] duplicate message ignored:', messageSid)
+    return ''
+  }
 
+  // ── LOG INBOUND ────────────────────────────────────────────────────────────
+  try {
+    await supabase.from('sms_logs').insert({ phone, body: trimmed, message_sid: messageSid, direction: 'inbound' })
+  } catch {}
+  await logEvent('MESSAGE_RECEIVED', { phone, body: trimmed, messageSid, hasMedia })
+
+  // ── COMPLIANCE: STOP/START ─────────────────────────────────────────────────
+  const lower = trimmed.toLowerCase().trim()
   if (lower === 'stop' || lower === 'unsubscribe') {
     await supabase.from('driver_profiles').update({ sms_opted_out: true }).eq('phone', phone)
+    await logEvent('COMPLIANCE_UPDATED', { phone, action: 'STOPPED' })
     return ''
   }
   if (lower === 'start') {
     await supabase.from('driver_profiles').update({ sms_opted_out: false }).eq('phone', phone)
-    return "You're back on"
+    return "You're back on. Text us when you got a load ready"
+  }
+  if (lower === 'help') {
+    return 'Text when you got a load ready\nSend pic of dirt when we match you to a job\nDONE [loads] when finished\nCANCEL to cancel'
   }
 
+  // ── ADMIN COMMANDS ─────────────────────────────────────────────────────────
+  if (phone === ADMIN_PHONE) {
+    const approveMatch = trimmed.match(/approve-?(ds-?[a-z0-9]+)/i)
+    const rejectMatch = trimmed.match(/reject-?(ds-?[a-z0-9]+)/i)
+
+    if (approveMatch || rejectMatch) {
+      const code = (approveMatch || rejectMatch)![1].toUpperCase()
+      const approved = !!approveMatch
+      const result = await processAdminApproval(code, approved)
+
+      if (result) {
+        if (approved) {
+          const link = await sendJobLink(result.driverPhone, result.orderId, code)
+          const orderNum = generateJobNumber(result.orderId)
+          // Notify driver
+          const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+          await twilioClient.messages.create({
+            to: formatPhoneE164(result.driverPhone),
+            from: process.env.TWILIO_PHONE_NUMBER!,
+            body: `${orderNum} — approved. Head over\nAddress: ${link}\nReply DONE [loads] when finished`
+          }).catch(() => {})
+          await saveConversation(result.driverPhone, { state: 'ACTIVE', job_state: 'IN_PROGRESS', active_order_id: result.orderId })
+          await logEvent('APPROVAL_DECIDED', { approvalCode: code, approved: true, driverPhone: result.driverPhone }, result.orderId)
+          return `Approved ${code}. Driver notified`
+        } else {
+          const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+          await twilioClient.messages.create({
+            to: formatPhoneE164(result.driverPhone),
+            from: process.env.TWILIO_PHONE_NUMBER!,
+            body: `Can't take that load. Send pic of different dirt or text new city`
+          }).catch(() => {})
+          await saveConversation(result.driverPhone, { state: 'DISCOVERY', job_state: 'NONE' })
+          return `Rejected ${code}. Driver notified`
+        }
+      }
+      return `Code ${approveMatch?.[1] || rejectMatch?.[1]} not found`
+    }
+  }
+
+  // ── CUSTOMER APPROVAL CHECK ────────────────────────────────────────────────
+  const { data: pendingOrders } = await supabase
+    .from('dispatch_orders')
+    .select('id, client_phone, client_name')
+    .in('status', ['dispatching', 'active', 'pending'])
+
+  const isCustomer = pendingOrders?.some(o => {
+    const normalized = (o.client_phone || '').replace(/\D/g, '').replace(/^1/, '')
+    return normalized === phone
+  })
+
+  if (isCustomer && phone !== ADMIN_PHONE) {
+    const approved = ['yes','yeah','yep','approved','ok','okay','go ahead','sounds good','sure','correct','affirmative'].some(w => lower === w || lower.startsWith(w + ' '))
+    const rejected = ['no','nope','nah','cancel','decline','reject','dont','don\'t'].some(w => lower === w || lower.startsWith(w))
+
+    if (approved || rejected) {
+      const result = await processCustomerApproval(phone, approved)
+      if (result) {
+        if (approved) {
+          const link = await sendJobLink(result.driverPhone, result.orderId, generateJobNumber(result.orderId))
+          const jobNum = generateJobNumber(result.orderId)
+          const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+          await twilioClient.messages.create({
+            to: formatPhoneE164(result.driverPhone),
+            from: process.env.TWILIO_PHONE_NUMBER!,
+            body: `${jobNum} — approved. Head over\nAddress: ${link}\nReply DONE [loads] when finished`
+          }).catch(() => {})
+          await saveConversation(result.driverPhone, { state: 'ACTIVE', job_state: 'IN_PROGRESS', active_order_id: result.orderId })
+          await logEvent('APPROVAL_DECIDED', { approved: true, driverPhone: result.driverPhone, customerPhone: phone }, result.orderId)
+          return 'Perfect — driver is on the way'
+        } else {
+          const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+          await twilioClient.messages.create({
+            to: formatPhoneE164(result.driverPhone),
+            from: process.env.TWILIO_PHONE_NUMBER!,
+            body: 'Customer declined this load. Text new city when you have another'
+          }).catch(() => {})
+          await saveConversation(result.driverPhone, { state: 'DISCOVERY', job_state: 'NONE' })
+          return 'Got it — driver notified'
+        }
+      }
+    }
+    return ''
+  }
+
+  // ── DRIVER FLOW ────────────────────────────────────────────────────────────
   const profile = await getProfile(phone)
 
-  // New driver
+  // New driver onboarding
   if (!profile) {
-    const { data: session } = await supabase.from('sms_sessions').select('state').eq('phone', phone).maybeSingle()
-    if (!session || session.state !== 'getting_name') {
-      await supabase.from('sms_sessions').upsert({ phone, state: 'getting_name', updated_at: new Date().toISOString() }, { onConflict: 'phone' })
+    const conv = await getConversation(phone)
+    const state = conv?.state || 'DISCOVERY'
+
+    if (state !== 'GETTING_NAME') {
+      await saveConversation(phone, { state: 'GETTING_NAME' })
       return "Hey — what's your name"
     }
+
     const firstName = trimmed.split(' ')[0]
     const lastName = trimmed.split(' ').slice(1).join(' ') || 'Driver'
     await supabase.rpc('create_sms_driver', { p_phone: phone, p_first_name: firstName, p_last_name: lastName })
-    await supabase.from('sms_sessions').upsert({ phone, state: 'idle', updated_at: new Date().toISOString() }, { onConflict: 'phone' })
-    // Fall through to AI with fresh profile
-    const jobs = await getOpenJobs()
-    const jobsSummary = jobs.slice(0,3).map((j,i) => `${i+1}. ${(j.cities as any)?.name} — ${j.yards_needed} yds, $${Math.round((j.driver_pay_cents||4500)/100)}/load, ${(j.truck_type_needed||'dump truck').replace(/_/g,' ')}`).join('\n')
-    return `${firstName} got you. Here's what we got open:\n\n${jobsSummary}\n\nReply 1, 2, or 3 to claim one`
+    await saveConversation(phone, { state: 'DISCOVERY' })
+    await logEvent('CONTACT_CREATED', { phone, firstName })
+    return `${firstName} got you. What city you hauling from and how many yards`
   }
 
   if (profile.sms_opted_out) return ''
+  const firstName = profile.first_name || 'Driver'
 
-  const firstName = profile.first_name || ''
-
-  // Check active job
+  // Check active load request
   const { data: activeLoad } = await supabase
     .from('load_requests')
-    .select('id, status, dispatch_order_id, dispatch_orders(driver_pay_cents, yards_needed, client_address, cities(name))')
+    .select('id, status, dispatch_order_id, dispatch_orders(driver_pay_cents, yards_needed, cities(name))')
     .eq('driver_id', profile.user_id)
     .in('status', ['pending', 'approved'])
     .order('created_at', { ascending: false })
     .maybeSingle()
 
-  // Hard commands
-  if (lower.startsWith('done') || lower.startsWith('complete') || lower.startsWith('finished')) {
-    if (!activeLoad) return 'No active job. Text YES to see open jobs'
-    const loadMatch = trimmed.match(/(\d+)/)
-    const loads = loadMatch ? Math.min(parseInt(loadMatch[1]), 50) : 1
+  // Get conversation state
+  const conv = await getConversation(phone)
+  const convState = conv?.state || 'DISCOVERY'
+
+  // ── EXTRACT INTENT ─────────────────────────────────────────────────────────
+  const extracted = await extractIntent(trimmed, hasMedia, {
+    activeJobId: activeLoad?.dispatch_order_id,
+    lastKnownCity: conv?.extracted_city,
+    isAdmin: phone === ADMIN_PHONE
+  })
+
+  // ── HANDLE DONE ────────────────────────────────────────────────────────────
+  if (extracted.intent === 'DONE_REPORT') {
+    if (!activeLoad) return "No active job. Text when you're ready with a load"
+    const loads = extracted.loadCount || 1
     const payPerLoad = (activeLoad.dispatch_orders as any)?.driver_pay_cents || 4500
     const totalDollars = Math.round(payPerLoad * loads / 100)
     const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
-    await supabase.from('load_requests').update({ status: 'completed', completed_at: new Date().toISOString(), payout_cents: payPerLoad * loads, truck_count: loads }).eq('id', activeLoad.id)
-    try { await supabase.from('driver_payments').insert({ driver_id: profile.user_id, load_request_id: activeLoad.id, amount_cents: payPerLoad * loads, status: 'pending' }) } catch {}
+
+    await supabase.from('load_requests').update({
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      payout_cents: payPerLoad * loads,
+      truck_count: loads
+    }).eq('id', activeLoad.id)
+
+    try {
+      await supabase.from('driver_payments').insert({
+        driver_id: profile.user_id,
+        load_request_id: activeLoad.id,
+        amount_cents: payPerLoad * loads,
+        status: 'pending'
+      })
+    } catch {}
+
     try { await sendAdminAlert(`${jobNum} complete — ${firstName} ${loads} loads $${totalDollars}`) } catch {}
-    await supabase.from('sms_sessions').upsert({ phone, state: 'idle', updated_at: new Date().toISOString() }, { onConflict: 'phone' })
-    return `10.4 — ${loads} load${loads > 1 ? 's' : ''}. $${totalDollars} otw`
+    await resetConversation(phone)
+    await logEvent('DELIVERY_VERIFIED', { phone, jobNum, loads, totalDollars }, activeLoad.dispatch_order_id)
+    return `10.4 — ${loads} load${loads > 1 ? 's' : ''}. $${totalDollars} coming your way`
   }
 
-  if (lower === 'cancel' || lower === 'stop job') {
+  // ── HANDLE CANCEL ──────────────────────────────────────────────────────────
+  if (extracted.intent === 'CANCEL') {
+    if (conv?.reservation_id) await releaseReservation(conv.reservation_id)
+    await resetConversation(phone)
     if (!activeLoad) return 'No active job'
     const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
-    await supabase.from('load_requests').update({ status: 'rejected', rejected_reason: 'Cancelled via SMS', reviewed_at: new Date().toISOString() }).eq('id', activeLoad.id)
+    await supabase.from('load_requests').update({
+      status: 'rejected',
+      rejected_reason: 'Cancelled via SMS',
+      reviewed_at: new Date().toISOString()
+    }).eq('id', activeLoad.id)
     try { await sendAdminAlert(`${jobNum} cancelled — ${firstName}`) } catch {}
-    return `${jobNum} cancelled. Text YES when ready`
+    return `${jobNum} cancelled. Text when you got another load`
   }
 
-  // Get open jobs and conversation history for AI
-  const [jobs, history] = await Promise.all([getOpenJobs(), getConversationHistory(phone)])
-
-  const jobsList = jobs.slice(0, 5).map((j, i) =>
-    `Job ${i+1}: ${(j.cities as any)?.name} — ${j.yards_needed} yards — $${Math.round((j.driver_pay_cents||4500)/100)}/load — ${(j.truck_type_needed||'tandem').replace(/_/g,' ')} — ID: ${j.id}`
-  ).join('\n')
-
-  const activeJobInfo = activeLoad
-    ? `Driver has active job ${generateJobNumber(activeLoad.dispatch_order_id)} in ${(activeLoad.dispatch_orders as any)?.cities?.name}. Status: ${activeLoad.status}.`
-    : 'Driver has no active job.'
-
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-
-  const systemPrompt = `You are texting as Juan, a dirt broker running DumpSite.io in DFW/Colorado.
-
-YOUR TEXTING STYLE — this is critical:
-- Ultra short. 1-3 sentences max
-- Casual and direct. No punctuation at end
-- Real examples of your texts: "Yes sir" | "10.4" | "Ok np" | "Perfect" | "Morning" | "Send pic of dirt" | "How many yards" | "What city" | "What type of truck" | "Being sent rn" | "Got you"
-- Never sound like a bot or customer service
-- No emojis. Use driver first name occasionally
-- If they need a job, ask qualifying questions naturally: what city, how many yards, what truck type, when they hauling
-- Once you have enough info, show them matching jobs from the list below
-
-DRIVER INFO:
-Name: ${firstName}
-${activeJobInfo}
-
-OPEN JOBS RIGHT NOW:
-${jobsList || 'No open jobs currently'}
-
-RULES:
-- If driver says they need a dump site or have a load — ask qualifying questions one at a time naturally
-- If driver asks about a specific job number from the list — confirm it and tell them to reply with that number to claim it
-- If driver replies with just a number (1-5) and jobs were shown — treat as job selection
-- Never reveal client addresses in this chat — they get the address link after claiming
-- If no matching jobs — tell them nothing available and you'll hit them up
-- Keep all responses under 160 characters when possible
-- Sound exactly like a real person texting, not an AI`
-
-  // Build messages for Claude
-  const messages: {role: 'user'|'assistant', content: string}[] = []
-
-  // Add conversation history
-  for (const h of history) {
-    if (h.content !== trimmed) { // Don't duplicate current message
-      messages.push({ role: h.role, content: h.content })
+  // ── HANDLE ADDRESS REQUEST ─────────────────────────────────────────────────
+  if (extracted.intent === 'ADDRESS_REQUEST') {
+    if (activeLoad && convState === 'ACTIVE') {
+      const link = await sendJobLink(phone, activeLoad.dispatch_order_id, generateJobNumber(activeLoad.dispatch_order_id))
+      return `Address: ${link}`
     }
+    return 'No active approved job. Text when you got a load ready'
   }
 
-  // Add current message
-  messages.push({ role: 'user', content: trimmed })
-
-  // Ensure we start with user message
-  while (messages.length > 0 && messages[0].role === 'assistant') {
-    messages.shift()
+  // ── ALREADY HAS ACTIVE JOB ─────────────────────────────────────────────────
+  if (activeLoad && convState === 'ACTIVE') {
+    const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
+    return `You got ${jobNum} active. Reply DONE [loads] when finished or CANCEL to cancel`
   }
 
-  if (messages.length === 0) {
-    messages.push({ role: 'user', content: trimmed })
+  // ── STATE: WAITING FOR APPROVAL ────────────────────────────────────────────
+  if (convState === 'APPROVAL_PENDING') {
+    return 'Still waiting on customer approval. Hang tight'
   }
 
-  let reply = ''
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 200,
-      system: systemPrompt,
-      messages
-    })
-    const block = response.content[0]
-    reply = (block.type === 'text' ? block.text : '').trim()
-  } catch (err: any) {
-    console.error('[AI reply error]', err?.message)
-    reply = 'Give me a sec'
-  }
-
-  // Check if driver is selecting a job by number
-  const jobChoice = parseInt(lower)
-  if (!isNaN(jobChoice) && jobChoice >= 1 && jobChoice <= jobs.length) {
-    const selectedJob = jobs[jobChoice - 1]
-    if (selectedJob) {
-      try {
-        const { data: loadReq, error: loadErr } = await supabase.from('load_requests').insert({
-          driver_id: profile.user_id,
-          dispatch_order_id: selectedJob.id,
-          status: 'approved',
-          yards_estimated: selectedJob.yards_needed,
-        }).select().single()
-
-        if (!loadErr && loadReq) {
-          let tokenRow: any = null
-          try {
-            const { data: tr } = await supabase.from('job_access_tokens').insert({
-              load_request_id: loadReq.id,
-              dispatch_order_id: selectedJob.id,
-              driver_id: profile.user_id,
-              expires_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
-            }).select('token').single()
-            tokenRow = tr
-          } catch {}
-
-          const jobNum = generateJobNumber(selectedJob.id)
-          const city = (selectedJob.cities as any)?.name || ''
-          const payDollars = Math.round((selectedJob.driver_pay_cents || 4500) / 100)
-          const link = tokenRow?.token
-            ? `${process.env.NEXT_PUBLIC_APP_URL}/driver/job/${tokenRow.token}`
-            : `${process.env.NEXT_PUBLIC_APP_URL}/driver/dashboard`
-
-          try { await sendAdminAlert(`${jobNum} claimed by ${firstName} — ${city}`) } catch {}
-
-          reply = `${jobNum} — ${city} — ${selectedJob.yards_needed} yds\n$${payDollars}/load\nAddress: ${link}\nReply DONE [loads] when finished`
-        }
-      } catch (e: any) {
-        console.error('[job claim]', e?.message)
+  // ── STATE: PHOTO PENDING ───────────────────────────────────────────────────
+  if (convState === 'PHOTO_PENDING') {
+    if (extracted.intent === 'APPROVAL_PHOTO' || hasMedia) {
+      if (!mediaUrl || !conv?.active_order_id) {
+        return 'Send a pic of the dirt load'
       }
+
+      const photoResult = await downloadAndStorePhoto(mediaUrl, phone, conv.active_order_id)
+      if (!photoResult) {
+        return 'Had trouble with that photo. Try sending it again'
+      }
+
+      await supabase.from('material_photos').insert({
+        driver_phone: phone,
+        order_id: conv.active_order_id,
+        storage_path: photoResult.storagePath,
+        public_url: photoResult.publicUrl,
+        twilio_media_url: mediaUrl
+      })
+
+      const { data: order } = await supabase
+        .from('dispatch_orders')
+        .select('*, cities(name)')
+        .eq('id', conv.active_order_id)
+        .single()
+
+      if (!order) return 'Something went wrong. Text your city again'
+
+      const jobNum = generateJobNumber(order.id)
+      const approvalCode = jobNum
+
+      // Check if high value — escalate to admin
+      if ((conv.extracted_yards || order.yards_needed) >= 500) {
+        await supabase.from('escalation_queue').insert({
+          driver_phone: phone,
+          order_id: order.id,
+          reason: 'high_value',
+          status: 'pending',
+          approval_code: approvalCode
+        })
+        await sendAdminEscalation(
+          order.id, jobNum, firstName, phone,
+          (order.cities as any)?.name || '',
+          conv.extracted_yards || order.yards_needed,
+          Math.round(order.driver_pay_cents / 100),
+          'HIGH VALUE JOB >= 500 yds',
+          approvalCode
+        )
+        await saveConversation(phone, { state: 'APPROVAL_PENDING', pending_approval_order_id: order.id, approval_sent_at: new Date().toISOString() })
+        await logEvent('HUMAN_ESCALATION_CREATED', { phone, jobNum, reason: 'high_value' }, order.id)
+        return `Got it. ${jobNum} is a large job — sending to my team for final approval. Will hit you back`
+      }
+
+      // Send to customer for approval
+      const sent = await sendCustomerApprovalRequest(
+        order.client_phone,
+        order.client_name,
+        firstName,
+        order.id,
+        conv.extracted_yards || order.yards_needed,
+        photoResult.publicUrl,
+        approvalCode
+      )
+
+      if (!sent) {
+        await sendAdminEscalation(order.id, jobNum, firstName, phone, (order.cities as any)?.name || '', conv.extracted_yards || order.yards_needed, Math.round(order.driver_pay_cents / 100), 'CUSTOMER_UNREACHABLE', approvalCode)
+        await supabase.from('escalation_queue').insert({ driver_phone: phone, order_id: order.id, reason: 'customer_unreachable', status: 'pending', approval_code: approvalCode })
+      }
+
+      await saveConversation(phone, {
+        state: 'APPROVAL_PENDING',
+        pending_approval_order_id: order.id,
+        photo_public_url: photoResult.publicUrl,
+        photo_storage_path: photoResult.storagePath,
+        approval_sent_at: new Date().toISOString(),
+        voice_call_made: false
+      })
+
+      await logEvent('APPROVAL_REQUESTED', { phone, jobNum, photoUrl: photoResult.publicUrl }, order.id)
+      return `Got it. Sending to owner for final 10-4. Sit tight`
     }
+
+    return 'Send a pic of the dirt so we can get approval'
   }
 
-  // Log outbound
-  try { await supabase.from('sms_logs').insert({ phone, body: reply, direction: 'outbound', message_sid: `out-${Date.now()}` }) } catch {}
+  // ── JOB SELECTION (driver replies 1-5) ────────────────────────────────────
+  const jobChoice = parseInt(lower)
+  if (!isNaN(jobChoice) && jobChoice >= 1 && jobChoice <= 5 && convState === 'JOBS_SHOWN') {
+    const { data: sessionData } = await supabase
+      .from('sms_sessions')
+      .select('sites_shown')
+      .eq('phone', phone)
+      .maybeSingle()
 
-  return reply
+    const shownJobIds: string[] = (sessionData as any)?.sites_shown || []
+    const selectedJobId = shownJobIds[jobChoice - 1]
+
+    if (!selectedJobId) return `Reply 1-${shownJobIds.length} to claim a job`
+
+    const { data: order } = await supabase
+      .from('dispatch_orders')
+      .select('*, cities(name)')
+      .eq('id', selectedJobId)
+      .single()
+
+    if (!order || !['dispatching', 'active', 'pending'].includes(order.status)) {
+      return 'That job just got taken. Text your city again for new options'
+    }
+
+    // Atomic claim
+    const reservationId = await atomicClaimJob(selectedJobId, phone, profile.user_id)
+    if (!reservationId) {
+      return 'Someone just grabbed that one. Text your city again'
+    }
+
+    const jobNum = generateJobNumber(selectedJobId)
+    const city = (order.cities as any)?.name || ''
+    const payDollars = Math.round(order.driver_pay_cents / 100)
+
+    await saveConversation(phone, {
+      state: 'PHOTO_PENDING',
+      job_state: 'SITE_RESERVED',
+      active_order_id: selectedJobId,
+      reservation_id: reservationId
+    })
+
+    await logEvent('SITE_RESERVATION_CREATED', { phone, jobNum, city, reservationId }, selectedJobId)
+    return `${jobNum} — ${city} — ${order.yards_needed} yds at $${payDollars}/load\nBefore I send the addy I need a pic of the first load so I can get final 10-4\nSend pic of dirt when ready`
+  }
+
+  // ── DISCOVERY / JOB MATCHING ───────────────────────────────────────────────
+  const city = extracted.city || conv?.extracted_city
+  const yards = extracted.yards || conv?.extracted_yards
+  const truckType = extracted.truckType || conv?.extracted_truck_type
+  const material = extracted.material || conv?.extracted_material
+
+  const updates: Record<string, any> = { state: convState === 'JOBS_SHOWN' ? 'DISCOVERY' : convState }
+  if (extracted.city) updates.extracted_city = extracted.city
+  if (extracted.yards) updates.extracted_yards = extracted.yards
+  if (extracted.truckType) updates.extracted_truck_type = extracted.truckType
+  if (extracted.material) updates.extracted_material = extracted.material
+
+  if (city && (extracted.intent === 'NEED_DUMPSITE' || extracted.intent === 'HAUL_OFF' || convState !== 'DISCOVERY' || lower === 'yes' || lower === 'yeah' || isNaN(parseInt(lower)))) {
+
+    if (!truckType) {
+      await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
+      return `${city} got you — what type of truck you running`
+    }
+
+    const jobs = await findNearbyJobs(city, truckType)
+
+    if (!jobs.length) {
+      await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
+      return `Nothing available near ${city} right now. Got you on the list — will hit you up`
+    }
+
+    await supabase.from('sms_sessions').upsert({
+      phone,
+      state: 'JOBS_SHOWN',
+      sites_shown: jobs.map(j => j.id),
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'phone' })
+
+    await saveConversation(phone, { ...updates, state: 'JOBS_SHOWN' })
+
+    const jobList = await buildJobListMessage(jobs, phone)
+    const yardsText = yards ? ` — ${yards} yds` : ''
+    return `${city}${yardsText}\n\n${jobList}`
+  }
+
+  if (!city) {
+    await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
+    if (extracted.intent === 'NEED_DUMPSITE' || extracted.intent === 'HAUL_OFF' || lower.includes('load') || lower.includes('dirt') || lower.includes('dump')) {
+      return 'What city you hauling from'
+    }
+    return 'Got a load to haul? Text your city when ready'
+  }
+
+  if (!truckType) {
+    await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
+    return `${city} — what type of truck you running`
+  }
+
+  const jobs = await findNearbyJobs(city, truckType)
+  if (!jobs.length) {
+    await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
+    return `Nothing near ${city} right now. Will text you when something opens up`
+  }
+
+  await supabase.from('sms_sessions').upsert({
+    phone, state: 'JOBS_SHOWN', sites_shown: jobs.map(j => j.id), updated_at: new Date().toISOString()
+  }, { onConflict: 'phone' })
+
+  await saveConversation(phone, { ...updates, state: 'JOBS_SHOWN' })
+
+  return await buildJobListMessage(jobs, phone)
 }
 
+// ─── EXPORTS ──────────────────────────────────────────────────────────────────
 export interface DispatchStatus { dispatchId: string; jobNumber: string; status: string; driversNotified: number; driversAccepted: number; cityName: string; createdAt: string }
 
 export async function getDispatchStatus(dispatchId: string): Promise<{ success: boolean; data?: DispatchStatus; error?: string }> {
@@ -283,10 +593,4 @@ export async function cancelDispatch(dispatchId: string, adminUserId: string, re
   return { success: true }
 }
 
-export const smsDispatchService = {
-  handleIncoming: handleConversation,
-  generateJobNumber,
-  getDispatchStatus,
-  redispatchOrder,
-  cancelDispatch,
-}
+export const smsDispatchService = { handleIncoming: handleConversation, generateJobNumber, getDispatchStatus, redispatchOrder, cancelDispatch }

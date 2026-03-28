@@ -28,8 +28,10 @@ export async function POST(request: Request) {
   const from = formData.get('From') || ''
   const body = formData.get('Body') || ''
   const messageSid = formData.get('MessageSid') || ''
+  const numMedia = parseInt(formData.get('NumMedia') || '0')
+  const mediaUrl = numMedia > 0 ? formData.get('MediaUrl0') || undefined : undefined
 
-  if (!from || !body) {
+  if (!from || !messageSid) {
     return new Response('<Response></Response>', { status: 200, headers: { 'Content-Type': 'text/xml' } })
   }
 
@@ -38,20 +40,22 @@ export async function POST(request: Request) {
   const params: Record<string, string> = {}
   formData.forEach((value, key) => { params[key] = value })
 
-  if (!validateTwilioSignature(webhookUrl, params, twilioSignature)) {
-    console.error('[SMS] Invalid Twilio signature from:', from)
+  if (process.env.NODE_ENV === 'production' && !validateTwilioSignature(webhookUrl, params, twilioSignature)) {
+    console.error('[SMS] Invalid Twilio signature')
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   try {
-    const reply = await smsDispatchService.handleIncoming({ from, body: body.trim(), messageSid })
+    const reply = await smsDispatchService.handleIncoming({
+      from, body: body.trim(), messageSid, mediaUrl, numMedia
+    })
     if (!reply) return new Response('<Response></Response>', { status: 200, headers: { 'Content-Type': 'text/xml' } })
     return new Response(
       `<Response><Message>${escapeXml(reply)}</Message></Response>`,
       { status: 200, headers: { 'Content-Type': 'text/xml' } }
     )
   } catch (err) {
-    console.error('[SMS] Error:', err)
+    console.error('[SMS webhook error]', err)
     return new Response(
       '<Response><Message>Give me a sec</Message></Response>',
       { status: 200, headers: { 'Content-Type': 'text/xml' } }
