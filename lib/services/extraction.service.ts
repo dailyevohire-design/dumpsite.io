@@ -31,7 +31,7 @@ Return this exact JSON structure:
   "intent": "NEED_DUMPSITE|HAUL_OFF|STATUS_UPDATE|APPROVAL_PHOTO|ADDRESS_REQUEST|DONE_REPORT|CANCEL|OPTOUT|HELP|ADMIN_APPROVE|ADMIN_REJECT|CUSTOMER_APPROVE|CUSTOMER_REJECT|UNKNOWN",
   "city": "city name or null",
   "yards": number or null,
-  "truckType": "tandem_axle|end_dump|super_dump|belly_dump|transfer|null",
+  "truckType": "tandem_axle|tri_axle|quad_axle|end_dump|super_dump|belly_dump|side_dump|transfer|18_wheeler|null",
   "material": "clean_fill|clay|sandy_loam|caliche|topsoil|mixed|concrete|rock|null",
   "loadCount": number or null,
   "hasPhoto": true/false,
@@ -51,9 +51,17 @@ Rules:
 - Photo attached with no/minimal text = APPROVAL_PHOTO
 - STOP, unsubscribe = OPTOUT
 - tons x 0.7 = yards
-- "tandem", "tandem axle", "18 wheeler" = tandem_axle
-- "end dump", "end" = end_dump
-- "super dump", "super" = super_dump`
+- truck type mapping (normalize ALL variations):
+  tandem_axle: tandem, tandem axle, 10 wheel, ten wheel, single axle dump
+  tri_axle: triaxle, tri axle, tri-axle, triaxel, traxle, 3 axle, three axle
+  quad_axle: quad, quad axle, quad-axle, 4 axle, four axle
+  end_dump: end dump, end, end-dump
+  super_dump: super dump, super, superdump
+  belly_dump: belly dump, belly, belly-dump, bottom dump
+  side_dump: side dump, side-dump
+  transfer: transfer, transfer truck, transfer trailer
+  18_wheeler: 18 wheeler, eighteen wheeler, semi, tractor trailer
+  NOTE: triaxel and triaxle are the same thing — always map to tri_axle`
 
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',

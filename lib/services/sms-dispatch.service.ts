@@ -75,7 +75,7 @@ async function resetConversation(phone: string) {
     await releaseReservation(conv.reservation_id)
   }
   await saveConversation(phone, {
-    state: 'DISCOVERY',
+    state: 'DISCOVERY',  // clear all states including ASKING_TRUCK
     job_state: 'NONE',
     active_order_id: null,
     pending_approval_order_id: null,
@@ -302,7 +302,7 @@ async function handleConversation(sms: {
 
   // ── EXTRACT INTENT ─────────────────────────────────────────────────────────
   // Only pass lastKnownCity when driver is mid-flow, not on a fresh conversation
-  const inActiveFlow = ['JOBS_SHOWN', 'PHOTO_PENDING', 'APPROVAL_PENDING', 'ACTIVE'].includes(convState)
+  const inActiveFlow = ['JOBS_SHOWN', 'PHOTO_PENDING', 'APPROVAL_PENDING', 'ACTIVE', 'ASKING_TRUCK'].includes(convState)
   const extracted = await extractIntent(trimmed, hasMedia, {
     activeJobId: activeLoad?.dispatch_order_id,
     lastKnownCity: inActiveFlow ? conv?.extracted_city : undefined,
@@ -454,6 +454,42 @@ async function handleConversation(sms: {
     }
 
     return 'Send a pic of the dirt so we can get approval'
+  }
+
+  // ── STATE: ASKING TRUCK TYPE ──────────────────────────────────────────────
+  if (convState === 'ASKING_TRUCK') {
+    // They responded to our truck type question
+    const knownTrucks: Record<string, string> = {
+      tandem: 'tandem_axle', 'tandem axle': 'tandem_axle',
+      triaxle: 'tri_axle', triaxel: 'tri_axle', 'tri axle': 'tri_axle',
+      'tri-axle': 'tri_axle', traxle: 'tri_axle', '3 axle': 'tri_axle',
+      'three axle': 'tri_axle',
+      quad: 'quad_axle', 'quad axle': 'quad_axle', '4 axle': 'quad_axle',
+      'end dump': 'end_dump', end: 'end_dump',
+      'belly dump': 'belly_dump', belly: 'belly_dump',
+      'side dump': 'side_dump', side: 'side_dump',
+      super: 'super_dump', 'super dump': 'super_dump',
+      transfer: 'transfer',
+      '18 wheeler': '18_wheeler', semi: '18_wheeler',
+    }
+    const resolvedTruck = knownTrucks[lower] || knownTrucks[lower.replace(/s$/, '')] || extracted.truckType
+    if (resolvedTruck) {
+      await saveConversation(phone, { state: 'DISCOVERY', extracted_truck_type: resolvedTruck, extracted_city: conv?.extracted_city })
+      const savedCity = conv?.extracted_city
+      if (savedCity) {
+        const jobs = await findNearbyJobs(savedCity, resolvedTruck)
+        if (!jobs.length) {
+          await saveConversation(phone, { state: 'DISCOVERY' })
+          return `Nothing near ${savedCity} right now. Will hit you up when something opens`
+        }
+        await supabase.from('sms_sessions').upsert({ phone, state: 'JOBS_SHOWN', sites_shown: jobs.map(j => j.id), updated_at: new Date().toISOString() }, { onConflict: 'phone' })
+        await saveConversation(phone, { state: 'JOBS_SHOWN', extracted_truck_type: resolvedTruck })
+        return await buildJobListMessage(jobs, phone)
+      }
+      return 'What city you hauling from'
+    }
+    // Still can't figure out truck type — give them clear options
+    return 'What type of truck? Reply: tandem, triaxle, quad, end dump, or belly dump'
   }
 
   // ── JOB SELECTION (driver replies 1-5) ────────────────────────────────────

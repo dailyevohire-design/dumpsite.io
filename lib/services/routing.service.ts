@@ -87,9 +87,21 @@ export async function findNearbyJobs(
     withDistance = available.slice(0, 5).map(o => ({ ...o, distanceMiles: 0 }))
   }
 
-  // Filter by truck type if specified
+  // Filter by truck type family — tandem/tri/quad are all dump trucks
+  // end/side/belly are all 18-wheeler family
   if (truckType) {
-    const truckFiltered = withDistance.filter(o => !o.truck_type_needed || o.truck_type_needed === truckType)
+    const dumpFamily = ['tandem_axle', 'tri_axle', 'quad_axle', 'super_dump']
+    const eighteenFamily = ['end_dump', 'belly_dump', 'side_dump', '18_wheeler', 'transfer']
+    const driverFamily = dumpFamily.includes(truckType) ? dumpFamily : eighteenFamily.includes(truckType) ? eighteenFamily : null
+    const truckFiltered = withDistance.filter(o => {
+      if (!o.truck_type_needed) return true
+      if (o.truck_type_needed === truckType) return true
+      if (driverFamily && driverFamily.includes(o.truck_type_needed)) return true
+      // if order needs tandem and driver has tri/quad — compatible
+      if (dumpFamily.includes(o.truck_type_needed) && dumpFamily.includes(truckType)) return true
+      if (eighteenFamily.includes(o.truck_type_needed) && eighteenFamily.includes(truckType)) return true
+      return false
+    })
     if (truckFiltered.length) withDistance = truckFiltered
   }
 

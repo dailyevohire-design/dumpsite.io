@@ -85,7 +85,7 @@ Reply YES to approve delivery or NO to decline`
 
     return true
   } catch (err: any) {
-    console.error('[sendCustomerApproval]', err?.message)
+    console.error('[sendCustomerApproval] FAILED to:', customerPhone, 'from:', TWILIO_FROM, 'error:', err?.message, err?.code)
     return false
   }
 }
