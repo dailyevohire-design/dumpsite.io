@@ -94,33 +94,48 @@ async function resetConversation(phone: string) {
 
 async function sendJobLink(driverPhone: string, orderId: string, jobNumber: string): Promise<string> {
   const supabase = createAdminSupabase()
+  const crypto = await import('crypto')
   const profile = await getProfile(driverPhone)
   if (!profile) return `${APP_URL}/driver/dashboard`
 
-  // Create load request
   const { data: order } = await supabase.from('dispatch_orders').select('*').eq('id', orderId).single()
   if (!order) return `${APP_URL}/driver/dashboard`
 
-  const { data: loadReq } = await supabase.from('load_requests').insert({
+  // Create load request with idempotency key
+  const idempotencyKey = `${profile.user_id}-${orderId}-${Date.now()}`
+  const { data: loadReq, error: loadErr } = await supabase.from('load_requests').insert({
     driver_id: profile.user_id,
     dispatch_order_id: orderId,
     status: 'approved',
-    yards_estimated: order.yards_needed
+    yards_estimated: order.yards_needed,
+    idempotency_key: idempotencyKey
   }).select().single()
 
-  if (!loadReq) return `${APP_URL}/driver/dashboard`
+  if (loadErr || !loadReq) {
+    console.error('[sendJobLink] load_request insert failed:', loadErr?.message)
+    return `${APP_URL}/driver/dashboard`
+  }
 
-  // Create access token
+  // Create access token with short_id and token_hash
   let link = `${APP_URL}/driver/dashboard`
   try {
-    const { data: tokenRow } = await supabase.from('job_access_tokens').insert({
+    const rawToken = crypto.randomBytes(32).toString('hex')
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex')
+    const shortId = crypto.randomBytes(6).toString('hex')
+
+    const { data: tokenRow, error: tokenErr } = await supabase.from('job_access_tokens').insert({
       load_request_id: loadReq.id,
-      dispatch_order_id: orderId,
       driver_id: profile.user_id,
+      token_hash: tokenHash,
+      short_id: shortId,
       expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString()
-    }).select('token').single()
-    if (tokenRow?.token) link = `${APP_URL}/driver/job/${(tokenRow as any).token}`
-  } catch {}
+    }).select('short_id').single()
+
+    if (tokenErr) console.error('[sendJobLink] token insert failed:', tokenErr.message)
+    if (tokenRow?.short_id) link = `${APP_URL}/job-access/${tokenRow.short_id}`
+  } catch (err: any) {
+    console.error('[sendJobLink] token creation error:', err?.message)
+  }
 
   return link
 }
