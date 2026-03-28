@@ -96,49 +96,75 @@ async function sendJobLink(driverPhone: string, orderId: string, jobNumber: stri
   const supabase = createAdminSupabase()
   const crypto = await import('crypto')
   const profile = await getProfile(driverPhone)
-  if (!profile) return `${APP_URL}/driver/dashboard`
+  if (!profile) return ''
 
-  const { data: order } = await supabase.from('dispatch_orders').select('*').eq('id', orderId).single()
-  if (!order) return `${APP_URL}/driver/dashboard`
+  const { data: order } = await supabase
+    .from('dispatch_orders')
+    .select('id, client_address, client_name, client_phone, yards_needed, driver_pay_cents, cities(name)')
+    .eq('id', orderId)
+    .single()
+  if (!order) return ''
 
-  // Create load request with idempotency key
-  const idempotencyKey = `${profile.user_id}-${orderId}-${Date.now()}`
-  const { data: loadReq, error: loadErr } = await supabase.from('load_requests').insert({
+  // Upsert load request
+  const idempotencyKey = `${profile.user_id}-${orderId}`
+  const { error: loadErr } = await supabase.from('load_requests').upsert({
     driver_id: profile.user_id,
     dispatch_order_id: orderId,
     status: 'approved',
     yards_estimated: order.yards_needed,
     idempotency_key: idempotencyKey
-  }).select().single()
+  }, { onConflict: 'idempotency_key' })
+  if (loadErr) console.error('[load_request]', loadErr.message)
 
-  if (loadErr || !loadReq) {
-    console.error('[sendJobLink] load_request insert failed:', loadErr?.message)
-    return `${APP_URL}/driver/dashboard`
-  }
+  // Create phone-locked token
+  const rawToken = crypto.randomBytes(32).toString('hex')
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex')
+  const shortId = crypto.randomBytes(6).toString('hex')
 
-  // Create access token with short_id and token_hash
-  let link = `${APP_URL}/driver/dashboard`
-  try {
-    const rawToken = crypto.randomBytes(32).toString('hex')
-    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex')
-    const shortId = crypto.randomBytes(6).toString('hex')
-
-    const { data: tokenRow, error: tokenErr } = await supabase.from('job_access_tokens').insert({
-      load_request_id: loadReq.id,
+  const { data: tokenRow, error: tokenErr } = await supabase
+    .from('job_access_tokens')
+    .insert({
+      load_request_id: (await supabase.from('load_requests').select('id').eq('idempotency_key', idempotencyKey).single())?.data?.id,
       driver_id: profile.user_id,
       token_hash: tokenHash,
       short_id: shortId,
-      expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString()
-    }).select('short_id').single()
+      expires_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString()
+    })
+    .select('short_id')
+    .single()
 
-    if (tokenErr) console.error('[sendJobLink] token insert failed:', tokenErr.message)
-    if (tokenRow?.short_id) link = `${APP_URL}/job-access/${tokenRow.short_id}`
-  } catch (err: any) {
-    console.error('[sendJobLink] token creation error:', err?.message)
+  if (tokenErr) {
+    console.error('[sendJobLink] token error:', tokenErr.message)
+    // Fallback: send address directly — driver already verified by phone
+    const city = (order.cities as any)?.name || ''
+    const pay = Math.round((order.driver_pay_cents || 4500) / 100)
+    return `${jobNumber} — APPROVED\n${order.client_address}\n${city} — $${pay}/load\nReply DONE [loads] when finished`
   }
 
-  return link
+  const link = `${APP_URL}/job-access/${tokenRow?.short_id}`
+  const city = (order.cities as any)?.name || ''
+  const pay = Math.round((order.driver_pay_cents || 4500) / 100)
+
+  // Also notify site owner that driver is coming
+  try {
+    const twilio = require('twilio')
+    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+    const from = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER
+    const customerPhone = order.client_phone
+    if (customerPhone && from) {
+      const digits = customerPhone.replace(/\D/g,'')
+      const toE164 = digits.length === 10 ? `+1${digits}` : `+${digits}`
+      await client.messages.create({
+        to: toE164,
+        from,
+        body: `DumpSite: ${profile.first_name} is on the way with ${order.yards_needed} yds. They will arrive within the next hour. Reply STOP to cancel.`
+      }).catch((e: any) => console.error('[owner notify]', e.message))
+    }
+  } catch {}
+
+  return `${jobNumber} — APPROVED\nAddress: ${link}\n${city} — $${pay}/load\nReply DONE [loads] when finished`
 }
+
 
 async function buildJobListMessage(jobs: JobMatch[], phone: string): Promise<string> {
   const lines: string[] = []
