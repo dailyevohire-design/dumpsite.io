@@ -69,7 +69,26 @@ async function saveConversation(phone: string, updates: Record<string, any>) {
 }
 
 async function resetConversation(phone: string) {
-  await saveConversation(phone, { state: 'DISCOVERY', job_state: 'NONE' })
+  // Release any active reservation before resetting
+  const conv = await getConversation(phone)
+  if (conv?.reservation_id) {
+    await releaseReservation(conv.reservation_id)
+  }
+  await saveConversation(phone, {
+    state: 'DISCOVERY',
+    job_state: 'NONE',
+    active_order_id: null,
+    pending_approval_order_id: null,
+    reservation_id: null,
+    extracted_city: null,
+    extracted_yards: null,
+    extracted_truck_type: null,
+    extracted_material: null,
+    photo_storage_path: null,
+    photo_public_url: null,
+    approval_sent_at: null,
+    voice_call_made: null,
+  })
 }
 
 async function sendJobLink(driverPhone: string, orderId: string, jobNumber: string): Promise<string> {
@@ -481,10 +500,13 @@ async function handleConversation(sms: {
   }
 
   // ── DISCOVERY / JOB MATCHING ───────────────────────────────────────────────
-  const city = extracted.city || conv?.extracted_city
-  const yards = extracted.yards || conv?.extracted_yards
-  const truckType = extracted.truckType || conv?.extracted_truck_type
-  const material = extracted.material || conv?.extracted_material
+  // Only carry forward saved context if the message is job-related or we're mid-flow
+  const isJobRelated = extracted.intent !== 'UNKNOWN' || extracted.city || extracted.yards || extracted.truckType
+  const useConvContext = isJobRelated || convState === 'JOBS_SHOWN'
+  const city = extracted.city || (useConvContext ? conv?.extracted_city : null)
+  const yards = extracted.yards || (useConvContext ? conv?.extracted_yards : null)
+  const truckType = extracted.truckType || (useConvContext ? conv?.extracted_truck_type : null)
+  const material = extracted.material || (useConvContext ? conv?.extracted_material : null)
 
   const updates: Record<string, any> = { state: convState === 'JOBS_SHOWN' ? 'DISCOVERY' : convState }
   if (extracted.city) updates.extracted_city = extracted.city
