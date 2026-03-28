@@ -75,58 +75,74 @@ export async function sendCustomerApprovalRequest(
   photoUrl: string,
   approvalCode: string
 ): Promise<boolean> {
-  const client = getTwilioClient()
-  const formattedPhone = formatPhone(customerPhone)
   const fromNumber = TWILIO_FROM
+  const formattedPhone = formatPhone(customerPhone)
 
-  console.log('[sendCustomerApproval] Attempting send:', {
-    to: formattedPhone,
-    from: fromNumber,
-    hasPhoto: !!photoUrl,
-    photoUrl: photoUrl?.slice(0, 60),
-    orderId
-  })
+  console.log('[approval] sending to:', formattedPhone, 'from:', fromNumber, 'photo:', photoUrl?.slice(0,80))
 
   if (!fromNumber) {
-    console.error('[sendCustomerApproval] TWILIO_FROM is empty — check TWILIO_FROM_NUMBER_2 env var')
+    console.error('[approval] TWILIO_FROM is empty. Set TWILIO_FROM_NUMBER_2 in Vercel env vars')
     return false
   }
 
-  if (!formattedPhone || formattedPhone === '+1') {
-    console.error('[sendCustomerApproval] Invalid customer phone:', customerPhone)
+  if (!formattedPhone || formattedPhone.length < 10) {
+    console.error('[approval] invalid customer phone:', customerPhone)
     return false
   }
 
-  const messageBody = `DumpSite.io — ${driverName} has dirt ready to deliver to your property now.\n${yardsNeeded} yards available.\nReply YES to approve or NO to decline.`
+  const client = getTwilioClient()
+  const supabase = createAdminSupabase()
 
-  // Try MMS with photo first
-  if (photoUrl) {
+  // Generate a fresh signed URL valid for 2 hours so Twilio can always fetch it
+  let mediaUrlToSend = photoUrl
+  try {
+    if (photoUrl && photoUrl.includes('supabase')) {
+      // Extract storage path from public URL
+      const pathMatch = photoUrl.match(/material-photos\/(.+)$/)
+      if (pathMatch) {
+        const { data: signed } = await supabase.storage
+          .from('material-photos')
+          .createSignedUrl(pathMatch[1], 7200)
+        if (signed?.signedUrl) {
+          mediaUrlToSend = signed.signedUrl
+          console.log('[approval] using signed URL:', mediaUrlToSend.slice(0, 80))
+        }
+      }
+    }
+  } catch (signErr: any) {
+    console.error('[approval] signed URL error:', signErr?.message)
+  }
+
+  const body = `DumpSite: ${driverName} has dirt ready to deliver to your property — ${yardsNeeded} yds. Reply YES to approve or NO to decline.`
+
+  // Try MMS with photo
+  if (mediaUrlToSend) {
     try {
-      const result = await client.messages.create({
+      const msg = await client.messages.create({
         to: formattedPhone,
         from: fromNumber,
-        body: messageBody,
-        mediaUrl: [photoUrl]
+        body,
+        mediaUrl: [mediaUrlToSend]
       })
-      console.log('[sendCustomerApproval] MMS sent successfully. SID:', result.sid)
+      console.log('[approval] MMS sent. SID:', msg.sid)
       return true
     } catch (mmsErr: any) {
-      console.error('[sendCustomerApproval] MMS failed:', mmsErr?.message, mmsErr?.code, '— falling back to SMS with link')
-      // Fall through to SMS fallback
+      console.error('[approval] MMS failed:', mmsErr?.message, mmsErr?.code)
     }
   }
 
-  // Fallback: send SMS with photo link
+  // Fallback: SMS with link
   try {
-    const result = await client.messages.create({
+    const fallbackBody = body + (mediaUrlToSend ? `\nDirt photo: ${mediaUrlToSend}` : '')
+    const msg = await client.messages.create({
       to: formattedPhone,
       from: fromNumber,
-      body: messageBody + (photoUrl ? `\nView dirt photo: ${photoUrl}` : '')
+      body: fallbackBody
     })
-    console.log('[sendCustomerApproval] SMS sent successfully. SID:', result.sid)
+    console.log('[approval] SMS fallback sent. SID:', msg.sid)
     return true
   } catch (smsErr: any) {
-    console.error('[sendCustomerApproval] SMS also failed:', smsErr?.message, smsErr?.code, 'to:', formattedPhone, 'from:', fromNumber)
+    console.error('[approval] ALL sends failed:', smsErr?.message, smsErr?.code, 'to:', formattedPhone, 'from:', fromNumber)
     return false
   }
 }
