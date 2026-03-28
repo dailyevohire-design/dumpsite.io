@@ -74,9 +74,10 @@ async function resetConversation(phone: string) {
   if (conv?.reservation_id) {
     await releaseReservation(conv.reservation_id)
   }
-  await saveConversation(phone, {
-    state: 'DISCOVERY',  // clear all states including ASKING_TRUCK
-    job_state: 'NONE',
+  // Direct update to force nulls — the RPC's COALESCE skips null params
+  await createAdminSupabase().from('conversations').update({
+    state: 'DISCOVERY',
+    job_state: null,
     active_order_id: null,
     pending_approval_order_id: null,
     reservation_id: null,
@@ -88,7 +89,7 @@ async function resetConversation(phone: string) {
     photo_public_url: null,
     approval_sent_at: null,
     voice_call_made: null,
-  })
+  }).eq('phone', phone)
 }
 
 async function sendJobLink(driverPhone: string, orderId: string, jobNumber: string): Promise<string> {
