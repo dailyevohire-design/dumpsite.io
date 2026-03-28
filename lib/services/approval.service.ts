@@ -2,16 +2,22 @@ import { createAdminSupabase } from '../supabase'
 import twilio from 'twilio'
 
 const ADMIN_PHONE = '7134439223'
-const TWILIO_FROM = process.env.TWILIO_FROM_NUMBER || ''
+const TWILIO_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
 
 function getTwilioClient() {
   return twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 }
 
 function formatPhone(phone: string): string {
+  if (!phone) return ''
+  // Strip everything except digits
   const digits = phone.replace(/\D/g, '')
+  // Handle all formats: (817) 676-7467, 817-676-7467, +18176767467, 8176767467
   if (digits.length === 10) return `+1${digits}`
   if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`
+  if (digits.length === 11) return `+1${digits.slice(1)}`
+  // Already has country code without +
+  if (digits.length > 11) return `+${digits}`
   return `+1${digits}`
 }
 
@@ -69,23 +75,58 @@ export async function sendCustomerApprovalRequest(
   photoUrl: string,
   approvalCode: string
 ): Promise<boolean> {
+  const client = getTwilioClient()
+  const formattedPhone = formatPhone(customerPhone)
+  const fromNumber = TWILIO_FROM
+
+  console.log('[sendCustomerApproval] Attempting send:', {
+    to: formattedPhone,
+    from: fromNumber,
+    hasPhoto: !!photoUrl,
+    photoUrl: photoUrl?.slice(0, 60),
+    orderId
+  })
+
+  if (!fromNumber) {
+    console.error('[sendCustomerApproval] TWILIO_FROM is empty — check TWILIO_FROM_NUMBER_2 env var')
+    return false
+  }
+
+  if (!formattedPhone || formattedPhone === '+1') {
+    console.error('[sendCustomerApproval] Invalid customer phone:', customerPhone)
+    return false
+  }
+
+  const messageBody = `DumpSite.io — ${driverName} has dirt ready to deliver to your property now.\n${yardsNeeded} yards available.\nReply YES to approve or NO to decline.`
+
+  // Try MMS with photo first
+  if (photoUrl) {
+    try {
+      const result = await client.messages.create({
+        to: formattedPhone,
+        from: fromNumber,
+        body: messageBody,
+        mediaUrl: [photoUrl]
+      })
+      console.log('[sendCustomerApproval] MMS sent successfully. SID:', result.sid)
+      return true
+    } catch (mmsErr: any) {
+      console.error('[sendCustomerApproval] MMS failed:', mmsErr?.message, mmsErr?.code, '— falling back to SMS with link')
+      // Fall through to SMS fallback
+    }
+  }
+
+  // Fallback: send SMS with photo link
   try {
-    const client = getTwilioClient()
-    const formattedPhone = formatPhone(customerPhone)
-
-    const message = `DumpSite.io: ${driverName} has clean fill ready to deliver now — ${yardsNeeded} yds
-Reply YES to approve delivery or NO to decline`
-
-    await client.messages.create({
+    const result = await client.messages.create({
       to: formattedPhone,
-      from: TWILIO_FROM,
-      body: message,
-      mediaUrl: [photoUrl]
+      from: fromNumber,
+      body: messageBody + (photoUrl ? `\nView dirt photo: ${photoUrl}` : '')
     })
-
+    console.log('[sendCustomerApproval] SMS sent successfully. SID:', result.sid)
     return true
-  } catch (err: any) {
-    console.error('[sendCustomerApproval] FAILED to:', customerPhone, 'from:', TWILIO_FROM, 'error:', err?.message, err?.code)
+  } catch (smsErr: any) {
+    console.error('[sendCustomerApproval] SMS also failed:', smsErr?.message, smsErr?.code, 'to:', formattedPhone, 'from:', fromNumber)
     return false
   }
 }

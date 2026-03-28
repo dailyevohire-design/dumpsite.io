@@ -197,7 +197,7 @@ async function handleConversation(sms: {
           const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
           await twilioClient.messages.create({
             to: formatPhoneE164(result.driverPhone),
-            from: process.env.TWILIO_FROM_NUMBER!,
+            from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
             body: `${orderNum} — approved. Head over\nAddress: ${link}\nReply DONE [loads] when finished`
           }).catch(() => {})
           await saveConversation(result.driverPhone, { state: 'ACTIVE', job_state: 'IN_PROGRESS', active_order_id: result.orderId })
@@ -207,7 +207,7 @@ async function handleConversation(sms: {
           const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
           await twilioClient.messages.create({
             to: formatPhoneE164(result.driverPhone),
-            from: process.env.TWILIO_FROM_NUMBER!,
+            from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
             body: `Can't take that load. Send pic of different dirt or text new city`
           }).catch(() => {})
           await saveConversation(result.driverPhone, { state: 'DISCOVERY', job_state: 'NONE' })
@@ -242,7 +242,7 @@ async function handleConversation(sms: {
           const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
           await twilioClient.messages.create({
             to: formatPhoneE164(result.driverPhone),
-            from: process.env.TWILIO_FROM_NUMBER!,
+            from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
             body: `${jobNum} — approved. Head over\nAddress: ${link}\nReply DONE [loads] when finished`
           }).catch(() => {})
           await saveConversation(result.driverPhone, { state: 'ACTIVE', job_state: 'IN_PROGRESS', active_order_id: result.orderId })
@@ -252,7 +252,7 @@ async function handleConversation(sms: {
           const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
           await twilioClient.messages.create({
             to: formatPhoneE164(result.driverPhone),
-            from: process.env.TWILIO_FROM_NUMBER!,
+            from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
             body: 'Customer declined this load. Text new city when you have another'
           }).catch(() => {})
           await saveConversation(result.driverPhone, { state: 'DISCOVERY', job_state: 'NONE' })
