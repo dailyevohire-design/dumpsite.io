@@ -301,9 +301,11 @@ async function handleConversation(sms: {
   const convState = conv?.state || 'DISCOVERY'
 
   // ── EXTRACT INTENT ─────────────────────────────────────────────────────────
+  // Only pass lastKnownCity when driver is mid-flow, not on a fresh conversation
+  const inActiveFlow = ['JOBS_SHOWN', 'PHOTO_PENDING', 'APPROVAL_PENDING', 'ACTIVE'].includes(convState)
   const extracted = await extractIntent(trimmed, hasMedia, {
     activeJobId: activeLoad?.dispatch_order_id,
-    lastKnownCity: conv?.extracted_city,
+    lastKnownCity: inActiveFlow ? conv?.extracted_city : undefined,
     isAdmin: phone === ADMIN_PHONE
   })
 
