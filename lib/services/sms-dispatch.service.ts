@@ -94,75 +94,87 @@ async function resetConversation(phone: string) {
 
 async function sendJobLink(driverPhone: string, orderId: string, jobNumber: string): Promise<string> {
   const supabase = createAdminSupabase()
-  const crypto = await import('crypto')
+  const cryptoMod = await import('crypto')
   const profile = await getProfile(driverPhone)
   if (!profile) return ''
 
   const { data: order } = await supabase
     .from('dispatch_orders')
-    .select('id, client_address, client_name, client_phone, yards_needed, driver_pay_cents, cities(name)')
+    .select('id, client_address, client_name, client_phone, yards_needed, driver_pay_cents, notes, cities(name)')
     .eq('id', orderId)
     .single()
   if (!order) return ''
 
   // Upsert load request
   const idempotencyKey = `${profile.user_id}-${orderId}`
-  const { error: loadErr } = await supabase.from('load_requests').upsert({
-    driver_id: profile.user_id,
-    dispatch_order_id: orderId,
-    status: 'approved',
-    yards_estimated: order.yards_needed,
-    idempotency_key: idempotencyKey
-  }, { onConflict: 'idempotency_key' })
-  if (loadErr) console.error('[load_request]', loadErr.message)
+  const { data: existingLoad } = await supabase
+    .from('load_requests')
+    .select('id')
+    .eq('idempotency_key', idempotencyKey)
+    .maybeSingle()
 
-  // Create phone-locked token
-  const rawToken = crypto.randomBytes(32).toString('hex')
-  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex')
-  const shortId = crypto.randomBytes(6).toString('hex')
-
-  const { data: tokenRow, error: tokenErr } = await supabase
-    .from('job_access_tokens')
-    .insert({
-      load_request_id: (await supabase.from('load_requests').select('id').eq('idempotency_key', idempotencyKey).single())?.data?.id,
+  let loadReqId = existingLoad?.id
+  if (!loadReqId) {
+    const { data: newLoad, error: newLoadErr } = await supabase.from('load_requests').insert({
       driver_id: profile.user_id,
-      token_hash: tokenHash,
-      short_id: shortId,
-      expires_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString()
-    })
-    .select('short_id')
-    .single()
-
-  if (tokenErr) {
-    console.error('[sendJobLink] token error:', tokenErr.message)
-    // Fallback: send address directly — driver already verified by phone
-    const city = (order.cities as any)?.name || ''
-    const pay = Math.round((order.driver_pay_cents || 4500) / 100)
-    return `${jobNumber} — APPROVED\n${order.client_address}\n${city} — $${pay}/load\nOnce done drop us how many loads you delivered`
+      dispatch_order_id: orderId,
+      status: 'approved',
+      yards_estimated: order.yards_needed,
+      idempotency_key: idempotencyKey
+    }).select('id').single()
+    if (newLoadErr) console.error('[sendJobLink] load_request insert:', newLoadErr.message)
+    loadReqId = newLoad?.id
   }
 
-  const link = `${APP_URL}/job-access/${tokenRow?.short_id}`
   const city = (order.cities as any)?.name || ''
   const pay = Math.round((order.driver_pay_cents || 4500) / 100)
 
-  // Also notify site owner that driver is coming
+  const lines = [
+    `${jobNumber} — locked in`,
+    `${order.client_address}`,
+    `${city} — ${order.yards_needed} yds — $${pay}/load`,
+  ]
+  if (order.notes) lines.push(`Note: ${order.notes}`)
+
+  // Notify site owner driver is coming
   try {
     const twilio = require('twilio')
-    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
-    const from = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER
-    const customerPhone = order.client_phone
-    if (customerPhone && from) {
-      const digits = customerPhone.replace(/\D/g,'')
+    const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+    const fromNum = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER
+    if (order.client_phone && fromNum) {
+      const digits = (order.client_phone as string).replace(/\D/g, '')
       const toE164 = digits.length === 10 ? `+1${digits}` : `+${digits}`
-      await client.messages.create({
+      await twilioClient.messages.create({
         to: toE164,
-        from,
-        body: `DumpSite: ${profile.first_name} is on the way with ${order.yards_needed} yds. They will arrive within the next hour. Reply STOP to cancel.`
+        from: fromNum,
+        body: `DumpSite: ${profile.first_name} is heading over now with ${order.yards_needed} yds. They should arrive within the hour.`
       }).catch((e: any) => console.error('[owner notify]', e.message))
     }
   } catch {}
 
-  return `${jobNumber} — APPROVED\nAddress: ${link}\n${city} — $${pay}/load\nOnce done drop us how many loads you delivered`
+  // Try to create token for map link
+  if (loadReqId) {
+    try {
+      const rawToken = cryptoMod.randomBytes(32).toString('hex')
+      const tokenHash = cryptoMod.createHash('sha256').update(rawToken).digest('hex')
+      const shortId = cryptoMod.randomBytes(6).toString('hex')
+      const { data: tokenRow, error: tokenErr } = await supabase.from('job_access_tokens').insert({
+        load_request_id: loadReqId,
+        driver_id: profile.user_id,
+        token_hash: tokenHash,
+        short_id: shortId,
+        expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString()
+      }).select('short_id').single()
+      if (tokenErr) console.error('[sendJobLink] token:', tokenErr.message)
+      if (tokenRow?.short_id) {
+        lines.push(`Map: ${APP_URL}/job-access/${tokenRow.short_id}`)
+      }
+    } catch {}
+  }
+
+  lines.push('Text us how many loads once you\'re done')
+
+  return lines.join('\n')
 }
 
 
@@ -240,7 +252,7 @@ async function handleConversation(sms: {
           await twilioClient.messages.create({
             to: formatPhoneE164(result.driverPhone),
             from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
-            body: `${orderNum} — approved. Head over\nAddress: ${link}\nOnce done drop us how many loads you delivered`
+            body: `${orderNum} — approved. Head over\nAddress: ${link}`
           }).catch(() => {})
           await saveConversation(result.driverPhone, { state: 'ACTIVE', job_state: 'IN_PROGRESS', active_order_id: result.orderId })
           await logEvent('APPROVAL_DECIDED', { approvalCode: code, approved: true, driverPhone: result.driverPhone }, result.orderId)
@@ -285,7 +297,7 @@ async function handleConversation(sms: {
           await twilioClient.messages.create({
             to: formatPhoneE164(result.driverPhone),
             from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
-            body: `${jobNum} — approved. Head over\nAddress: ${link}\nOnce done drop us how many loads you delivered`
+            body: `${jobNum} — approved. Head over\nAddress: ${link}`
           }).catch(() => {})
           await saveConversation(result.driverPhone, { state: 'ACTIVE', job_state: 'IN_PROGRESS', active_order_id: result.orderId })
           await logEvent('APPROVAL_DECIDED', { approved: true, driverPhone: result.driverPhone, customerPhone: phone }, result.orderId)
@@ -342,8 +354,71 @@ async function handleConversation(sms: {
   const conv = await getConversation(phone)
   const convState = conv?.state || 'DISCOVERY'
 
-  // ── EXTRACT INTENT ─────────────────────────────────────────────────────────
-  // Only pass lastKnownCity when driver is mid-flow, not on a fresh conversation
+  // ── ACTIVE JOB INTERCEPT — runs BEFORE AI extraction ──────────────────
+  const activeOrderId = activeLoad?.dispatch_order_id || conv?.active_order_id
+  if (activeOrderId && (activeLoad || convState === 'ACTIVE')) {
+    const completionPatterns = [
+      /^\d+$/,
+      /^(done|finish|finished|complete|completed|dumped|dropped|delivered|all done|wrapped|good|that's it|thats it)/i,
+      /^\d+\s*(load|loads|trip|trips|truck|trucks|run|runs)?$/i,
+      /(\d+)\s*(load|loads|trip|trips|truck|trucks|run|runs)\s*(done|delivered|dropped|dumped|finished|complete)/i,
+      /(done|finished|dumped|dropped|delivered)\s*(\d+)/i,
+    ]
+    const isCompletion = completionPatterns.some(p => p.test(trimmed))
+
+    if (isCompletion) {
+      const loadMatch = trimmed.match(/(\d+)/)
+      const loads = loadMatch ? Math.min(parseInt(loadMatch[1]), 50) : 1
+      const { data: completionOrder } = await supabase
+        .from('dispatch_orders')
+        .select('driver_pay_cents, yards_needed, cities(name)')
+        .eq('id', activeOrderId)
+        .single()
+      const payPerLoad = completionOrder?.driver_pay_cents || 4500
+      const totalDollars = Math.round(payPerLoad * loads / 100)
+      const jobNum = generateJobNumber(activeOrderId)
+
+      if (activeLoad) {
+        await supabase.from('load_requests').update({
+          status: 'completed',
+          completed_at: new Date().toISOString(),
+          payout_cents: payPerLoad * loads,
+          truck_count: loads
+        }).eq('id', activeLoad.id)
+      }
+      const { error: payErr } = await supabase.from('driver_payments').insert({
+        driver_id: profile.user_id,
+        load_request_id: activeLoad?.id,
+        amount_cents: payPerLoad * loads,
+        status: 'pending'
+      })
+      if (payErr) console.error('[payment]', payErr.message)
+      try { await sendAdminAlert(`${jobNum} complete — ${firstName} ${loads} load${loads > 1 ? 's' : ''} $${totalDollars}`) } catch {}
+      await logEvent('DELIVERY_VERIFIED', { phone, jobNum, loads, totalDollars }, activeOrderId)
+      await resetConversation(phone)
+
+      const responses = [
+        `10.4 ${firstName} — ${loads} load${loads > 1 ? 's' : ''}. $${totalDollars} coming your way`,
+        `Got it — ${loads} load${loads > 1 ? 's' : ''} logged. $${totalDollars} otw`,
+        `Perfect — $${totalDollars} being sent now. Good work`,
+        `10.4 — $${totalDollars} otw for ${loads} load${loads > 1 ? 's' : ''}`,
+      ]
+      return responses[Math.floor(Math.random() * responses.length)]
+    }
+
+    if (/addy|address|where|location|directions/i.test(trimmed)) {
+      const { data: addrOrder } = await supabase
+        .from('dispatch_orders')
+        .select('client_address, cities(name)')
+        .eq('id', activeOrderId)
+        .single()
+      if (addrOrder) return `${addrOrder.client_address} — ${(addrOrder.cities as any)?.name || ''}`
+    }
+
+    return `You got ${generateJobNumber(activeOrderId)} active. Text us how many loads once you drop`
+  }
+
+  // ── EXTRACT INTENT — only runs when NO active job ──────────────────────
   const inActiveFlow = ['JOBS_SHOWN', 'PHOTO_PENDING', 'APPROVAL_PENDING', 'ACTIVE', 'ASKING_TRUCK'].includes(convState)
   const extracted = await extractIntent(trimmed, hasMedia, {
     activeJobId: activeLoad?.dispatch_order_id,
@@ -421,7 +496,7 @@ async function handleConversation(sms: {
   // ── ALREADY HAS ACTIVE JOB ─────────────────────────────────────────────────
   if (activeLoad && convState === 'ACTIVE') {
     const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
-    return `You got ${jobNum} active. Once done drop us how many loads you delivered or CANCEL to cancel`
+    return `You got ${jobNum} active. Text us how many loads once you drop`
   }
 
   // ── STATE: WAITING FOR APPROVAL ────────────────────────────────────────────
