@@ -138,7 +138,7 @@ async function sendJobLink(driverPhone: string, orderId: string, jobNumber: stri
     // Fallback: send address directly — driver already verified by phone
     const city = (order.cities as any)?.name || ''
     const pay = Math.round((order.driver_pay_cents || 4500) / 100)
-    return `${jobNumber} — APPROVED\n${order.client_address}\n${city} — $${pay}/load\nReply DONE [loads] when finished`
+    return `${jobNumber} — APPROVED\n${order.client_address}\n${city} — $${pay}/load\nOnce done drop us how many loads you delivered`
   }
 
   const link = `${APP_URL}/job-access/${tokenRow?.short_id}`
@@ -162,7 +162,7 @@ async function sendJobLink(driverPhone: string, orderId: string, jobNumber: stri
     }
   } catch {}
 
-  return `${jobNumber} — APPROVED\nAddress: ${link}\n${city} — $${pay}/load\nReply DONE [loads] when finished`
+  return `${jobNumber} — APPROVED\nAddress: ${link}\n${city} — $${pay}/load\nOnce done drop us how many loads you delivered`
 }
 
 
@@ -240,7 +240,7 @@ async function handleConversation(sms: {
           await twilioClient.messages.create({
             to: formatPhoneE164(result.driverPhone),
             from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
-            body: `${orderNum} — approved. Head over\nAddress: ${link}\nReply DONE [loads] when finished`
+            body: `${orderNum} — approved. Head over\nAddress: ${link}\nOnce done drop us how many loads you delivered`
           }).catch(() => {})
           await saveConversation(result.driverPhone, { state: 'ACTIVE', job_state: 'IN_PROGRESS', active_order_id: result.orderId })
           await logEvent('APPROVAL_DECIDED', { approvalCode: code, approved: true, driverPhone: result.driverPhone }, result.orderId)
@@ -285,7 +285,7 @@ async function handleConversation(sms: {
           await twilioClient.messages.create({
             to: formatPhoneE164(result.driverPhone),
             from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
-            body: `${jobNum} — approved. Head over\nAddress: ${link}\nReply DONE [loads] when finished`
+            body: `${jobNum} — approved. Head over\nAddress: ${link}\nOnce done drop us how many loads you delivered`
           }).catch(() => {})
           await saveConversation(result.driverPhone, { state: 'ACTIVE', job_state: 'IN_PROGRESS', active_order_id: result.orderId })
           await logEvent('APPROVAL_DECIDED', { approved: true, driverPhone: result.driverPhone, customerPhone: phone }, result.orderId)
@@ -329,12 +329,12 @@ async function handleConversation(sms: {
   if (profile.sms_opted_out) return ''
   const firstName = profile.first_name || 'Driver'
 
-  // Check active load request
+  // Check active load — check all possible statuses including in_progress
   const { data: activeLoad } = await supabase
     .from('load_requests')
     .select('id, status, dispatch_order_id, dispatch_orders(driver_pay_cents, yards_needed, cities(name))')
     .eq('driver_id', profile.user_id)
-    .in('status', ['pending', 'approved'])
+    .in('status', ['pending', 'approved', 'in_progress'])
     .order('created_at', { ascending: false })
     .maybeSingle()
 
@@ -353,7 +353,23 @@ async function handleConversation(sms: {
 
   // ── HANDLE DONE ────────────────────────────────────────────────────────────
   if (extracted.intent === 'DONE_REPORT') {
-    if (!activeLoad) return "No active job. Text when you're ready with a load"
+    if (!activeLoad) {
+      // Check conversation for active order as fallback
+      const convCheck = await getConversation(phone)
+      if (convCheck?.active_order_id) {
+        const loadMatch = trimmed.match(/(\d+)/)
+        const loads = loadMatch ? Math.min(parseInt(loadMatch[1]), 50) : 1
+        const { data: ord } = await supabase.from('dispatch_orders').select('id,driver_pay_cents,yards_needed').eq('id', convCheck.active_order_id).single()
+        if (ord) {
+          const dollars = Math.round((ord.driver_pay_cents || 4500) * loads / 100)
+          const jn = generateJobNumber(ord.id)
+          try { await sendAdminAlert(`${jn} complete — ${firstName} ${loads} loads $${dollars}`) } catch {}
+          await resetConversation(phone)
+          return `10.4 — ${loads} load${loads > 1 ? 's' : ''}. $${dollars} coming your way`
+        }
+      }
+      return "What's the job number? Can't find an active job for you"
+    }
     const loads = extracted.loadCount || 1
     const payPerLoad = (activeLoad.dispatch_orders as any)?.driver_pay_cents || 4500
     const totalDollars = Math.round(payPerLoad * loads / 100)
@@ -405,7 +421,7 @@ async function handleConversation(sms: {
   // ── ALREADY HAS ACTIVE JOB ─────────────────────────────────────────────────
   if (activeLoad && convState === 'ACTIVE') {
     const jobNum = generateJobNumber(activeLoad.dispatch_order_id)
-    return `You got ${jobNum} active. Reply DONE [loads] when finished or CANCEL to cancel`
+    return `You got ${jobNum} active. Once done drop us how many loads you delivered or CANCEL to cancel`
   }
 
   // ── STATE: WAITING FOR APPROVAL ────────────────────────────────────────────

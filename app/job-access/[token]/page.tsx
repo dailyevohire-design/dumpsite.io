@@ -208,7 +208,7 @@ export default async function JobAccessPage({ params }: Props) {
           color: '#4ade80',
           fontFamily: 'monospace',
         }}>
-          Text DONE [loads] when finished
+          Once done delivering, text us how many loads you dropped
         </div>
 
         <div style={{ textAlign: 'center' as const, marginTop: '24px', fontSize: '11px', color: '#4a3f30', fontFamily: 'monospace' }}>
