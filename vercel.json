@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/approval-followup",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/otw-followup",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
