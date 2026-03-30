@@ -1,5 +1,6 @@
 import { createAdminSupabase } from '../supabase'
 import { sendAdminAlert } from '../sms'
+import { generateJesseResponse } from './jesse.service'
 import { extractIntent, ExtractionResult } from './extraction.service'
 import { findNearbyJobs, atomicClaimJob, releaseReservation, JobMatch } from './routing.service'
 import {
@@ -335,7 +336,7 @@ async function handleConversation(sms: {
     await supabase.rpc('create_sms_driver', { p_phone: phone, p_first_name: firstName, p_last_name: lastName })
     await saveConversation(phone, { state: 'DISCOVERY' })
     await logEvent('CONTACT_CREATED', { phone, firstName })
-    return `${firstName} got you. What city you hauling from and how many yards`
+    return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName })
   }
 
   if (profile.sms_opted_out) return ''
@@ -683,7 +684,8 @@ async function handleConversation(sms: {
     })
 
     await logEvent('SITE_RESERVATION_CREATED', { phone, jobNum, city, reservationId }, selectedJobId)
-    return `${jobNum} — ${city} — ${order.yards_needed} yds at $${payDollars}/load\nBefore I send the addy I need a pic of the first load so I can get final 10-4\nSend pic of dirt when ready`
+    const jesseMsg = await generateJesseResponse({ state: 'PHOTO_PENDING', driverMessage: body, driverName: firstName, activeJobCity: city, payDollars, yards: order.yards_needed })
+    return `${jobNum} — ${city} — ${order.yards_needed} yds at $${payDollars}/load\n${jesseMsg}`
   }
 
   // ── DISCOVERY / JOB MATCHING ───────────────────────────────────────────────
@@ -705,7 +707,7 @@ async function handleConversation(sms: {
 
     if (!truckType) {
       await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
-      return `${city} got you — what type of truck you running`
+      return await generateJesseResponse({ state: 'ASKING_TRUCK', driverMessage: body, driverName: firstName, yards: yards || undefined })
     }
 
     const jobs = await findNearbyJobs(city, truckType)
@@ -732,9 +734,9 @@ async function handleConversation(sms: {
   // No city extracted — ask for it
   await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
   if (extracted.intent === 'NEED_DUMPSITE' || extracted.intent === 'HAUL_OFF' || lower.includes('load') || lower.includes('dirt') || lower.includes('dump')) {
-    return 'What city you hauling from'
+    return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName })
   }
-  return 'Got a load to haul? Text your city when ready'
+  return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName })
 }
 
 // ─── EXPORTS ──────────────────────────────────────────────────────────────────
