@@ -482,7 +482,10 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   const [profile, conv, history] = await Promise.all([getProfile(phone), getConv(phone), getHistory(phone)])
   if (profile?.sms_opted_out) return ""
 
-  const lang: "en"|"es" = detectLanguage(body) === "es" ? "es" : "en"
+  // Sticky language: once Spanish detected in any message, stay Spanish entire conversation
+  const detectedLang = detectLanguage(body)
+  const historyHasSpanish = history.some(m => detectLanguage(m.content) === "es")
+  const lang: "en"|"es" = detectedLang === "es" || historyHasSpanish ? "es" : "en"
   const isKnownDriver = profile ? (await getCompletedCount(profile.user_id)) >= 2 : false
   const convState = conv?.state || "DISCOVERY"
 

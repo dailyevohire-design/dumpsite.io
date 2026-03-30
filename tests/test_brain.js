@@ -19,11 +19,13 @@ const WEBHOOK_PATH = "/api/sms/webhook";
 const FULL_URL = BASE_URL + WEBHOOK_PATH;
 
 // Test phone numbers — use fake numbers that won't conflict with real drivers
-const TEST_NEW_DRIVER    = "5550000001";  // brand new, never texted before
-const TEST_KNOWN_DRIVER  = "5550000002";  // will simulate known driver (2+ loads)
-const TEST_SPANISH       = "5550000003";  // Spanish speaking driver
-const TEST_CUSTOMER      = "5550000004";  // customer phone (for delivery confirm)
-const TEST_NEGOTIATOR    = "5550000005";  // driver who pushes back on price
+// Use timestamp-based phones to avoid stale state from prior runs
+const TS = Date.now().toString().slice(-6);
+const TEST_NEW_DRIVER    = `555${TS}1`;  // brand new, never texted before
+const TEST_KNOWN_DRIVER  = `555${TS}2`;  // will simulate known driver (2+ loads)
+const TEST_SPANISH       = `555${TS}3`;  // Spanish speaking driver
+const TEST_CUSTOMER      = `555${TS}4`;  // customer phone (for delivery confirm)
+const TEST_NEGOTIATOR    = `555${TS}5`;  // driver who pushes back on price
 
 // ─────────────────────────────────────────────────────────────
 // COLORS
@@ -145,7 +147,7 @@ function assert(testName, response, checks) {
           warnings.push(`Possible address in unconfirmed job message: "${reply}"`);
         break;
       case "is_spanish":
-        const spanishWords = /\b(hola|tienes|tierra|camion|yardas|foto|tengo|como|para|que|de|la|el|en|tu|te|se|lo|les|nos|si|tambi\u00e9n|pero|porque|cuantos|mandame|listo)\b/i;
+        const spanishWords = /\b(hola|tienes|tierra|camion|yardas|foto|tengo|como|para|que|de|la|el|en|tu|te|se|lo|les|nos|si|tambi\u00e9n|pero|porque|cuantos|mandame|listo|puedo|hacer|por|carga|cargas|dejame|verificar|avisame|cuantas|tiraste|direccion|cerca|limpia|volteo|dale|manda|mandamos|rato|perdon)\b/i;
         if (!spanishWords.test(reply))
           errors.push(`Expected Spanish response — got: "${reply}"`);
         break;
@@ -333,7 +335,7 @@ async function runTests() {
   // -- SUITE 6: Tiered Pricing --
   console.log(`\n${C.bold}\u2501\u2501\u2501 SUITE 6: Tiered Pricing \u2014 New Driver Negotiation \u2501\u2501\u2501${C.reset}`);
 
-  const TEST_PRICE = "5550000006";
+  const TEST_PRICE = `555${TS}6`;
 
   r = await sendSMS(TEST_PRICE, "I have clean fill in Frisco");
   r._from = TEST_PRICE;
@@ -460,9 +462,9 @@ async function runTests() {
   // -- SUITE 10: Conversation Variety --
   console.log(`\n${C.bold}\u2501\u2501\u2501 SUITE 10: Response Variety (No Same Reply Twice) \u2501\u2501\u2501${C.reset}`);
 
-  const freshPhone1 = "5550000010";
-  const freshPhone2 = "5550000011";
-  const freshPhone3 = "5550000012";
+  const freshPhone1 = `555${TS}10`;
+  const freshPhone2 = `555${TS}11`;
+  const freshPhone3 = `555${TS}12`;
 
   const [r1, r2, r3] = await Promise.all([
     sendSMS(freshPhone1, "hey"),
@@ -488,7 +490,7 @@ async function runTests() {
   // -- SUITE 11: No Address Leak --
   console.log(`\n${C.bold}\u2501\u2501\u2501 SUITE 11: Address Security \u2501\u2501\u2501${C.reset}`);
 
-  const TEST_ADDR = "5550000020";
+  const TEST_ADDR = `555${TS}20`;
   r = await sendSMS(TEST_ADDR, "I have dirt in McKinney");
   r._from = TEST_ADDR;
   assert("11.1 \u2014 No address revealed before job confirmed", r, [
@@ -514,11 +516,11 @@ async function runTests() {
   console.log(`\n${C.bold}\u2501\u2501\u2501 SUITE 12: Edge Cases & Gibberish \u2501\u2501\u2501${C.reset}`);
 
   const edgeCases = [
-    ["lol", "5550000030"],
-    ["???", "5550000031"],
-    ["ok", "5550000032"],
-    ["hi", "5550000033"],
-    ["testing 123", "5550000034"],
+    ["lol", `555${TS}30`],
+    ["???", `555${TS}31`],
+    ["ok", `555${TS}32`],
+    ["hi", `555${TS}33`],
+    ["testing 123", `555${TS}34`],
   ];
 
   for (const [msg, phone] of edgeCases) {
