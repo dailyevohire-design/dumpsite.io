@@ -144,7 +144,8 @@ export default function AdminDashboard() {
         </div>
         <div style={{display:'flex',gap:'10px',alignItems:'center'}}>
           <span style={{fontSize:'12px',color:'#606670'}}>{total} {activeTab} requests</span>
-          <a href="/admin/tracking" style={{background:'transparent',border:'1px solid rgba(59,138,232,0.3)',color:'#3A8AE8',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px'}}>📡 Tracking</a>
+          <a href="/admin/live" style={{background:'transparent',border:'1px solid rgba(34,197,94,0.3)',color:'#22c55e',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px'}}>Live Dispatch</a>
+          <a href="/admin/tracking" style={{background:'transparent',border:'1px solid rgba(59,138,232,0.3)',color:'#3A8AE8',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px'}}>Tracking</a>
           <a href="/admin/dispatch" style={{background:'#F5A623',color:'#111',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px',textTransform:'uppercase'}}>+ New Dispatch</a>
         </div>
       </div>
