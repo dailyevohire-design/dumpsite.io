@@ -84,7 +84,8 @@ export async function findNearbyJobs(
     if (!nearby.length) nearby = withDistance.slice(0, 3)
     withDistance = nearby
   } else {
-    withDistance = available.slice(0, 5).map(o => ({ ...o, distanceMiles: 0 }))
+    // Geocoding failed — mark distance as -1 (unknown) instead of 0 to prevent self-match
+    withDistance = available.slice(0, 5).map(o => ({ ...o, distanceMiles: -1 }))
   }
 
   // Filter by truck type family — tandem/tri/quad are all dump trucks

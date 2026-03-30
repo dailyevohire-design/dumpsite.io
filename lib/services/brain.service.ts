@@ -351,7 +351,7 @@ async function callBrain(
     `Photo on file: ${conv?.photo_public_url ? "YES" : "no"}  Photo THIS msg: ${hasPhoto ? "YES" : "no"}`,
     `Active job: ${activeJob ? (activeJob.cities as any)?.name + " $" + Math.round(activeJob.driver_pay_cents/100) : "none"}`,
     nearbyJobs.length > 0
-      ? `Sites:\n${nearbyJobs.slice(0,3).map((j,i) => `  ${i+1}. ${j.cityName} ${j.distanceMiles.toFixed(1)}mi ${j.yardsNeeded}yds ${j.truckTypeNeeded?.replace(/_/g," ")||"any"} jobId:${j.id}`).join("\n")}`
+      ? `Sites:\n${nearbyJobs.slice(0,3).map((j,i) => `  ${i+1}. ${j.cityName} ${j.distanceMiles > 0 ? j.distanceMiles.toFixed(1) + "mi" : "nearby"} ${j.yardsNeeded}yds ${j.truckTypeNeeded?.replace(/_/g," ")||"any"} jobId:${j.id}`).join("\n")}`
       : "Sites: none right now",
     "━━━ END ━━━",
     `Driver sent: ${body || (hasPhoto ? "[photo]" : "[empty]")}`,
@@ -673,10 +673,16 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   }
   if (inlineTruck || inlineYards || storedPhotoUrl) await saveConv(phone, enriched)
 
-  // ── NEARBY JOBS ──────────────────────────────────────────────
+  // ── NEARBY JOBS (with self-match filter) ──────────────────────
   let nearbyJobs: JobMatch[] = []
   if (enriched.extracted_city) {
-    try { nearbyJobs = await findNearbyJobs(enriched.extracted_city, enriched.extracted_truck_type || undefined) } catch {}
+    try {
+      const raw = await findNearbyJobs(enriched.extracted_city, enriched.extracted_truck_type || undefined)
+      // Filter out self-matches: jobs < 0.5 miles are likely the driver's own address
+      nearbyJobs = raw.filter(j => j.distanceMiles >= 0.5)
+      // If all filtered out, include jobs > 0 (skip exact 0.0 only)
+      if (!nearbyJobs.length) nearbyJobs = raw.filter(j => j.distanceMiles > 0)
+    } catch {}
   }
 
   // ── CALL BRAIN ───────────────────────────────────────────────
@@ -685,6 +691,32 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     body, hasPhoto, photoUrl, enriched, profile, history,
     nearbyJobs, activeJob, lang, isKnownDriver, savedPayment,
   )
+
+  // ── VALIDATE BEFORE SEND — safety net ────────────────────────
+  let response = brain.response
+  const driverAddress = body.toLowerCase().trim()
+
+  // Block: response contains driver's own loading address
+  if (driverAddress.length > 10 && response.toLowerCase().includes(driverAddress.slice(0, 20).toLowerCase())) {
+    response = lang === "es" ? "dejame verificar que tengo cerca" : "let me check what I got close"
+  }
+  // Block: response contains internal job codes
+  if (/DS-[A-Z0-9]{5,}/i.test(response)) {
+    response = response.replace(/DS-[A-Z0-9]{5,}/gi, "").trim() || (lang === "es" ? "dejame verificar" : "let me check")
+  }
+  // Block: response admits being AI
+  if (/\b(i am an ai|i'm an ai|artificial intelligence|language model|claude|anthropic|i am a bot|i'm a bot|automated system)\b/i.test(response)) {
+    response = lang === "es" ? "soy Jesse, broker de tierra en DFW" : "nah I'm Jesse, dirt broker in DFW"
+  }
+  // Block: response over 320 chars
+  if (response.length > 320) {
+    response = response.slice(0, 320)
+  }
+  // Block: response claims job exists when no jobs available
+  if (nearbyJobs.length === 0 && /\d+\s*mi(les?|)\s*(away|from)|\d+\s*minutes/i.test(response)) {
+    response = lang === "es" ? "nada ahorita cerca de ti, te aviso cuando salga algo" : "nothing close right now, will hit you up when something opens"
+  }
+  brain.response = response
 
   // ── PERSIST (with state validation) ──────────────────────────
   const VALID_STATES = new Set(["DISCOVERY","GETTING_NAME","ASKING_TRUCK","PHOTO_PENDING","APPROVAL_PENDING","ACTIVE","OTW_PENDING","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_CUSTOMER_CONFIRM","CLOSED"])
