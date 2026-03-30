@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { smsDispatchService } from '@/lib/services/sms-dispatch.service'
+import { smsDispatchService } from '@/lib/services/brain.service'
 import crypto from 'crypto'
 
 function validateTwilioSignature(url: string, params: Record<string, string>, signature: string): boolean {
