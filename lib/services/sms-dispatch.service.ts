@@ -406,6 +406,22 @@ async function handleConversation(sms: {
       return responses[Math.floor(Math.random() * responses.length)]
     }
 
+    // CANCEL while active
+    if (/^cancel$/i.test(trimmed)) {
+      const jobNum = generateJobNumber(activeOrderId)
+      if (conv?.reservation_id) await releaseReservation(conv.reservation_id)
+      if (activeLoad) {
+        await supabase.from('load_requests').update({
+          status: 'rejected',
+          rejected_reason: 'Cancelled via SMS',
+          reviewed_at: new Date().toISOString()
+        }).eq('id', activeLoad.id)
+      }
+      await resetConversation(phone)
+      try { await sendAdminAlert(`${jobNum} cancelled — ${firstName}`) } catch {}
+      return `${jobNum} cancelled. Text when you got another load`
+    }
+
     if (/addy|address|where|location|directions/i.test(trimmed)) {
       const { data: addrOrder } = await supabase
         .from('dispatch_orders')
