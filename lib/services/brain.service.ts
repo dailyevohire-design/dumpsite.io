@@ -435,6 +435,13 @@ async function handleDelivery(
 // ─────────────────────────────────────────────────────────────
 async function handlePayment(phone: string, body: string, conv: any, lang: "en"|"es"): Promise<string> {
   const lower = body.toLowerCase().trim()
+
+  // Escape from payment flow
+  if (/^(cancel|reset|start over|new|nvm|nevermind|skip|later)$/i.test(lower)) {
+    await resetConv(phone)
+    return lang==="es" ? "10.4 avisame cuando quieras" : "10.4 no worries. Text when you ready"
+  }
+
   if (["PAYMENT_METHOD_PENDING","AWAITING_PAYMENT_COLLECTION"].includes(conv.state)) {
     const isZ = /zelle/i.test(lower), isV = /venmo/i.test(lower)
     if (isZ || isV) {
@@ -446,11 +453,30 @@ async function handlePayment(phone: string, body: string, conv: any, lang: "en"|
     }
     return lang==="es" ? "zelle o venmo" : "how you want it, zelle or venmo"
   }
+
   if (conv.state === "PAYMENT_ACCOUNT_PENDING") {
     const method = conv.job_state || "zelle"
-    await savePaymentInfo(phone, method, body.trim())
+    const acct = body.trim()
+
+    // Validate: must look like a phone number, email, or username — not random words
+    const looksLikeAccount =
+      /\d{7,}/.test(acct) ||                          // phone number (7+ digits)
+      /@/.test(acct) ||                                // email
+      /^@?\w{3,}$/.test(acct) ||                       // username/handle
+      /^[A-Z][a-z]+ [A-Z][a-z]+/.test(acct) ||        // "First Last" name for Zelle
+      /^[a-z]+ [a-z]+$/i.test(acct)                    // name variant
+
+    if (!looksLikeAccount) {
+      // Doesn't look like account info — re-ask
+      if (method === "zelle") {
+        return lang==="es" ? "mandame el nombre y numero de tu zelle" : "send the name and number the zelle account it to"
+      }
+      return lang==="es" ? "mandame tu venmo" : "whats your venmo"
+    }
+
+    await savePaymentInfo(phone, method, acct)
     await resetConv(phone)
-    await sendAdminAlert(`PAYMENT: ${phone} — ${method} — ${body.trim()}`)
+    await sendAdminAlert(`PAYMENT: ${phone} — ${method} — ${acct}`)
     return lang==="es" ? "listo, te mandamos en rato" : "got it, we will have it sent shortly"
   }
   return "10.4"
@@ -470,6 +496,8 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   await logMsg(phone, body || "[photo]", "inbound", sid)
 
   const lower = body.toLowerCase().trim()
+
+  // ── COMPLIANCE ───────────────────────────────────────────────
   if (lower === "stop" || lower === "unsubscribe") {
     await createAdminSupabase().from("driver_profiles").update({ sms_opted_out: true }).eq("phone", phone)
     return ""
@@ -477,6 +505,13 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   if (lower === "start") {
     await createAdminSupabase().from("driver_profiles").update({ sms_opted_out: false }).eq("phone", phone)
     return "Yea you back on"
+  }
+
+  // ── UNIVERSAL RESET — escape from ANY stuck state ───────────
+  if (/^(reset|start over|new|restart|menu|help|cancel)$/i.test(lower)) {
+    await resetConv(phone)
+    await logMsg(phone, "Conversation reset", "outbound", `reset_${sid}`)
+    return "10.4 starting fresh. You got dirt today"
   }
 
   const [profile, conv, history] = await Promise.all([getProfile(phone), getConv(phone), getHistory(phone)])
@@ -508,6 +543,14 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
 
   // ── ADMIN COMMANDS ───────────────────────────────────────────
   if (phone === ADMIN_PHONE) {
+    // Admin status check
+    if (/^(status|stats|dashboard)$/i.test(lower)) {
+      const sb = createAdminSupabase()
+      const { count: activeCount } = await sb.from("conversations").select("id", { count: "exact", head: true }).in("state", ["ACTIVE","OTW_PENDING","PHOTO_PENDING","APPROVAL_PENDING"])
+      const { count: pendingPay } = await sb.from("driver_payments").select("id", { count: "exact", head: true }).eq("status", "pending")
+      return `Active: ${activeCount || 0} drivers\nPending payments: ${pendingPay || 0}\nDashboard: ${APP_URL}/admin/live`
+    }
+
     const m = body.match(/^(approve|reject)[- ]?(ds-?[a-z0-9]+)/i)
     if (m) {
       const approved = m[1].toLowerCase() === "approve"
@@ -634,9 +677,21 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     nearbyJobs, activeJob, lang, isKnownDriver, savedPayment,
   )
 
-  // ── PERSIST ──────────────────────────────────────────────────
+  // ── PERSIST (with state validation) ──────────────────────────
+  const VALID_STATES = new Set(["DISCOVERY","GETTING_NAME","ASKING_TRUCK","PHOTO_PENDING","APPROVAL_PENDING","ACTIVE","OTW_PENDING","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_CUSTOMER_CONFIRM","CLOSED"])
   const toSave: Record<string,any> = { ...enriched }
-  if (brain.updates.state) toSave.state = brain.updates.state
+  // Only accept state from brain if it's valid AND the transition makes sense
+  if (brain.updates.state && VALID_STATES.has(brain.updates.state)) {
+    const newState = brain.updates.state
+    // Prevent brain from jumping to payment/active states without proper preconditions
+    const dangerousStates = ["PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING", "ACTIVE", "OTW_PENDING", "AWAITING_CUSTOMER_CONFIRM"]
+    if (dangerousStates.includes(newState) && !toSave.active_order_id && !conv?.active_order_id) {
+      // No active job — brain hallucinated a dangerous state, ignore it
+      console.warn(`[Brain] blocked state transition to ${newState} — no active job`)
+    } else {
+      toSave.state = newState
+    }
+  }
   if (brain.updates.extracted_city) toSave.extracted_city = brain.updates.extracted_city
   if (brain.updates.extracted_yards) toSave.extracted_yards = brain.updates.extracted_yards
   if (brain.updates.extracted_truck_type) toSave.extracted_truck_type = brain.updates.extracted_truck_type
