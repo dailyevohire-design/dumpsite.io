@@ -164,9 +164,10 @@ function parseLoads(text: string): number | null {
   const t = text.trim()
   if (/^(done|finished|all done|wrapped|that.?s it|terminamos)$/i.test(t)) return -1
   if (/^\d+$/.test(t)) return Math.min(parseInt(t), 50)
-  const m = t.match(/(\d+)\s*(down|loads?|total|done|delivered|drops?|cargas?)/i) ||
-            t.match(/(done|delivered|dropped|terminé)\s*(\d+)/i)
-  if (m) return Math.min(parseInt(m[1] || m[2]), 50)
+  const m1 = t.match(/(\d+)\s*(down|loads?|total|done|delivered|drops?|cargas?)/i)
+  if (m1) return Math.min(parseInt(m1[1]), 50)
+  const m2 = t.match(/(done|delivered|dropped|terminé|tiramos)\s*(\d+)/i)
+  if (m2) return Math.min(parseInt(m2[2]), 50)
   return null
 }
 function isOTW(text: string): boolean {
@@ -366,6 +367,13 @@ async function callBrain(
     raw = raw.replace(/^```json\s*/i,"").replace(/```\s*$/i,"").trim()
     const parsed = JSON.parse(raw) as BrainOutput
     if (parsed.negotiatedPayCents && parsed.negotiatedPayCents > ceilingCents) parsed.negotiatedPayCents = ceilingCents
+    // Hard ceiling enforcement: if response mentions a dollar amount above ceiling, override
+    const ceilDollars = Math.round(ceilingCents / 100)
+    const mentionedAmount = parsed.response?.match(/\$(\d+)/)?.[1]
+    if (mentionedAmount && parseInt(mentionedAmount) > ceilDollars) {
+      parsed.response = lang === "es" ? "eso es lo mejor que tengo" : "that is the best I got"
+      parsed.action = "NONE"
+    }
     if (parsed.response?.length > 300) parsed.response = parsed.response.slice(0, 300)
     return parsed
   } catch (err) {
@@ -459,12 +467,13 @@ async function handlePayment(phone: string, body: string, conv: any, lang: "en"|
     const acct = body.trim()
 
     // Validate: must look like a phone number, email, or username — not random words
+    const digitsOnly = acct.replace(/\D/g, "")
     const looksLikeAccount =
-      /\d{7,}/.test(acct) ||                          // phone number (7+ digits)
-      /@/.test(acct) ||                                // email
-      /^@?\w{3,}$/.test(acct) ||                       // username/handle
+      digitsOnly.length >= 7 ||                        // phone number (7+ digits, ignoring hyphens/spaces)
+      /@/.test(acct) ||                                // email or @handle
       /^[A-Z][a-z]+ [A-Z][a-z]+/.test(acct) ||        // "First Last" name for Zelle
-      /^[a-z]+ [a-z]+$/i.test(acct)                    // name variant
+      /^[a-z]+ [a-z]+$/i.test(acct) ||                 // name variant (two words)
+      (acct.startsWith("@") && acct.length >= 4)       // Venmo @handle
 
     if (!looksLikeAccount) {
       // Doesn't look like account info — re-ask
