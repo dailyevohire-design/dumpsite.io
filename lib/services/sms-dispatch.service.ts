@@ -193,6 +193,28 @@ async function buildJobListMessage(jobs: JobMatch[], phone: string): Promise<str
 }
 
 // ─── MAIN HANDLER ─────────────────────────────────────────────────────────────
+
+async function getConversationHistory(phone: string): Promise<{ role: "user" | "assistant"; content: string }[]> {
+  try {
+    const supabase = createAdminSupabase();
+    const { data } = await supabase
+      .from("sms_logs")
+      .select("body, direction, created_at")
+      .eq("phone", phone)
+      .order("created_at", { ascending: false })
+      .limit(12);
+    if (!data) return [];
+    return data
+      .reverse()
+      .map((m: any) => ({
+        role: m.direction === "inbound" ? "user" as const : "assistant" as const,
+        content: m.body,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 async function handleConversation(sms: {
   from: string
   body: string
@@ -336,7 +358,7 @@ async function handleConversation(sms: {
     await supabase.rpc('create_sms_driver', { p_phone: phone, p_first_name: firstName, p_last_name: lastName })
     await saveConversation(phone, { state: 'DISCOVERY' })
     await logEvent('CONTACT_CREATED', { phone, firstName })
-    return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName })
+    return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName, conversationHistory: await getConversationHistory(phone) })
   }
 
   if (profile.sms_opted_out) return ''
@@ -437,6 +459,25 @@ async function handleConversation(sms: {
 
   // ── EXTRACT INTENT — only runs when NO active job ──────────────────────
   const inActiveFlow = ['JOBS_SHOWN', 'PHOTO_PENDING', 'APPROVAL_PENDING', 'ACTIVE', 'ASKING_TRUCK'].includes(convState)
+  
+  // ── AFFIRMATIVE DETECTION (must run before extraction) ──────────────────
+  const affirmativeWords = /^(yes|yeah|yep|yessir|yessirr|si|fasho|bet|sure|yup|hell yeah|fs|for sure|absolutely|correct|right|true|ok|okay|affirmative|copy|10-4|10.4)$/i;
+  const isAffirmative = affirmativeWords.test(trimmed.toLowerCase().trim());
+  
+  if (isAffirmative && (!conv.state || conv.state === "DISCOVERY")) {
+    const history = await getConversationHistory(phone);
+    const newState = "ASKING_TRUCK";
+    await saveConversation(phone, { ...conv, state: newState });
+    const reply = await generateJesseResponse({
+      state: newState,
+      driverMessage: trimmed,
+      driverName: profile?.first_name,
+      conversationHistory: history,
+    });
+    return reply;
+  }
+  // ── END AFFIRMATIVE DETECTION ─────────────────────────────────────────────
+
   const extracted = await extractIntent(trimmed, hasMedia, {
     activeJobId: activeLoad?.dispatch_order_id,
     lastKnownCity: inActiveFlow ? conv?.extracted_city : undefined,
@@ -684,7 +725,7 @@ async function handleConversation(sms: {
     })
 
     await logEvent('SITE_RESERVATION_CREATED', { phone, jobNum, city, reservationId }, selectedJobId)
-    const jesseMsg = await generateJesseResponse({ state: 'PHOTO_PENDING', driverMessage: body, driverName: firstName, activeJobCity: city, payDollars, yards: order.yards_needed })
+    const jesseMsg = await generateJesseResponse({ state: 'PHOTO_PENDING', driverMessage: body, driverName: firstName, activeJobCity: city, payDollars, yards: order.yards_needed, conversationHistory: await getConversationHistory(phone) })
     return `${jobNum} — ${city} — ${order.yards_needed} yds at $${payDollars}/load\n${jesseMsg}`
   }
 
@@ -707,7 +748,7 @@ async function handleConversation(sms: {
 
     if (!truckType) {
       await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
-      return await generateJesseResponse({ state: 'ASKING_TRUCK', driverMessage: body, driverName: firstName, yards: yards || undefined })
+      return await generateJesseResponse({ state: 'ASKING_TRUCK', driverMessage: body, driverName: firstName, yards: yards || undefined, conversationHistory: await getConversationHistory(phone) })
     }
 
     const jobs = await findNearbyJobs(city, truckType)
@@ -734,9 +775,9 @@ async function handleConversation(sms: {
   // No city extracted — ask for it
   await saveConversation(phone, { ...updates, state: 'DISCOVERY' })
   if (extracted.intent === 'NEED_DUMPSITE' || extracted.intent === 'HAUL_OFF' || lower.includes('load') || lower.includes('dirt') || lower.includes('dump')) {
-    return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName })
+    return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName, conversationHistory: await getConversationHistory(phone) })
   }
-  return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName })
+  return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName, conversationHistory: await getConversationHistory(phone) })
 }
 
 // ─── EXPORTS ──────────────────────────────────────────────────────────────────
