@@ -1,29 +1,77 @@
 import { createAdminSupabase } from '../supabase'
 
-function distanceMiles(lat1: number, lng1: number, lat2: number, lng2: number): number {
+const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY || ''
+
+// ─────────────────────────────────────────────────────────────
+// DISTANCE
+// ─────────────────────────────────────────────────────────────
+function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 3958.8
   const dLat = (lat2 - lat1) * Math.PI / 180
   const dLng = (lng2 - lng1) * Math.PI / 180
-  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLng/2)**2
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
-async function geocodeCity(city: string): Promise<{ lat: number; lng: number } | null> {
+// ─────────────────────────────────────────────────────────────
+// GEOCODING — Google Maps (address-level) with Nominatim fallback (city-level)
+// ─────────────────────────────────────────────────────────────
+interface GeoResult {
+  lat: number
+  lng: number
+  precision: 'address' | 'city' | 'unknown'
+  formattedAddress?: string
+}
+
+async function geocode(input: string): Promise<GeoResult | null> {
+  // Try Google Maps first (address-level precision)
+  if (GOOGLE_MAPS_KEY) {
+    try {
+      const q = encodeURIComponent(input.includes('TX') || input.includes('Texas') ? input : `${input}, Texas, USA`)
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${q}&key=${GOOGLE_MAPS_KEY}&components=country:US`
+      const r = await fetch(url)
+      const data = await r.json()
+      if (data.status === 'OK' && data.results?.[0]) {
+        const loc = data.results[0].geometry.location
+        const types = data.results[0].types || []
+        // Determine precision — street_address or route = address-level, locality = city-level
+        const isAddressLevel = types.some((t: string) =>
+          ['street_address', 'route', 'premise', 'subpremise', 'intersection'].includes(t)
+        )
+        return {
+          lat: loc.lat,
+          lng: loc.lng,
+          precision: isAddressLevel ? 'address' : 'city',
+          formattedAddress: data.results[0].formatted_address,
+        }
+      }
+    } catch (err) {
+      console.error('[geocode] Google Maps error:', err)
+    }
+  }
+
+  // Fallback: Nominatim (city-level only)
   try {
     await new Promise(r => setTimeout(r, 300))
-    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(city + ' Texas USA')}&limit=1`
+    const q = encodeURIComponent(input.includes('Texas') || input.includes('TX') ? input : `${input} Texas USA`)
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`
     const r = await fetch(url, { headers: { 'User-Agent': 'DumpSite.io/1.0' } })
     const data = await r.json()
-    if (data?.[0]) return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) }
-    // Try without Texas
-    const url2 = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(city + ' USA')}&limit=1`
-    const r2 = await fetch(url2, { headers: { 'User-Agent': 'DumpSite.io/1.0' } })
-    const data2 = await r2.json()
-    if (data2?.[0]) return { lat: parseFloat(data2[0].lat), lng: parseFloat(data2[0].lon) }
+    if (data?.[0]) {
+      return {
+        lat: parseFloat(data[0].lat),
+        lng: parseFloat(data[0].lon),
+        precision: 'city',
+      }
+    }
   } catch {}
+
   return null
 }
 
+// ─────────────────────────────────────────────────────────────
+// TYPES
+// ─────────────────────────────────────────────────────────────
 export interface JobMatch {
   id: string
   cityName: string
@@ -31,12 +79,17 @@ export interface JobMatch {
   driverPayCents: number
   truckTypeNeeded: string
   distanceMiles: number
+  drivingMinutes: number
   clientPhone: string
   clientName: string
 }
 
+// ─────────────────────────────────────────────────────────────
+// FIND NEARBY JOBS
+// Now accepts full address OR city name. Geocodes to actual coordinates.
+// ─────────────────────────────────────────────────────────────
 export async function findNearbyJobs(
-  driverCity: string,
+  driverLocation: string,
   truckType?: string | null,
   maxMiles = 15
 ): Promise<JobMatch[]> {
@@ -45,7 +98,7 @@ export async function findNearbyJobs(
   // Get open orders with coordinates
   const { data: orders, error } = await supabase
     .from('dispatch_orders')
-    .select('id, city_id, yards_needed, driver_pay_cents, truck_type_needed, status, delivery_latitude, delivery_longitude, client_phone, client_name, cities(name)')
+    .select('id, city_id, yards_needed, driver_pay_cents, truck_type_needed, status, delivery_latitude, delivery_longitude, client_phone, client_name, client_address, cities(name)')
     .in('status', ['dispatching', 'active', 'pending'])
     .not('delivery_latitude', 'is', null)
     .order('created_at', { ascending: false })
@@ -64,32 +117,42 @@ export async function findNearbyJobs(
   const available = orders.filter(o => !reservedIds.has(o.id))
   if (!available.length) return []
 
-  // Geocode driver city
-  const driverCoords = await geocodeCity(driverCity)
+  // Geocode driver location (address or city)
+  const driverGeo = await geocode(driverLocation)
 
-  let withDistance: (typeof available[0] & { distanceMiles: number })[]
+  let withDistance: (typeof available[0] & { distanceMiles: number; drivingMinutes: number })[]
 
-  if (driverCoords) {
+  if (driverGeo) {
     withDistance = available
       .filter(o => o.delivery_latitude && o.delivery_longitude)
-      .map(o => ({
-        ...o,
-        distanceMiles: distanceMiles(driverCoords.lat, driverCoords.lng, o.delivery_latitude!, o.delivery_longitude!)
-      }))
+      .map(o => {
+        const dist = haversine(driverGeo.lat, driverGeo.lng, o.delivery_latitude!, o.delivery_longitude!)
+        return {
+          ...o,
+          distanceMiles: dist,
+          // Rough driving estimate: 1.3x haversine distance, 35mph average in DFW
+          drivingMinutes: Math.round((dist * 1.3 / 35) * 60),
+        }
+      })
       .sort((a, b) => a.distanceMiles - b.distanceMiles)
 
+    // SELF-MATCH FILTER: if geocoding was city-level, minimum distance is 1 mile
+    // If address-level, minimum is 0.3 miles (300 yards — different property)
+    const minDistance = driverGeo.precision === 'address' ? 0.3 : 1.0
+    const filtered = withDistance.filter(o => o.distanceMiles >= minDistance)
+
     // Try 15 miles, expand to 30 if nothing found
-    let nearby = withDistance.filter(o => o.distanceMiles <= maxMiles)
-    if (!nearby.length) nearby = withDistance.filter(o => o.distanceMiles <= 30)
-    if (!nearby.length) nearby = withDistance.slice(0, 3)
+    let nearby = filtered.filter(o => o.distanceMiles <= maxMiles)
+    if (!nearby.length) nearby = filtered.filter(o => o.distanceMiles <= 30)
+    if (!nearby.length) nearby = filtered.slice(0, 3)
     withDistance = nearby
   } else {
-    // Geocoding failed — mark distance as -1 (unknown) instead of 0 to prevent self-match
-    withDistance = available.slice(0, 5).map(o => ({ ...o, distanceMiles: -1 }))
+    // Geocoding completely failed — return nothing rather than fake 0-mile results
+    console.warn('[routing] geocoding failed for:', driverLocation)
+    return []
   }
 
-  // Filter by truck type family — tandem/tri/quad are all dump trucks
-  // end/side/belly are all 18-wheeler family
+  // Filter by truck type family
   if (truckType) {
     const dumpFamily = ['tandem_axle', 'tri_axle', 'quad_axle', 'super_dump']
     const eighteenFamily = ['end_dump', 'belly_dump', 'side_dump', '18_wheeler', 'transfer']
@@ -98,7 +161,6 @@ export async function findNearbyJobs(
       if (!o.truck_type_needed) return true
       if (o.truck_type_needed === truckType) return true
       if (driverFamily && driverFamily.includes(o.truck_type_needed)) return true
-      // if order needs tandem and driver has tri/quad — compatible
       if (dumpFamily.includes(o.truck_type_needed) && dumpFamily.includes(truckType)) return true
       if (eighteenFamily.includes(o.truck_type_needed) && eighteenFamily.includes(truckType)) return true
       return false
@@ -108,23 +170,27 @@ export async function findNearbyJobs(
 
   return withDistance.slice(0, 5).map(o => ({
     id: o.id,
-    cityName: (o.cities as any)?.name || driverCity,
+    cityName: (o.cities as any)?.name || driverLocation,
     yardsNeeded: o.yards_needed,
     driverPayCents: o.driver_pay_cents || 4500,
     truckTypeNeeded: o.truck_type_needed || 'tandem_axle',
     distanceMiles: Math.round(o.distanceMiles * 10) / 10,
+    drivingMinutes: o.drivingMinutes,
     clientPhone: o.client_phone || '',
-    clientName: o.client_name || 'Customer'
+    clientName: o.client_name || 'Customer',
   }))
 }
 
+// ─────────────────────────────────────────────────────────────
+// ATOMIC CLAIM
+// ─────────────────────────────────────────────────────────────
 export async function atomicClaimJob(
   orderId: string,
   driverPhone: string,
   driverUserId: string
 ): Promise<string | null> {
   const supabase = createAdminSupabase()
-  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString() // 30 min TTL
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString()
 
   const { data, error } = await supabase.rpc('claim_dispatch_order', {
     p_order_id: orderId,
@@ -141,3 +207,6 @@ export async function releaseReservation(reservationId: string): Promise<void> {
   const supabase = createAdminSupabase()
   await supabase.from('site_reservations').update({ status: 'released', updated_at: new Date().toISOString() }).eq('id', reservationId)
 }
+
+// Export geocode for use in brain service
+export { geocode }

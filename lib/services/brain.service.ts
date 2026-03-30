@@ -351,7 +351,7 @@ async function callBrain(
     `Photo on file: ${conv?.photo_public_url ? "YES" : "no"}  Photo THIS msg: ${hasPhoto ? "YES" : "no"}`,
     `Active job: ${activeJob ? (activeJob.cities as any)?.name + " $" + Math.round(activeJob.driver_pay_cents/100) : "none"}`,
     nearbyJobs.length > 0
-      ? `Sites:\n${nearbyJobs.slice(0,3).map((j,i) => `  ${i+1}. ${j.cityName} ${j.distanceMiles > 0 ? j.distanceMiles.toFixed(1) + "mi" : "nearby"} ${j.yardsNeeded}yds ${j.truckTypeNeeded?.replace(/_/g," ")||"any"} jobId:${j.id}`).join("\n")}`
+      ? `Sites:\n${nearbyJobs.slice(0,3).map((j,i) => `  ${i+1}. ${j.cityName} ${j.distanceMiles > 0 ? j.distanceMiles.toFixed(1) + "mi ~" + (j as any).drivingMinutes + "min" : "nearby"} ${j.yardsNeeded}yds ${j.truckTypeNeeded?.replace(/_/g," ")||"any"} jobId:${j.id}`).join("\n")}`
       : "Sites: none right now",
     "━━━ END ━━━",
     `Driver sent: ${body || (hasPhoto ? "[photo]" : "[empty]")}`,
@@ -665,23 +665,27 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   const yardMatch = body.match(/(\d+)\s*(yds?|yards?)/i)
   const inlineYards = yardMatch ? parseInt(yardMatch[1]) : null
 
+  // Detect if driver sent a full address (has numbers + street words)
+  const looksLikeAddress = /\d{2,}\s+\w+\s+(st|ave|blvd|dr|rd|ln|way|ct|pl|pkwy|hwy|fm|loop)\b/i.test(body) ||
+    /\d{2,}\s+[nsew]\.?\s+\w+/i.test(body)
+  const driverLoadingAddress = looksLikeAddress ? body.trim() : null
+
   const enriched = {
     ...conv,
     extracted_truck_type: conv.extracted_truck_type || inlineTruck || null,
     extracted_yards: conv.extracted_yards || inlineYards || null,
     photo_public_url: storedPhotoUrl || null,
+    // Store full address when detected — piggyback on extracted_material field
+    extracted_material: driverLoadingAddress || conv.extracted_material || null,
   }
-  if (inlineTruck || inlineYards || storedPhotoUrl) await saveConv(phone, enriched)
+  if (inlineTruck || inlineYards || storedPhotoUrl || driverLoadingAddress) await saveConv(phone, enriched)
 
-  // ── NEARBY JOBS (with self-match filter) ──────────────────────
+  // ── NEARBY JOBS — use full address when available, fall back to city ──
   let nearbyJobs: JobMatch[] = []
-  if (enriched.extracted_city) {
+  const routingInput = enriched.extracted_material || enriched.extracted_city
+  if (routingInput) {
     try {
-      const raw = await findNearbyJobs(enriched.extracted_city, enriched.extracted_truck_type || undefined)
-      // Filter out self-matches: jobs < 0.5 miles are likely the driver's own address
-      nearbyJobs = raw.filter(j => j.distanceMiles >= 0.5)
-      // If all filtered out, include jobs > 0 (skip exact 0.0 only)
-      if (!nearbyJobs.length) nearbyJobs = raw.filter(j => j.distanceMiles > 0)
+      nearbyJobs = await findNearbyJobs(routingInput, enriched.extracted_truck_type || undefined)
     } catch {}
   }
 
