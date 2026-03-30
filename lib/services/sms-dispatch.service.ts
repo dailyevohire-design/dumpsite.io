@@ -418,7 +418,22 @@ async function handleConversation(sms: {
       if (payErr) console.error('[payment]', payErr.message)
       try { await sendAdminAlert(`${jobNum} complete — ${firstName} ${loads} load${loads > 1 ? 's' : ''} $${totalDollars}`) } catch {}
       await logEvent('DELIVERY_VERIFIED', { phone, jobNum, loads, totalDollars }, activeOrderId)
-      await resetConversation(phone)
+      // Notify customer of completed delivery
+      const orderForNotify = await supabase
+        .from('dispatch_orders')
+        .select('client_phone, client_name')
+        .eq('id', activeOrderId)
+        .maybeSingle()
+      if (orderForNotify.data?.client_phone) {
+        await notifyCustomerOfDelivery(
+          orderForNotify.data.client_phone,
+          loads,
+          jobNum,
+          firstName
+        )
+      }
+      // Move to payment collection instead of full reset
+      await saveConversation(phone, { state: 'AWAITING_PAYMENT_COLLECTION', active_order_id: activeOrderId })
 
       const responses = [
         `10.4 ${firstName} — ${loads} load${loads > 1 ? 's' : ''}. $${totalDollars} coming your way`,
@@ -460,6 +475,13 @@ async function handleConversation(sms: {
   // ── EXTRACT INTENT — only runs when NO active job ──────────────────────
   const inActiveFlow = ['JOBS_SHOWN', 'PHOTO_PENDING', 'APPROVAL_PENDING', 'ACTIVE', 'ASKING_TRUCK'].includes(convState)
   
+
+  // ── PAYMENT STATES ─────────────────────────────────────────
+  if (['PAYMENT_METHOD_PENDING', 'PAYMENT_ACCOUNT_PENDING', 'AWAITING_PAYMENT_COLLECTION'].includes(convState)) {
+    return await handlePaymentState(phone, body, conv, profile)
+  }
+  // ── END PAYMENT STATES ─────────────────────────────────────
+
   // ── AFFIRMATIVE DETECTION (must run before extraction) ──────────────────
   const affirmativeWords = /^(yes|yeah|yep|yessir|yessirr|si|fasho|bet|sure|yup|hell yeah|fs|for sure|absolutely|correct|right|true|ok|okay|affirmative|copy|10-4|10.4)$/i;
   const isAffirmative = affirmativeWords.test(trimmed.toLowerCase().trim());
@@ -641,7 +663,12 @@ async function handleConversation(sms: {
       })
 
       await logEvent('APPROVAL_REQUESTED', { phone, jobNum, photoUrl: photoResult.publicUrl }, order.id)
-      return `Got it. Sending to owner for final 10-4. Sit tight`
+      return await generateJesseResponse({
+      state: 'APPROVAL_PENDING',
+      driverMessage: body,
+      driverName: firstName,
+      conversationHistory: await getConversationHistory(phone)
+    })
     }
 
     return 'Send a pic of the dirt so we can get approval'
@@ -677,10 +704,20 @@ async function handleConversation(sms: {
         await saveConversation(phone, { state: 'JOBS_SHOWN', extracted_truck_type: resolvedTruck })
         return await buildJobListMessage(jobs, phone)
       }
-      return 'What city you hauling from'
+      return await generateJesseResponse({
+      state: 'DISCOVERY',
+      driverMessage: body,
+      driverName: profile?.first_name,
+      conversationHistory: await getConversationHistory(phone)
+    })
     }
     // Still can't figure out truck type — give them clear options
-    return 'What type of truck? Reply: tandem, triaxle, quad, end dump, or belly dump'
+    return await generateJesseResponse({
+      state: 'ASKING_TRUCK',
+      driverMessage: body,
+      driverName: profile?.first_name,
+      conversationHistory: await getConversationHistory(phone)
+    })
   }
 
   // ── JOB SELECTION (driver replies 1-5) ────────────────────────────────────
@@ -779,6 +816,129 @@ async function handleConversation(sms: {
   }
   return await generateJesseResponse({ state: 'DISCOVERY', driverMessage: body, driverName: firstName, conversationHistory: await getConversationHistory(phone) })
 }
+
+
+// ── PAYMENT + DELIVERY CONFIRMATION HELPERS ──────────────────────────────
+
+async function notifyCustomerOfDelivery(
+  clientPhone: string,
+  loads: number,
+  jobNum: string,
+  driverName: string
+): Promise<void> {
+  try {
+    const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+    const digits = clientPhone.replace(/\D/g, '').replace(/^1/, '')
+    const e164 = digits.length === 10 ? `+1${digits}` : `+${digits}`
+    const msg = `Hey — just wanted to confirm ${driverName} finished the delivery. ${loads} load${loads > 1 ? 's' : ''} delivered. Everything look good on your end`
+    await twilioClient.messages.create({
+      body: msg,
+      from: (process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER)!,
+      to: e164,
+    }).catch((e: any) => console.error('[notifyCustomer]', e.message))
+  } catch (err) {
+    console.error('[notifyCustomer] failed:', err)
+  }
+}
+
+async function getDriverPaymentInfo(phone: string): Promise<{ method: string; account: string } | null> {
+  try {
+    const { data } = await createAdminSupabase()
+      .from('driver_profiles')
+      .select('payment_method')
+      .eq('phone', phone)
+      .maybeSingle()
+    // payment_method stores "zelle:name:number" or "venmo:handle"
+    if (data?.payment_method) {
+      const parts = data.payment_method.split(':')
+      return { method: parts[0], account: parts.slice(1).join(':') }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function saveDriverPaymentInfo(phone: string, method: string, account: string): Promise<void> {
+  try {
+    await createAdminSupabase()
+      .from('driver_profiles')
+      .update({ payment_method: `${method}:${account}` })
+      .eq('phone', phone)
+  } catch (err) {
+    console.error('[savePaymentInfo] failed:', err)
+  }
+}
+
+async function handlePaymentState(
+  phone: string,
+  body: string,
+  conv: any,
+  profile: any
+): Promise<string> {
+  const supabase = createAdminSupabase()
+  const trimmed = body.trim()
+  const lower = trimmed.toLowerCase()
+  const history = await getConversationHistory(phone)
+  const firstName = profile?.first_name || 'Driver'
+
+  if (conv.state === 'AWAITING_PAYMENT_COLLECTION') {
+    const savedPayment = await getDriverPaymentInfo(phone)
+    if (savedPayment) {
+      await resetConversation(phone)
+      try {
+        await sendAdminAlert(`Payment: ${firstName} — ${savedPayment.method} — ${savedPayment.account}`)
+      } catch {}
+      return `10.4 sending to your ${savedPayment.method} shortly`
+    }
+    await saveConversation(phone, { state: 'PAYMENT_METHOD_PENDING' })
+    return await generateJesseResponse({
+      state: 'PAYMENT_METHOD_PENDING',
+      driverMessage: body,
+      driverName: firstName,
+      conversationHistory: history,
+    })
+  }
+
+  if (conv.state === 'PAYMENT_METHOD_PENDING') {
+    const isZelle = /zelle/i.test(lower)
+    const isVenmo = /venmo/i.test(lower)
+    if (isZelle || isVenmo) {
+      const method = isZelle ? 'zelle' : 'venmo'
+      await saveConversation(phone, { state: 'PAYMENT_ACCOUNT_PENDING' })
+      return await generateJesseResponse({
+        state: 'PAYMENT_ACCOUNT_PENDING',
+        driverMessage: body,
+        driverName: firstName,
+        conversationHistory: history,
+      })
+    }
+    return await generateJesseResponse({
+      state: 'PAYMENT_METHOD_PENDING',
+      driverMessage: body,
+      driverName: firstName,
+      conversationHistory: history,
+    })
+  }
+
+  if (conv.state === 'PAYMENT_ACCOUNT_PENDING') {
+    const method = conv.payment_method || 'zelle'
+    await saveDriverPaymentInfo(phone, method, trimmed)
+    await resetConversation(phone)
+    try {
+      await sendAdminAlert(`Payment: ${firstName} — ${method} — ${trimmed}`)
+    } catch {}
+    return await generateJesseResponse({
+      state: 'PAYMENT_CONFIRMED',
+      driverMessage: body,
+      driverName: firstName,
+      conversationHistory: history,
+    })
+  }
+
+  return '10.4'
+}
+
 
 // ─── EXPORTS ──────────────────────────────────────────────────────────────────
 export interface DispatchStatus { dispatchId: string; jobNumber: string; status: string; driversNotified: number; driversAccepted: number; cityName: string; createdAt: string }

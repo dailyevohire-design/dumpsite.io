@@ -107,8 +107,15 @@ CHECKING IN ON KNOWN DRIVER:
 "Where you hauling tomorrow"
 "do you need dumpsite today"
 
-PAYMENT QUESTION:
-"send the name and number the zelle account it to"
+PAYMENT COLLECTION — after delivery confirmed:
+Ask method first: "how you want it, zelle or venmo"
+After zelle: "send the name and number the zelle account it to"
+After venmo: "whats your venmo"
+After account info received: "got it, sending shortly"
+PAYMENT_METHOD_PENDING: "how you want it, zelle or venmo"
+PAYMENT_ACCOUNT_PENDING (zelle): "send the name and number the zelle account it to"
+PAYMENT_ACCOUNT_PENDING (venmo): "whats your venmo handle"
+PAYMENT_CONFIRMED: "got it, we will have it sent shortly"
 
 SPANISH — full Spanish responses when driver texts in Spanish:
 "dame un foto de Tierra"
@@ -139,6 +146,7 @@ export interface JesseContext {
   drivingMinutes?: number;
   loadsNeeded?: number;
   conversationHistory?: { role: "user" | "assistant"; content: string }[];
+  paymentMethod?: string;
 }
 
 export async function generateJesseResponse(context: JesseContext): Promise<string> {
@@ -205,14 +213,19 @@ function buildContextBlock(context: JesseContext): string {
 }
 
 function fallbackResponse(state: string): string {
-  const map: Record<string, string> = {
-    DISCOVERY:        "you got dirt today",
-    ASKING_TRUCK:     "end dump or tandem",
-    PHOTO_PENDING:    "send pic of dirt",
-    APPROVAL_PENDING: "Got it, waiting on final 10-4",
-    ACTIVE:           "10.4",
-    GETTING_NAME:     "Whats your name",
-    JOBS_SHOWN:       "which one works for you",
+  const map: Record<string, string[]> = {
+    DISCOVERY:                   ["you got dirt today", "hauling today", "you running loads today"],
+    ASKING_TRUCK:                ["end dump or tandem", "what truck you in", "end dump?"],
+    PHOTO_PENDING:               ["send pic of dirt", "send me a pic first", "need pic of the dirt"],
+    APPROVAL_PENDING:            ["Got it, sitting tight", "10.4 waiting on approval", "ok let me verify"],
+    ACTIVE:                      ["10.4", "perfect", "10.4 thank you"],
+    GETTING_NAME:                ["Whats your name", "whats your name bro"],
+    JOBS_SHOWN:                  ["which one works", "which works for you"],
+    PAYMENT_METHOD_PENDING:      ["how you want it, zelle or venmo"],
+    PAYMENT_ACCOUNT_PENDING:     ["send the name and number the zelle account it to"],
+    PAYMENT_CONFIRMED:           ["got it, sending shortly", "10.4 sending now"],
+    AWAITING_PAYMENT_COLLECTION: ["how you want it, zelle or venmo"],
   };
-  return map[state] ?? "10.4";
+  const options = map[state] ?? ["10.4"];
+  return options[Math.floor(Math.random() * options.length)];
 }
