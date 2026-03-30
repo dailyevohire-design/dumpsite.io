@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DumpSite Dispatch Control</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #080b0f; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; font-size: 13px; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0d1117; } ::-webkit-scrollbar-thumb { background: #1e2530; border-radius: 2px; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+  .fade { animation: fadeIn 0.3s ease; }
+</style>
+</head>
+<body>
+<div id="header" style="background:#0d1117;border-bottom:1px solid #1e2530;padding:0 20px;height:52px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+  <div style="display:flex;align-items:center;gap:16px;">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <div id="dot" style="width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 10px #22c55e88;animation:pulse 2s infinite;"></div>
+      <span style="color:#f59e0b;font-weight:700;font-size:15px;letter-spacing:2px;">DUMPSITE</span>
+      <span style="color:#374151;font-size:15px;">|</span>
+      <span style="color:#6b7280;font-size:11px;letter-spacing:1px;">DISPATCH CONTROL</span>
+    </div>
+    <span id="err" style="color:#ef4444;font-size:11px;"></span>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <span id="clock" style="color:#374151;font-size:11px;"></span>
+    <button onclick="toggleLive()" id="liveBtn" style="background:#052e16;border:1px solid #166534;color:#22c55e;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px;font-family:inherit;letter-spacing:1px;">LIVE</button>
+    <button onclick="load()" style="background:#1c1c1c;border:1px solid #374151;color:#9ca3af;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-family:inherit;">Refresh</button>
+  </div>
+</div>
+<div id="kpi" style="display:grid;grid-template-columns:repeat(7,1fr);border-bottom:1px solid #1e2530;flex-shrink:0;background:#0d1117;"></div>
+<div style="display:grid;grid-template-columns:300px 1fr 280px;flex:1;overflow:hidden;">
+  <div style="border-right:1px solid #1e2530;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="padding:10px 16px;border-bottom:1px solid #1e2530;background:#0d1117;"><span id="driverHeader" style="color:#6b7280;font-size:10px;letter-spacing:1.5px;">ACTIVE DRIVERS (0)</span></div>
+    <div id="drivers" style="overflow-y:auto;flex:1;"></div>
+  </div>
+  <div style="display:flex;flex-direction:column;overflow:hidden;">
+    <div style="padding:10px 16px;border-bottom:1px solid #1e2530;background:#0d1117;display:flex;justify-content:space-between;align-items:center;">
+      <span id="feedTitle" style="color:#6b7280;font-size:10px;letter-spacing:1.5px;">LIVE SMS FEED</span>
+      <button id="clearFilter" onclick="setSelected(null)" style="display:none;background:transparent;border:1px solid #374151;color:#6b7280;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;font-family:inherit;">x ALL</button>
+    </div>
+    <div id="feed" style="overflow-y:auto;flex:1;padding:12px 16px;display:flex;flex-direction:column;gap:8px;"></div>
+  </div>
+  <div style="border-left:1px solid #1e2530;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="border-bottom:1px solid #1e2530;"><div style="padding:10px 16px;border-bottom:1px solid #111827;background:#0d1117;"><span style="color:#6b7280;font-size:10px;letter-spacing:1.5px;">PIPELINE</span></div><div id="pipeline" style="padding:8px 0;"></div></div>
+    <div style="border-bottom:1px solid #1e2530;"><div style="padding:10px 16px;border-bottom:1px solid #111827;background:#0d1117;"><span style="color:#6b7280;font-size:10px;letter-spacing:1.5px;">ORDERS (24H)</span></div><div id="orders" style="padding:8px 16px;display:flex;flex-direction:column;gap:6px;"></div></div>
+    <div style="padding:10px 16px;border-bottom:1px solid #111827;background:#0d1117;"><span style="color:#6b7280;font-size:10px;letter-spacing:1.5px;">PAYMENTS (24H)</span></div>
+    <div id="payKpi" style="padding:8px 16px;display:flex;gap:12px;border-bottom:1px solid #111827;"></div>
+    <div id="payments" style="overflow-y:auto;flex:1;"></div>
+  </div>
+</div>
+<script>
+const S={DISCOVERY:{c:'#4f46e5',l:'DISCOVERY',d:'#818cf8'},ASKING_TRUCK:{c:'#7c3aed',l:'TRUCK',d:'#a78bfa'},PHOTO_PENDING:{c:'#d97706',l:'PHOTO',d:'#fbbf24'},APPROVAL_PENDING:{c:'#dc2626',l:'APPROVAL',d:'#f87171'},ACTIVE:{c:'#059669',l:'ACTIVE',d:'#34d399'},OTW_PENDING:{c:'#0891b2',l:'OTW',d:'#22d3ee'},PAYMENT_METHOD_PENDING:{c:'#ea580c',l:'PAYMENT',d:'#fb923c'},PAYMENT_ACCOUNT_PENDING:{c:'#ea580c',l:'PAY ACCT',d:'#fb923c'},AWAITING_CUSTOMER_CONFIRM:{c:'#9333ea',l:'CONFIRM',d:'#c084fc'},CLOSED:{c:'#374151',l:'CLOSED',d:'#6b7280'},GETTING_NAME:{c:'#1d4ed8',l:'ONBOARD',d:'#60a5fa'}}
+const sOf=s=>S[s]||{c:'#374151',l:s,d:'#6b7280'}
+const fmt=p=>{const d=p.replace(/\D/g,'');return d.length===10?`(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`:p}
+const ago=ts=>{const s=Math.floor((Date.now()-new Date(ts).getTime())/1000);if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';return Math.floor(s/3600)+'h'}
+const tk=t=>t?t.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()):null
+let live=true,sel=null,data=null,iv=null
+function toggleLive(){live=!live;const b=document.getElementById('liveBtn'),d=document.getElementById('dot');b.textContent=live?'LIVE':'PAUSED';b.style.background=live?'#052e16':'#1c1c1c';b.style.borderColor=live?'#166534':'#374151';b.style.color=live?'#22c55e':'#6b7280';d.style.background=live?'#22c55e':'#4b5563';d.style.boxShadow=live?'0 0 10px #22c55e88':'none';d.style.animation=live?'pulse 2s infinite':'none';if(live)startIv();else{clearInterval(iv);iv=null}}
+function startIv(){if(iv)clearInterval(iv);iv=setInterval(load,6000)}
+function setSelected(p){sel=p;document.getElementById('feedTitle').textContent=p?'CONVERSATION +1'+p:'LIVE SMS FEED';document.getElementById('clearFilter').style.display=p?'block':'none';if(data)renderFeed(data.liveMessages)}
+function renderKPI(d){const c=d.activeConversations||[],s=d.orderStats,p=d.payments;const items=[{l:'DRIVERS',v:c.filter(x=>!['CLOSED','DISCOVERY'].includes(x.state)).length,c:'#22c55e',s:c.length+' total'},{l:'DISPATCHING',v:s?.statusCounts?.dispatching||0,c:'#4f46e5',s:'orders'},{l:'ACTIVE',v:s?.statusCounts?.active||0,c:'#f59e0b',s:'jobs'},{l:'COMPLETED',v:s?.statusCounts?.completed||0,c:'#06b6d4',s:'today'},{l:'YARDS',v:(s?.totalYards||0).toLocaleString(),c:'#a855f7',s:'moving'},{l:'PENDING',v:'$'+(p?.pending||0).toFixed(0),c:'#f97316',s:'to send'},{l:'PAID',v:'$'+(p?.paid||0).toFixed(0),c:'#22c55e',s:'today'}];document.getElementById('kpi').innerHTML=items.map((k,i)=>`<div style="padding:12px 16px;border-right:${i<6?'1px solid #1e2530':'none'};"><div style="color:#374151;font-size:9px;letter-spacing:1.5px;margin-bottom:4px;">${k.l}</div><div style="color:${k.c};font-size:22px;font-weight:700;line-height:1;">${k.v}</div><div style="color:#374151;font-size:10px;margin-top:3px;">${k.s}</div></div>`).join('')}
+function renderDrivers(cs,ms){document.getElementById('driverHeader').textContent='ACTIVE DRIVERS ('+cs.length+')';const bp={};for(const m of ms){if(!bp[m.phone])bp[m.phone]=[];bp[m.phone].push(m)};document.getElementById('drivers').innerHTML=cs.length===0?'<div style="color:#374151;padding:20px;text-align:center;font-size:12px;">No active conversations</div>':cs.map(c=>{const st=sOf(c.state),last=bp[c.phone]?.slice(-1)[0];return`<div class="driver-card" data-phone="${c.phone}" onclick="setSelected('${c.phone}')" style="padding:12px 16px;border-bottom:1px solid #111827;cursor:pointer;border-left:3px solid ${sel===c.phone?st.c:'transparent'};background:${sel===c.phone?'#0f172a':'transparent'};"><div style="display:flex;justify-content:space-between;align-items:center;"><span style="color:#e2e8f0;font-size:12px;">${fmt(c.phone)}</span><span style="font-size:9px;padding:2px 6px;border-radius:3px;background:${st.c}22;color:${st.d};border:1px solid ${st.c}44;">${st.l}</span></div><div style="display:flex;gap:8px;margin-top:5px;">${c.extracted_city?`<span style="color:#6b7280;font-size:10px;">${c.extracted_city}</span>`:''} ${c.extracted_truck_type?`<span style="color:#6b7280;font-size:10px;">${tk(c.extracted_truck_type)}</span>`:''} ${c.extracted_yards?`<span style="color:#6b7280;font-size:10px;">${c.extracted_yards}yds</span>`:''}</div>${last?`<div style="margin-top:5px;color:#4b5563;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${last.direction==='outbound'?'> ':'< '}${last.body}</div>`:''}<div style="color:#1f2937;font-size:9px;margin-top:3px;">${ago(c.updated_at)}</div></div>`}).join('')}
+function renderFeed(ms){const f=sel?ms.filter(m=>m.phone===sel):ms;const el=document.getElementById('feed');const ab=el.scrollHeight-el.clientHeight-el.scrollTop<50;el.innerHTML=f.slice(-60).map(m=>`<div class="fade" style="display:flex;flex-direction:column;align-items:${m.direction==='outbound'?'flex-end':'flex-start'};"><div style="font-size:9px;color:#374151;margin-bottom:2px;display:flex;gap:6px;">${m.direction==='inbound'?`<span style="color:#4b5563;">+1${m.phone}</span>`:''}<span>${new Date(m.created_at).toLocaleTimeString()}</span>${m.direction==='outbound'?'<span style="color:#1d4ed8;">JESSE</span>':''}</div><div style="max-width:72%;background:${m.direction==='outbound'?'#0f2040':'#111827'};border:1px solid ${m.direction==='outbound'?'#1e3a5f':'#1f2937'};border-radius:${m.direction==='outbound'?'10px 2px 10px 10px':'2px 10px 10px 10px'};padding:7px 12px;color:${m.direction==='outbound'?'#93c5fd':'#d1d5db'};font-size:12px;line-height:1.5;word-break:break-word;">${m.body||'[photo]'}</div></div>`).join('');if(ab)el.scrollTop=el.scrollHeight}
+function renderPipeline(cs){const ct={};for(const c of cs)ct[c.state]=(ct[c.state]||0)+1;document.getElementById('pipeline').innerHTML=Object.entries(S).map(([s,cfg])=>{const n=ct[s]||0;if(!n)return'';return`<div style="display:flex;align-items:center;gap:10px;padding:5px 16px;"><div style="width:6px;height:6px;border-radius:50%;background:${cfg.d};"></div><span style="color:#6b7280;font-size:10px;flex:1;">${cfg.l}</span><span style="color:${cfg.d};font-weight:700;font-size:13px;background:${cfg.c}22;padding:1px 8px;border-radius:3px;">${n}</span></div>`}).join('')}
+function renderOrders(s){const cl={completed:'#22c55e',active:'#f59e0b',dispatching:'#4f46e5',cancelled:'#374151'};document.getElementById('orders').innerHTML=Object.entries(s?.statusCounts||{}).map(([st,n])=>`<div style="display:flex;align-items:center;gap:8px;"><span style="color:#4b5563;font-size:10px;flex:1;text-transform:capitalize;">${st}</span><div style="height:3px;width:${Math.min(n*10,100)}px;background:${cl[st]||'#4f46e5'};border-radius:2px;"></div><span style="color:#9ca3af;font-size:11px;min-width:16px;text-align:right;">${n}</span></div>`).join('')}
+function renderPay(p){document.getElementById('payKpi').innerHTML=`<div><div style="color:#374151;font-size:9px;">PENDING</div><div style="color:#f97316;font-size:18px;font-weight:700;">$${(p?.pending||0).toFixed(0)}</div></div><div style="width:1px;background:#1f2937;"></div><div><div style="color:#374151;font-size:9px;">PAID</div><div style="color:#22c55e;font-size:18px;font-weight:700;">$${(p?.paid||0).toFixed(0)}</div></div>`;document.getElementById('payments').innerHTML=(p?.records||[]).slice(0,15).map(r=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 16px;border-bottom:1px solid #0d1117;"><div><div style="color:#6b7280;font-size:10px;">${fmt(r.driver_phone)}</div><div style="color:#374151;font-size:9px;">${ago(r.created_at)}</div></div><div style="text-align:right;"><div style="color:${r.status==='paid'?'#22c55e':'#f97316'};font-size:12px;font-weight:700;">$${(r.amount_cents/100).toFixed(0)}</div><div style="font-size:9px;color:${r.status==='paid'?'#166534':'#92400e'};background:${r.status==='paid'?'#052e16':'#1c0a00'};padding:1px 5px;border-radius:2px;">${r.status}</div></div></div>`).join('')}
+async function load(){try{const r=await fetch('/api/dashboard/live',{cache:'no-store'});if(!r.ok)throw new Error(r.status);data=await r.json();document.getElementById('clock').textContent=new Date(data.timestamp).toLocaleTimeString();document.getElementById('err').textContent='';renderKPI(data);renderDrivers(data.activeConversations||[],data.liveMessages||[]);renderFeed(data.liveMessages||[]);renderPipeline(data.activeConversations||[]);renderOrders(data.orderStats);renderPay(data.payments)}catch(e){document.getElementById('err').textContent=e.message}}
+load();startIv();setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString()},1000)
+</script>
+</body>
+</html>
