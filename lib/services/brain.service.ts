@@ -416,13 +416,30 @@ function tryTemplate(
   // CLOSED — job done, payment handled. Be natural.
   // ═══════════════════════════════════════════════════
   if (state === "CLOSED") {
-    // Gratitude — "thanks", "appreciate it", etc.
-    if (/^(thanks|thank you|thx|appreciate|gracias|good looking out|bet|preciate it|thank u|ty)$/i.test(lower) || /thanks|thank you|appreciate/i.test(lower)) {
-      return { response: pick(lang==="es" ? ["de nada","a la orden","sin problema"] : ["no problem","anytime","you got it","fasho"]), updates: {}, action: "NONE" }
+    // Gratitude
+    if (/thanks|thank you|thx|appreciate|gracias|good looking out|preciate|thank u|ty/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["de nada","a la orden","sin problema"] : ["no problem","anytime","you got it","for sure"]), updates: {}, action: "NONE" }
     }
-    // Driver mentions new dirt / new job for later
-    if (/tomorrow|manana|mañana|next week|later|got more|have more|another load|mas tierra|got dirt|have dirt|i got|need.*dump/i.test(lower)) {
-      return { response: pick(lang==="es" ? ["dale mandame foto de la tierra cuando estes ahi"] : ["no problem, send me a pic of the dirt when you get there","10.4 just hit me up when you ready"]), updates: {}, action: "NONE" }
+    // Payment questions — when will I get paid, how long, etc.
+    if (/pay|paid|payment|money|cash|dinero|pago|cuando.*pagan|when.*get.*paid|how long|direct deposit|deposit/i.test(lower)) {
+      return { response: pick(lang==="es"
+        ? ["los pagos se procesan al final del dia, hacemos en batch con los demas drivers","se manda hoy en la noche, procesamos todos los pagos juntos"]
+        : ["payments go out end of day, we process them in batches with the other drivers","we send them out tonight, all payments go out together at end of day","should hit your account by tonight, we do all the payments in one batch"]),
+        updates: {}, action: "NONE" }
+    }
+    // Casual greeting — driver coming back
+    if (/^(hey|hello|hi|yo|sup|whats up|what up|que onda|hola|wassup|wsg|howdy)$/i.test(lower) || /^(hey|hi|hello|yo)[\s,!.]*$/i.test(lower)) {
+      return { response: pick(lang==="es"
+        ? ["que onda, tienes mas tierra","como estas, andas con mas material hoy"]
+        : ["whats up, you got more dirt","hey how you doing, you got more material to move","hey whats going on, you sitting on more dirt"]),
+        updates: { state: "DISCOVERY" }, action: "NONE" }
+    }
+    // Driver mentions new dirt / new job
+    if (/tomorrow|manana|mañana|next week|later|got more|have more|another load|mas tierra|got dirt|have dirt|i got|need.*dump|more dirt|load ready|ready to|haul/i.test(lower)) {
+      return { response: pick(lang==="es"
+        ? ["dale mandame foto de la tierra cuando estes ahi","10.4 avisame cuando estes listo"]
+        : ["no problem send me a pic of the dirt when you get there","10.4 just hit me up when you ready","for sure just text me when you got it ready"]),
+        updates: {}, action: "NONE" }
     }
     // Anything else in CLOSED — let Sonnet handle naturally
     return null
@@ -573,18 +590,21 @@ function tryTemplate(
   const qualificationMissing = !hasYards || !hasTruck || !hasTruckCount || !hasCity
 
   if (inQualification && qualificationMissing) {
-    // First message — greet naturally then ask yards
+    // First message — greet naturally, use name if known
     const isFirstMessage = state === "DISCOVERY" && !hasYards && !hasTruck && !hasCity
     if (isFirstMessage) {
+      const name = firstName && firstName !== "Driver" ? firstName : ""
       const greetings = lang === "es"
-        ? ["que onda, tienes tierra hoy","como estas, tienes tierra para mover","que tal, andas con tierra hoy"]
+        ? [
+            name ? `que onda ${name}, tienes tierra hoy` : "que onda, tienes tierra hoy",
+            name ? `como estas ${name}, tienes tierra para mover` : "como estas, tienes tierra para mover",
+          ]
         : [
-            "how are you, you got dirt today",
-            "hey how you doing, you got dirt to move",
-            "hey whats up, you got material to haul",
-            "hey whats going on, you got dirt today",
-            "how you doing, you sitting on some dirt",
-            "hey how are you, you got a load today",
+            name ? `how are you ${name}, you got dirt today` : "how are you, you got dirt today",
+            name ? `hey ${name} whats up, you got dirt to move` : "hey whats up, you got dirt to move",
+            name ? `hey ${name} how you doing, you got material to haul` : "hey how you doing, you got material to haul",
+            name ? `${name} whats going on, you got dirt today` : "hey whats going on, you got dirt today",
+            name ? `hey ${name} how are you, you got a load today` : "hey how are you, you got a load today",
           ]
       return { response: pick(greetings), updates: {}, action: "NONE" }
     }
@@ -683,7 +703,7 @@ async function callBrain(
     } else if (st === "ACTIVE" || st === "OTW_PENDING") {
       instruction = "Driver has an active job. Respond naturally. If they report load count, acknowledge. If they ask something, answer it."
     } else if (st === "CLOSED") {
-      instruction = "Job is DONE. Payment HANDLED. DO NOT ask about trucks, yards, addresses, or dirt. DO NOT say 'text when on way'. The delivery is FINISHED. Just chat naturally like a friend. If driver says thanks, say 'no problem' or 'anytime'. If they mention new dirt for later/tomorrow, say 'no problem just hit me up when ready' or 'send me a pic of the dirt when you get there'. Keep it super short and casual. If driver wants to start a completely new job RIGHT NOW, set state to DISCOVERY."
+      instruction = "Job is DONE. Payment HANDLED. DO NOT ask about trucks, yards, addresses, or dirt. DO NOT say 'text when on way'. The delivery is FINISHED. Chat naturally like a real person. Keep it short. If driver asks about payment timing: 'payments go out end of day, we process them in batches with the other drivers'. If driver asks when money hits: 'should hit your account by tonight'. If driver says hey/hello again wanting new work: 'whats up you got more dirt' and set state to DISCOVERY. If driver mentions future dirt: 'no problem just hit me up when ready'. Remember this is the SAME driver who just finished — you know them, be casual."
     } else if (missing.length > 0) {
       const nextNeeded = missing[0]
       const instructions: Record<string,string> = {
