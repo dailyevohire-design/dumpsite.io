@@ -30,7 +30,7 @@ export interface IncomingSMS {
 
 interface BrainOutput {
   response: string
-  action: "NONE"|"CLAIM_JOB"|"SEND_ADDRESS"|"COMPLETE_JOB"|"CANCEL_JOB"|"ESCALATE"|"COLLECT_PAYMENT"|"NEGOTIATE"|"RESEND_ADDRESS"
+  action: "NONE"|"CLAIM_JOB"|"SEND_ADDRESS"|"SEND_FOR_APPROVAL"|"COMPLETE_JOB"|"CANCEL_JOB"|"ESCALATE"|"COLLECT_PAYMENT"|"NEGOTIATE"|"RESEND_ADDRESS"
   updates: {
     state?: string
     extracted_city?: string
@@ -48,51 +48,45 @@ interface BrainOutput {
 // ─────────────────────────────────────────────────────────────
 // JESSE SYSTEM PROMPT
 // ─────────────────────────────────────────────────────────────
-const JESSE_PROMPT = `You are Jesse from DumpSite.io. Real dirt broker in DFW Texas. You match dump truck drivers with paid dump sites. You are NOT an AI. If anyone asks, you are Jesse, a broker.
+const JESSE_PROMPT = `You are Jesse from DumpSite.io. Real dirt broker in DFW Texas. You match dump truck drivers with paid dump sites. NOT an AI. If asked you are Jesse.
 
-HOW YOU TEXT:
-- 1 sentence max. 3-8 words is ideal. Rarely 2 sentences, never more.
-- No punctuation at end of messages. No periods.
-- No bullet points, numbered lists, menus, or "Reply X" ever.
-- One question per message. Never two.
-- Never repeat a question you already asked in history.
-- Read the FULL conversation history before responding.
-- If driver says something unexpected, respond to THAT first — dont just fire the next question.
-- Match their energy. Short = short. Casual = casual.
-- Spanish speaker = respond 100% in Spanish the entire conversation.
-- Max 1 "bro" per entire conversation.
+HOW YOU TEXT — STRICT RULES:
+- 1 sentence max. 3-8 words ideal. Sometimes 2 sentences for complex stuff, NEVER more.
+- No punctuation at end. No periods.
+- No bullet points, lists, menus, or "Reply X" EVER.
+- One question per message only.
+- Never repeat a question from history.
+- Read full history before responding.
+- If driver says something unexpected, respond to that first.
+- Spanish = respond 100% Spanish entire conversation.
+- Max 1 "bro" per conversation.
 
-YOUR REAL PHRASES — use these naturally:
-Acknowledge: "10.4" / "bet" / "fasho" / "copy" / "yes sir" / "got it" / "perfect"
-Buying time: "give me a min" / "let me check" / "let me verify"
+YOUR PHRASES:
+Acknowledge: "10.4" / "bet" / "fasho" / "copy" / "yes sir" / "got it"
+Time: "give me a min" / "let me check" / "let me verify"
 Good dirt: "beautiful" / "looks good" / "that works"
-Bad dirt: "Fuck" then "yea no go on that dirt"
-Late: "my bad just saw this" / "sorry I missed this"
-Empathy: "yea bro that shit gonna suck" / "no worries man" / "10.4"
+Bad dirt: just "Fuck" then "yea no go on that dirt"
+OTW prompt: "text me when on the way" (NOT "lmk" NOT "let me know")
+Late: "my bad just saw this"
 
-DIRT PHOTO EVALUATION:
-Clean fill (sandy/loamy/reddish-brown/caliche/little grass): "beautiful" or "looks good"
-Bad (clay/rocks/debris/trash/concrete): "Fuck" then "yea no go on that dirt"
-Unclear: "is dirt clean"
+WHEN DRIVER SENDS PHOTO (state=PHOTO_PENDING):
+- Evaluate the dirt in the photo
+- Clean fill (sandy/loamy/reddish-brown/caliche/some grass): respond "looks good give me a min" and set action to SEND_FOR_APPROVAL
+- Bad dirt (pure clay/rocks/debris/trash/concrete): respond "Fuck" then on next line "yea no go on that dirt"
+- Unclear: "is dirt clean"
+- ALWAYS set action to SEND_FOR_APPROVAL if dirt looks acceptable
 
-NEGOTIATION:
-Start at floor from context. Never reveal ceiling.
-"I can do $[floor] a load"
-Pushback → bump $5: "tell you what I can do $[floor+5]"
-At ceiling → hard stop: "that is the best I got" — NEVER go higher no matter what they say.
-Driver names number above ceiling → "that is the best I can do on that one"
+NEGOTIATION (driver pushes on price):
+Start at floor. Pushback = +$5. At ceiling = "that is the best I got" — NEVER exceed.
 
-JOBS: Show city + distance only. No addresses. No job codes. No menus.
-"I got [City] [X] miles from you — think that works"
+JOBS: "[City] [X] miles, [yards] available — $[pay]/load — think that works"
+Never show addresses. Never show job codes.
 
-PAYMENT:
-"how you want it, zelle or venmo"
-Zelle → "send the name and number the zelle account it to"
-Venmo → "whats your venmo"  
-After received → "got it, we will have it sent shortly"
+OFF-TOPIC (driver asks random stuff, says hello again, corrects you, vents):
+Respond naturally like a real person. Short. Then if appropriate, steer back to business.
 
-OUTPUT: valid JSON only, no markdown, no explanation
-{"response":"text to send","action":"NONE|CLAIM_JOB|SEND_ADDRESS|COMPLETE_JOB|CANCEL_JOB|COLLECT_PAYMENT|NEGOTIATE|RESEND_ADDRESS","updates":{"state":"string or null","extracted_city":"string or null","extracted_yards":0,"extracted_truck_type":"string or null","extracted_truck_count":0,"pending_approval_order_id":"string or null","negotiated_pay_cents":0},"claimJobId":"string or null","negotiatedPayCents":0,"confidence":0.95}`
+OUTPUT: JSON only
+{"response":"text","action":"NONE|CLAIM_JOB|SEND_ADDRESS|SEND_FOR_APPROVAL|COMPLETE_JOB|CANCEL_JOB|COLLECT_PAYMENT|NEGOTIATE|RESEND_ADDRESS","updates":{"state":"string or null","extracted_city":null,"extracted_yards":0,"extracted_truck_type":null,"extracted_truck_count":0,"pending_approval_order_id":null,"negotiated_pay_cents":0},"claimJobId":null,"negotiatedPayCents":0,"confidence":0.95}`
 
 // ─────────────────────────────────────────────────────────────
 // UTILS
@@ -342,13 +336,70 @@ function tryTemplate(
   const hasCity = !!conv?.extracted_city && conv.extracted_city !== "__PIN__"
   const hasPhotoStored = !!conv?.photo_public_url
 
-  // ── YES/AFFIRMATIVE after opening — advance to first missing piece ──
-  const isYes = /^(yes|yeah|yep|yea|yessir|yessirr|bet|fasho|si|fs|sure|absolutely|for sure|copy|10-4|ok|okay|yup|hell yeah|of course|definitely|correct|right|affirmative|dale|simon|claro)$/i.test(lower)
+  if (lower === "stop" || lower === "unsubscribe") {
+    return { response: "", updates: {}, action: "STOP" }
+  }
+  if (lower === "start") {
+    return { response: pick(["Yea you back on","You good now"]), updates: {}, action: "START" }
+  }
 
-  if (isYes && (state === "DISCOVERY" || state === "GETTING_NAME")) {
-    // Figure out what to ask next
+  if (/\b(on my way|otw|heading there|headed there|leaving now|en camino|voy para alla|saliendo|on the way|im on my way|i.?m otw|bout to leave|pulling out|headed to site|ya voy|voy pa ya)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(lang==="es" ? ["10.4 avisame cuando llegues","dale avisame cuando estes ahi"] : ["10.4 let me know when you pull up","10.4"]), updates: { state: "OTW_PENDING" }, action: "NONE" }
+  }
+
+  if (/\b(resend|send again|lost.*address|what was the address|address again|direccion de nuevo|manda la direccion|whats the addy again|donde era|send it again)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: "__RESEND_ADDRESS__", updates: {}, action: "RESEND_ADDRESS" }
+  }
+
+  if (/^(done|finished|all done|wrapped up|that.?s it|that.?s all|terminamos|termin[eé]|listo ya|ya terminamos)$/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(lang==="es" ? ["cuantas cargas tiraste","cuantas cargas en total"] : ["how many loads total","how many loads you drop"]), updates: {}, action: "NONE" }
+  }
+
+  const loadMatch = lower.match(/^(\d{1,3})\s*(loads?|down|total|done|delivered|drops?|cargas?)?$/) 
+                 || lower.match(/(done|delivered|dropped|tiramos)\s*(\d{1,3})/i)
+  if (loadMatch && activeJob && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    const loads = parseInt(loadMatch[1] || loadMatch[2])
+    if (loads > 0 && loads <= 100) {
+      return { response: "__DELIVERY__:" + loads, updates: { state: "AWAITING_CUSTOMER_CONFIRM" }, action: "COMPLETE_JOB" }
+    }
+  }
+
+  if (state === "PAYMENT_METHOD_PENDING") {
+    if (/zelle/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["mandame el nombre y numero de tu zelle"] : ["send the name and number the zelle account it to"]), updates: { state: "PAYMENT_ACCOUNT_PENDING", job_state: "zelle" }, action: "NONE" }
+    }
+    if (/venmo/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["mandame tu venmo"] : ["whats your venmo"]), updates: { state: "PAYMENT_ACCOUNT_PENDING", job_state: "venmo" }, action: "NONE" }
+    }
+    if (/check|cheque/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["mandame tu direccion para el cheque"] : ["send me your address for the check"]), updates: { state: "PAYMENT_ACCOUNT_PENDING", job_state: "check" }, action: "NONE" }
+    }
+    return { response: pick(lang==="es" ? ["como quieres que te paguemos, zelle o venmo"] : ["how you want it, zelle or venmo"]), updates: {}, action: "NONE" }
+  }
+
+  if (state === "PAYMENT_ACCOUNT_PENDING") {
+    const looksLikeAccount = /\d{7,}/.test(body) || /@/.test(body) || /^@?\w{3,}$/.test(body.trim()) || /^[A-Z][a-z]+ [A-Z][a-z]+/.test(body.trim()) || /^[a-z]+\s+[a-z]+$/i.test(body.trim()) || /^[a-z]+\s+\d{3}/.test(body.trim().toLowerCase())
+    if (looksLikeAccount) {
+      return { response: pick(lang==="es" ? ["listo, te mandamos en rato"] : ["got it, we will have it sent shortly"]), updates: { state: "CLOSED" }, action: "COLLECT_PAYMENT" }
+    }
+    const method = conv?.job_state || "zelle"
+    if (method === "venmo") return { response: lang==="es" ? "mandame tu venmo" : "whats your venmo", updates: {}, action: "NONE" }
+    return { response: lang==="es" ? "mandame el nombre y numero de tu zelle" : "send the name and number the zelle account it to", updates: {}, action: "NONE" }
+  }
+
+  if (state === "APPROVAL_PENDING") {
+    return { response: pick(lang==="es" ? ["todavia esperando confirmacion, dame un min","dejame verificar"] : ["still waiting on them, give me a min","let me check on that"]), updates: {}, action: "NONE" }
+  }
+
+  const isYes = /^(yes|yeah|yep|yea|yessir|yessirr|bet|fasho|si|fs|sure|absolutely|for sure|copy|10-4|ok|okay|yup|hell yeah|of course|definitely|correct|right|affirmative|dale|simon|claro|lets go|lets do it|down|im down|send it|works for me|that works|sounds good)$/i.test(lower)
+
+  if (isYes && state === "JOB_PRESENTED") {
+    return { response: pick(lang==="es" ? ["mandame una foto de la tierra","dame una foto de la tierra"] : ["send me a pic of the dirt","send me a picture of the material"]), updates: { state: "PHOTO_PENDING" }, action: "NONE" }
+  }
+
+  if (isYes && (state === "DISCOVERY" || state === "GETTING_NAME" || state === "ASKING_TRUCK" || state === "ASKING_TRUCK_COUNT" || state === "ASKING_ADDRESS")) {
     if (!hasYards) {
-      return { response: pick(lang==="es" ? ["cuantas yardas tienes","cuantos yds tienes"] : ["how many yds you sitting on","how many yards","how many yds you got"]), updates: {}, action: "NONE" }
+      return { response: pick(lang==="es" ? ["cuantas yardas hay disponibles","cuantas yardas tienen"] : ["how many yards are available","how many yards you got available"]), updates: {}, action: "NONE" }
     }
     if (!hasTruck) {
       return { response: pick(lang==="es" ? ["que tipo de camion tienes","que clase de camion traes"] : ["what kind of truck are you hauling in","what kind of truck you running"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
@@ -357,24 +408,19 @@ function tryTemplate(
       return { response: pick(lang==="es" ? ["cuantas camionetas tienes corriendo","cuantos camiones traes"] : ["how many trucks you got running","how many trucks you running"]), updates: { state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
     }
     if (!hasCity) {
-      return { response: pick(lang==="es" ? ["de donde cargan","cual es la direccion de donde cargan"] : ["where you guys coming from","whats the addy your loading from so I can see what I got closest"]), updates: {}, action: "NONE" }
+      return { response: pick(lang==="es" ? ["cual es la direccion de donde van a cargar, para ver cual de mis sitios les queda mas cerca"] : ["whats the address your coming from so I can put into my system and see which site is closest","whats addy your coming from so I can see which of my sites is closest"]), updates: { state: "ASKING_ADDRESS" }, action: "NONE" }
     }
-    return null // Complex case — let Sonnet handle
+    return null
   }
 
-  // ── YARDS GIVEN (just a number in discovery/early state) ──
   const yardMatch = lower.match(/^(\d+)\s*(yds?|yards?|yardas?)?\s*$/)
-  if (yardMatch && !activeJob && (state === "DISCOVERY" || !hasYards)) {
+  if (yardMatch && !activeJob && !hasYards) {
     const yards = parseInt(yardMatch[1])
     if (yards > 0 && yards < 50000) {
-      // Ask truck next
-      const resp = pick(lang==="es" ? ["que tipo de camion tienes","que clase de camion traes"] : ["what kind of truck are you hauling in","what kind of truck you running"])
-      return { response: resp, updates: { extracted_yards: yards, state: "ASKING_TRUCK" }, action: "NONE" }
+      return { response: pick(lang==="es" ? ["que tipo de camion tienes","que clase de camion traes"] : ["what kind of truck are you hauling in","what kind of truck you running"]), updates: { extracted_yards: yards, state: "ASKING_TRUCK" }, action: "NONE" }
     }
   }
 
-  // ── TRUCK TYPE GIVEN ──
-  const truckMap: Record<string,string> = {}
   const truckPatterns: [RegExp, string][] = [
     [/tandem|tandum|tan\s*dem/i, "tandem_axle"],
     [/tri.?ax|triax/i, "tri_axle"],
@@ -385,79 +431,57 @@ function tryTemplate(
     [/volteo|camion de volteo/i, "end_dump"],
   ]
   for (const [rx, val] of truckPatterns) {
-    if (rx.test(lower)) {
-      // Ask truck count next
-      const resp = pick(lang==="es" ? ["cuantas camionetas tienes corriendo","cuantos camiones traes"] : ["how many trucks you got running","how many trucks you running"])
-      return { response: resp, updates: { extracted_truck_type: val, state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
+    if (rx.test(lower) && (state === "ASKING_TRUCK" || state === "DISCOVERY" || !hasTruck)) {
+      return { response: pick(lang==="es" ? ["cuantas camionetas tienes corriendo","cuantos camiones traes"] : ["how many trucks you got running","how many trucks you running"]), updates: { extracted_truck_type: val, state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
     }
   }
 
-  // ── TRUCK COUNT GIVEN ──
-  const countMatch = lower.match(/^(\d{1,2})\s*(trucks?|camion|rigs?)?$/) || lower.match(/^(just me|solo|one|uno|two|dos)$/i)
-  if (countMatch && state === "ASKING_TRUCK_COUNT") {
+  const isCount = /^(\d{1,2})\s*(trucks?|camion(es)?|rigs?)?$/i.test(lower) || /^(just me|solo|one|uno|two|dos|three|tres)$/i.test(lower)
+  if (isCount && state === "ASKING_TRUCK_COUNT") {
     let count = 1
-    const numStr = countMatch[1]
-    if (/^\d+$/.test(numStr)) count = parseInt(numStr)
-    else if (/two|dos/i.test(numStr)) count = 2
-    // Ask address next
-    const resp = pick(lang==="es" 
-      ? ["de donde cargan","cual es la direccion de donde van a cargar"] 
-      : ["where you guys coming from","whats the addy your loading from so I can see what I got closest","whats address your coming from so I can put in my system and see what I have closest"])
-    return { response: resp, updates: { extracted_truck_count: count }, action: "NONE" }
+    if (/^\d/.test(lower)) count = parseInt(lower)
+    else if (/two|dos/i.test(lower)) count = 2
+    else if (/three|tres/i.test(lower)) count = 3
+    
+    return { response: pick(lang==="es" 
+      ? ["cual es la direccion de donde van a cargar, para ver cual de mis sitios les queda mas cerca"]
+      : ["whats the address your coming from so I can put into my system and see which site is closest","whats addy your coming from so I can see which of my sites is closest"]), 
+      updates: { extracted_truck_count: count, state: "ASKING_ADDRESS" }, action: "NONE" }
   }
 
-  // ── OTW DETECTION ──
-  if (/\b(on my way|otw|heading there|headed there|leaving now|en camino|voy para alla|saliendo|on the way|im on my way|i.?m otw|bout to leave|pulling out|headed to site|ya voy|voy pa ya)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
-    return { response: pick(lang==="es" ? ["10.4 avisame cuando llegues","dale avisame cuando estes ahi"] : ["10.4 let me know when you pull up","10.4"]), updates: { state: "OTW_PENDING" }, action: "NONE" }
-  }
-
-  // ── ADDRESS RESEND ──
-  if (/\b(resend|send again|lost.*address|what was the address|address again|direccion de nuevo|manda la direccion|whats the addy again|donde era|send it again)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
-    return { response: "__RESEND_ADDRESS__", updates: {}, action: "RESEND_ADDRESS" }
-  }
-
-  // ── STOP ──
-  if (lower === "stop" || lower === "unsubscribe") {
-    return { response: "", updates: {}, action: "NONE" }
-  }
-
-  // ── START ──
-  if (lower === "start") {
-    return { response: pick(["Yea you back on","You good now"]), updates: {}, action: "NONE" }
-  }
-
-  // ── "DONE" / "FINISHED" without a number ──
-  if (/^(done|finished|all done|wrapped up|that.?s it|that.?s all|terminamos|termin[eé]|listo ya|ya terminamos)$/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
-    return { response: pick(lang==="es" ? ["cuantas cargas tiraste","cuantas cargas en total"] : ["how many loads total","how many loads you drop"]), updates: {}, action: "NONE" }
-  }
-
-  // ── PAYMENT METHOD ──
-  if (state === "PAYMENT_METHOD_PENDING") {
-    if (/zelle/i.test(lower)) {
-      return { response: pick(lang==="es" ? ["mandame el nombre y numero de tu zelle"] : ["send the name and number the zelle account it to"]), updates: { state: "PAYMENT_ACCOUNT_PENDING", job_state: "zelle" }, action: "NONE" }
+  const looksLikeAddress = /\d+\s+\w+.*(st|ave|blvd|dr|rd|ln|ct|way|pkwy|hwy|street|avenue|drive|road|lane|expy|expressway)/i.test(body) || /\d+\s+\w+\s+\w+/.test(body)
+  
+  if (looksLikeAddress && (state === "ASKING_ADDRESS" || (!hasCity && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED"))) {
+    const cityNames = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale"]
+    let extractedCity = null as string | null
+    for (const c of cityNames) {
+      if (body.toLowerCase().includes(c.toLowerCase())) { extractedCity = c; break }
     }
-    if (/venmo/i.test(lower)) {
-      return { response: pick(lang==="es" ? ["mandame tu venmo"] : ["whats your venmo"]), updates: { state: "PAYMENT_ACCOUNT_PENDING", job_state: "venmo" }, action: "NONE" }
+    
+    if (extractedCity && nearbyJobs.length > 0) {
+      const job = nearbyJobs[0]
+      const payDollars = Math.round(job.driverPayCents / 100)
+      const resp = lang === "es"
+        ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas de ti, ${job.yardsNeeded} yardas — $${payDollars}/carga — te sirve`
+        : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles from you, ${job.yardsNeeded} yards available — $${payDollars}/load — think that works`
+      return { response: resp, updates: { extracted_city: extractedCity, state: "JOB_PRESENTED", pending_approval_order_id: job.id }, action: "NONE" }
     }
-    return { response: pick(lang==="es" ? ["como quieres que te paguemos, zelle o venmo"] : ["how you want it, zelle or venmo"]), updates: {}, action: "NONE" }
+    
+    if (extractedCity && nearbyJobs.length === 0) {
+      return { response: pick(lang==="es" ? ["no tengo nada cerca de ahi ahorita, dejame ver que puedo conseguir"] : ["nothing near there right now, let me see what I can find"]), updates: { extracted_city: extractedCity }, action: "NONE" }
+    }
+    
+    return null
   }
 
-  // ── PAYMENT ACCOUNT ──
-  if (state === "PAYMENT_ACCOUNT_PENDING") {
-    // Validate it looks like real account info
-    const looksLikeAccount = /\d{7,}/.test(body) || /@/.test(body) || /^@?\w{3,}$/.test(body) || /^[A-Z][a-z]+ [A-Z][a-z]+/.test(body) || /^[a-z]+ [a-z]+$/i.test(body)
-    if (looksLikeAccount) {
-      return { response: pick(lang==="es" ? ["listo, te mandamos en rato"] : ["got it, we will have it sent shortly"]), updates: { state: "CLOSED" }, action: "COLLECT_PAYMENT" }
-    }
-    // Not account info — re-ask
-    const method = conv?.job_state || "zelle"
-    if (method === "venmo") {
-      return { response: pick(lang==="es" ? ["mandame tu venmo"] : ["whats your venmo"]), updates: {}, action: "NONE" }
-    }
-    return { response: pick(lang==="es" ? ["mandame el nombre y numero de tu zelle"] : ["send the name and number the zelle account it to"]), updates: {}, action: "NONE" }
+  if (hasPhoto && state === "PHOTO_PENDING") {
+    return null
   }
 
-  // ── Everything else → let Sonnet handle it ──
+  if (hasPhoto) {
+    return null
+  }
+
   return null
 }
 
@@ -539,7 +563,7 @@ async function callBrain(
   let raw = ""
   try {
     const resp = /* caught */ await anthropic.messages.create({
-      model: "claude-sonnet-4-6", max_tokens: 200, system: JESSE_PROMPT, messages,
+      model: "claude-sonnet-4-6", max_tokens: 250, system: JESSE_PROMPT, messages,
     })
     raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""
     raw = raw.replace(/^```json\s*/i,"").replace(/```\s*$/i,"").trim()
@@ -877,33 +901,53 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   if (tpl !== null) {
     const toSaveTpl: Record<string,any> = { ...enriched, ...tpl.updates }
     
+    // Handle STOP
+    if (tpl.action === "STOP") {
+      const sb = createAdminSupabase()
+      try { await sb.from("driver_profiles").update({ sms_opted_out: true }).eq("phone", phone) } catch {}
+      return ""
+    }
+    
+    // Handle START
+    if (tpl.action === "START") {
+      const sb = createAdminSupabase()
+      try { await sb.from("driver_profiles").update({ sms_opted_out: false }).eq("phone", phone) } catch {}
+      await logMsg(phone, tpl.response, "outbound", `tpl_${sid}`)
+      return tpl.response
+    }
+    
     // Handle address resend
-    if (tpl.response === "__RESEND_ADDRESS__" && activeJob?.client_address) {
+    if (tpl.action === "RESEND_ADDRESS" && activeJob?.client_address) {
       await saveConv(phone, toSaveTpl)
       await logMsg(phone, activeJob.client_address, "outbound", `tpl_${sid}`)
       return activeJob.client_address
     }
     
-    // Handle STOP
-    if (tpl.response === "" && (lower === "stop" || lower === "unsubscribe")) {
-      const sb = createAdminSupabase()
-      await sb.from("driver_profiles").update({ sms_opted_out: true }).eq("phone", phone)
-      return ""
-    }
-    
-    // Handle START
-    if (lower === "start") {
-      const sb = createAdminSupabase()
-      await sb.from("driver_profiles").update({ sms_opted_out: false }).eq("phone", phone)
-      await logMsg(phone, tpl.response, "outbound", `tpl_${sid}`)
-      return tpl.response
+    // Handle delivery completion
+    if (tpl.action === "COMPLETE_JOB" && tpl.response.startsWith("__DELIVERY__:")) {
+      const loads = parseInt(tpl.response.split(":")[1]) || 1
+      if (activeJob) {
+        const reply = await handleDelivery(phone, conv, profile, activeJob, loads, lang)
+        await logMsg(phone, reply, "outbound", `del_${sid}`)
+        return reply
+      }
     }
     
     // Handle payment collection
     if (tpl.action === "COLLECT_PAYMENT") {
-      const method = enriched.job_state || "zelle"
+      const method = enriched.job_state || conv?.job_state || "zelle"
       await savePaymentInfo(phone, method, body.trim())
       await sendSMS(ADMIN_PHONE, `PAYMENT: ${phone} — ${method} — ${body.trim()}${enriched.pending_pay_dollars ? " — $"+enriched.pending_pay_dollars : ""}`)
+    }
+    
+    // Handle job presentation — claim the job
+    if (tpl.updates.state === "JOB_PRESENTED" && tpl.updates.pending_approval_order_id) {
+      try {
+        const claimed = await atomicClaimJob(tpl.updates.pending_approval_order_id, phone, profile?.user_id || null)
+        if (claimed) {
+          toSaveTpl.reservation_id = (claimed as any).reservationId || null
+        }
+      } catch {}
     }
     
     await saveConv(phone, toSaveTpl)
@@ -967,6 +1011,54 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   if (hasPhoto && storedPhotoUrl) toSave.photo_public_url = storedPhotoUrl
 
   // ── ACTIONS ──────────────────────────────────────────────────
+  
+  // Handle photo approval — brain approved the dirt, send to customer
+  if (brain.action === "SEND_FOR_APPROVAL" || (hasPhoto && toSave.state === "APPROVAL_PENDING")) {
+    const orderId = toSave.pending_approval_order_id || conv.pending_approval_order_id
+    if (orderId) {
+      if (photoUrl) {
+        try {
+          const stored = await downloadAndStorePhoto(photoUrl, phone, orderId)
+          if (stored) toSave.photo_public_url = stored.publicUrl
+        } catch (e) { console.error("[photo store]", e) }
+      }
+      
+      const sb = createAdminSupabase()
+      const { data: order } = await sb.from("dispatch_orders")
+        .select("id, client_phone, client_name, yards_needed, driver_pay_cents")
+        .eq("id", orderId).maybeSingle()
+      
+      if (order?.client_phone) {
+        const driverName = profile ? `${profile.first_name} ${profile.last_name || ""}`.trim() : phone
+        const customerPhone = order.client_phone.replace(/\D/g, "").replace(/^1/, "")
+        const approvalCode = crypto.randomBytes(4).toString("hex").toUpperCase()
+        
+        try {
+          await sendCustomerApprovalRequest(
+            customerPhone, order.client_name || "Site Owner",
+            driverName, order.id, order.yards_needed,
+            toSave.photo_public_url || photoUrl || "", approvalCode
+          )
+        } catch (e) { console.error("[customer approval]", e) }
+        
+        if ((order.yards_needed || 0) >= 500) {
+          try {
+            await sendAdminEscalation(
+              order.id, generateJobNumber(order.id), driverName, phone,
+              conv.extracted_city || "", order.yards_needed,
+              Math.round((order.driver_pay_cents || 0) / 100),
+              "Large job", approvalCode
+            )
+          } catch {}
+        }
+        
+        toSave.state = "APPROVAL_PENDING"
+        toSave.approval_sent_at = new Date().toISOString()
+        toSave.voice_call_made = false
+      }
+    }
+  }
+
   if (brain.action === "CLAIM_JOB" && brain.claimJobId) {
     try {
       const rid = await atomicClaimJob(brain.claimJobId, phone, profile.user_id)
