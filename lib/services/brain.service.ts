@@ -450,27 +450,45 @@ function tryTemplate(
   }
 
   const looksLikeAddress = /\d+\s+\w+.*(st|ave|blvd|dr|rd|ln|ct|way|pkwy|hwy|street|avenue|drive|road|lane|expy|expressway)/i.test(body) || /\d+\s+\w+\s+\w+/.test(body)
-  
-  if (looksLikeAddress && (state === "ASKING_ADDRESS" || (!hasCity && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED"))) {
-    const cityNames = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale"]
-    let extractedCity = null as string | null
-    for (const c of cityNames) {
-      if (body.toLowerCase().includes(c.toLowerCase())) { extractedCity = c; break }
+
+  // City names list for extraction
+  const cityNames = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale"]
+
+  // Check if message contains a known city name
+  let mentionedCity = null as string | null
+  for (const c of cityNames) {
+    if (body.toLowerCase().includes(c.toLowerCase())) { mentionedCity = c; break }
+  }
+
+  // Driver gave an address OR a city name while we're asking for location
+  const isLocationInput = looksLikeAddress || (mentionedCity && (state === "ASKING_ADDRESS" || state === "DISCOVERY"))
+
+  if (isLocationInput && (state === "ASKING_ADDRESS" || (!hasCity && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED"))) {
+
+    // If driver just gave a city name (no street address), ask for the actual address
+    // so we can find the CLOSEST site by distance
+    if (!looksLikeAddress && mentionedCity) {
+      // They gave a city — we need the actual loading address for accurate routing
+      return { response: pick(lang==="es"
+        ? ["cual es la direccion exacta de donde van a cargar"]
+        : ["whats the exact address your loading from so I can find the closest site","send me the loading address so I can see which site is closest"]),
+        updates: { extracted_city: mentionedCity, state: "ASKING_ADDRESS" }, action: "NONE" }
     }
-    
-    if (extractedCity && nearbyJobs.length > 0) {
+
+    // Driver gave a full address — present nearest job
+    if (nearbyJobs.length > 0) {
       const job = nearbyJobs[0]
       const payDollars = Math.round(job.driverPayCents / 100)
       const resp = lang === "es"
         ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas de ti, ${job.yardsNeeded} yardas — $${payDollars}/carga — te sirve`
         : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles from you, ${job.yardsNeeded} yards available — $${payDollars}/load — think that works`
-      return { response: resp, updates: { extracted_city: extractedCity, state: "JOB_PRESENTED", pending_approval_order_id: job.id }, action: "NONE" }
+      return { response: resp, updates: { extracted_city: mentionedCity || nearbyJobs[0].cityName, state: "JOB_PRESENTED", pending_approval_order_id: job.id }, action: "NONE" }
     }
-    
-    if (extractedCity && nearbyJobs.length === 0) {
-      return { response: pick(lang==="es" ? ["no tengo nada cerca de ahi ahorita, dejame ver que puedo conseguir"] : ["nothing near there right now, let me see what I can find"]), updates: { extracted_city: extractedCity }, action: "NONE" }
+
+    if (mentionedCity) {
+      return { response: pick(lang==="es" ? ["no tengo nada cerca de ahi ahorita, dejame ver que puedo conseguir"] : ["nothing near there right now, let me see what I can find"]), updates: { extracted_city: mentionedCity }, action: "NONE" }
     }
-    
+
     return null
   }
 
