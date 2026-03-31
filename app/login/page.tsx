@@ -30,7 +30,7 @@ function LoginForm() {
         if (role === 'admin' || role === 'superadmin') {
           router.push('/admin')
         } else {
-          router.push('/dashboard')
+          router.push('/account')
         }
       }
     } catch { setError('Something went wrong. Please try again.'); trackEvent('login_failed') }

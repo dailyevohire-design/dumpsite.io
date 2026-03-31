@@ -1,5 +1,7 @@
 'use client'
 import { useEffect, useState, useRef, useCallback } from 'react'
+import { createBrowserSupabase } from '@/lib/supabase'
+import { useRouter } from 'next/navigation'
 
 interface Conv { phone: string; state: string; extracted_city: string | null; extracted_truck_type: string | null; extracted_yards: number | null; updated_at: string; photo_public_url: string | null; pending_approval_order_id: string | null; active_order_id: string | null }
 interface SMSLog { phone: string; body: string; direction: 'inbound' | 'outbound'; created_at: string }
@@ -29,13 +31,27 @@ export default function Dashboard() {
   const [err, setErr] = useState('')
   const [live, setLive] = useState(true)
   const [selected, setSelected] = useState<string | null>(null)
+  const [authorized, setAuthorized] = useState(false)
   const feedRef = useRef<HTMLDivElement>(null)
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
+  const router = useRouter()
+
+  useEffect(() => {
+    const checkRole = async () => {
+      const supabase = createBrowserSupabase()
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) { router.replace('/login'); return }
+      const role = user.user_metadata?.role
+      if (role !== 'admin' && role !== 'superadmin') { router.replace('/account'); return }
+      setAuthorized(true)
+    }
+    checkRole()
+  }, [router])
 
   const load = useCallback(async () => {
     try { const r = await fetch('/api/dashboard/live', { cache: 'no-store' }); if (!r.ok) throw new Error(`${r.status}`); setData(await r.json()); setErr('') } catch (e: any) { setErr(e.message) }
   }, [])
-  useEffect(() => { load() }, [load])
+  useEffect(() => { if (authorized) load() }, [authorized, load])
   useEffect(() => { if (!live) { intervalRef.current && clearInterval(intervalRef.current); return }; intervalRef.current = setInterval(load, 6000); return () => { intervalRef.current && clearInterval(intervalRef.current) } }, [live, load])
   useEffect(() => { if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight }, [data?.liveMessages])
 
@@ -44,6 +60,8 @@ export default function Dashboard() {
   const stats = data?.orderStats, pay = data?.payments
   const byPhone: Record<string, SMSLog[]> = {}
   for (const m of msgs) { if (!byPhone[m.phone]) byPhone[m.phone] = []; byPhone[m.phone].push(m) }
+
+  if (!authorized) return <div style={{ background: '#080b0f', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6b7280' }}>Checking access...</div>
 
   return (
     <div style={{ background: '#080b0f', minHeight: '100vh', color: '#e2e8f0', fontFamily: '"JetBrains Mono", "Fira Code", "Courier New", monospace', fontSize: 13, display: 'flex', flexDirection: 'column', overflow: 'hidden', height: '100vh' }}>
