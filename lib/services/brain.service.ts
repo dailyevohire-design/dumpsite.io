@@ -66,7 +66,7 @@ Acknowledge: "10.4" / "bet" / "fasho" / "copy" / "yes sir" / "got it"
 Time: "give me a min" / "let me check" / "let me verify"
 Good dirt: "beautiful" / "looks good" / "that works"
 Bad dirt: just "Fuck" then "yea no go on that dirt"
-OTW prompt: "text me when on the way" (NOT "lmk" NOT "let me know")
+OTW prompt: "text me when on the way so I can have someone show you where to dump" (NOT "lmk" NOT "let me know")
 Late: "my bad just saw this"
 
 WHEN DRIVER SENDS PHOTO (state=PHOTO_PENDING):
@@ -286,7 +286,7 @@ async function sendJobLink(
   ]
   if (job.notes) lines.push(`Note: ${job.notes}`)
   if (mapUrl) lines.push(`Map: ${mapUrl}`)
-  lines.push(lang === "es" ? "avisame cuando vayas en camino" : "text me when on the way")
+  lines.push(lang === "es" ? "avisame cuando vayas en camino" : "text me when on the way so I can have someone show you where to dump")
   return lines.join("\n")
 }
 
@@ -399,7 +399,17 @@ function tryTemplate(
   }
 
   if (state === "APPROVAL_PENDING") {
-    return { response: pick(lang==="es" ? ["todavia esperando confirmacion, dame un min","dejame verificar"] : ["still waiting on them, give me a min","let me check on that"]), updates: {}, action: "NONE" }
+    return { response: pick(lang==="es" ? ["todavia esperando confirmacion, dame un min","dejame verificar, ya mero"] : ["still waiting on approval, give me a min","let me check on that for you","standby waiting on approval"]), updates: {}, action: "NONE" }
+  }
+
+  // Driver asking about timing/delivery/when
+  if (/\b(when can i|when do i|when should i|what time|cuando puedo|cuando empiezo|when.*deliver|when.*start|when.*go|when.*head|can i go|can i start|ready to go|listo para)\b/i.test(lower)) {
+    if (state === "PHOTO_PENDING") {
+      return { response: pick(lang==="es" ? ["mandame una foto de la tierra primero y ya te confirmo"] : ["send me a pic of the dirt first then I can get you going"]), updates: {}, action: "NONE" }
+    }
+    if (state === "ACTIVE" || state === "OTW_PENDING") {
+      return { response: pick(lang==="es" ? ["ya puedes ir, tienes la direccion"] : ["you good to go, you got the address"]), updates: {}, action: "NONE" }
+    }
   }
 
   // ═══════════════════════════════════════════════════
@@ -450,16 +460,28 @@ function tryTemplate(
 
   const truckPatterns: [RegExp, string][] = [
     [/tandem|tandum|tan\s*dem/i, "tandem_axle"],
-    [/tri.?ax|triax/i, "tri_axle"],
+    [/tri.?ax|triax|tri\s+axle/i, "tri_axle"],
     [/quad/i, "quad_axle"],
     [/end.?dump/i, "end_dump"],
     [/belly/i, "belly_dump"],
     [/side.?dump/i, "side_dump"],
+    [/super.?dump|super\s+dump/i, "super_dump"],
+    [/transfer/i, "transfer"],
+    [/pup/i, "pup_trailer"],
+    [/semi|18.?wheel/i, "semi"],
     [/volteo|camion de volteo/i, "end_dump"],
+    [/dump\s*truck|dump/i, "end_dump"],
   ]
   for (const [rx, val] of truckPatterns) {
     if (rx.test(lower) && (state === "ASKING_TRUCK" || state === "DISCOVERY" || !hasTruck)) {
       return { response: pick(lang==="es" ? ["cuantas camionetas tienes corriendo","cuantos camiones traes"] : ["how many trucks you got running","how many trucks you running"]), updates: { extracted_truck_type: val, state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
+    }
+  }
+  // Fallback: if state is ASKING_TRUCK and driver said something short, accept it
+  if (state === "ASKING_TRUCK" && !hasTruck) {
+    const mightBeTruck = /dump|truck|axle|trailer|rig|wheeler|camion/i.test(lower) || lower.split(/\s+/).length <= 3
+    if (mightBeTruck && lower.length > 1 && lower.length < 30) {
+      return { response: pick(lang==="es" ? ["cuantos camiones traes"] : ["how many trucks you got running"]), updates: { extracted_truck_type: lower.replace(/\s+/g, "_"), state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
     }
   }
 
@@ -1087,7 +1109,11 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     // other drivers until a real commitment is made.
     
     await saveConv(phone, toSaveTpl)
-    const validatedTpl = validateResponse(tpl.response, null, toSaveTpl.state || convState, lang)
+    const lastOutbound = history.filter(h => h.role === "assistant").slice(-1)[0]?.content || ""
+    let validatedTpl = validateResponse(tpl.response, null, toSaveTpl.state || convState, lang)
+    if (validatedTpl.toLowerCase().trim() === lastOutbound.toLowerCase().trim() && validatedTpl.length > 5) {
+      validatedTpl = "10.4"
+    }
     await logMsg(phone, validatedTpl, "outbound", `tpl_${sid}`)
     return validatedTpl
   }
