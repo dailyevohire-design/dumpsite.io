@@ -573,12 +573,20 @@ function tryTemplate(
   const qualificationMissing = !hasYards || !hasTruck || !hasTruckCount || !hasCity
 
   if (inQualification && qualificationMissing) {
-    // Something is still missing — ask for the next piece
-    // Only let Sonnet handle if this is the FIRST message (opener/greeting)
-    // After that, template controls the flow
+    // First message — greet naturally then ask yards
     const isFirstMessage = state === "DISCOVERY" && !hasYards && !hasTruck && !hasCity
     if (isFirstMessage) {
-      return null // Let Sonnet do the natural opener, but with strict instruction to ask yards
+      const greetings = lang === "es"
+        ? ["que onda, tienes tierra hoy","como estas, tienes tierra para mover","que tal, andas con tierra hoy"]
+        : [
+            "how are you, you got dirt today",
+            "hey how you doing, you got dirt to move",
+            "hey whats up, you got material to haul",
+            "hey whats going on, you got dirt today",
+            "how you doing, you sitting on some dirt",
+            "hey how are you, you got a load today",
+          ]
+      return { response: pick(greetings), updates: {}, action: "NONE" }
     }
 
     // NOT first message — template takes over, no exceptions
@@ -737,7 +745,7 @@ async function callBrain(
   } catch (err) {
     console.error("[Brain] raw:", raw?.slice(0,200), err)
     const fb: Record<string,string> = {
-      DISCOVERY: lang==="es"?pick(["que onda, tienes tierra hoy","oye andas moviendo tierra hoy"]):pick(["what up, you hauling today","yo you running loads today","what up, you got dirt today"]),
+      DISCOVERY: lang==="es"?pick(["que onda, tienes tierra hoy","como estas, tienes tierra"]):pick(["how are you, you got dirt today","hey whats up, you got material to haul","hey how you doing, you got dirt to move"]),
       ASKING_TRUCK: "end dump or tandem", PHOTO_PENDING: "send pic of dirt",
       APPROVAL_PENDING: "give me a min", ACTIVE: "10.4",
       PAYMENT_METHOD_PENDING: "how you want it, zelle or venmo",
