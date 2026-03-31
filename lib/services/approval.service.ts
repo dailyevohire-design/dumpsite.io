@@ -1,5 +1,4 @@
 import { createAdminSupabase } from '../supabase'
-import twilio from 'twilio'
 
 const ADMIN_PHONE = '7134439223'
 
@@ -7,8 +6,43 @@ function getTwilioFrom(): string {
   return process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
 }
 
-function getTwilioClient() {
-  return twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+function getTwilioAuth(): { sid: string; key: string; secret: string } {
+  const rawSid = process.env.TWILIO_ACCOUNT_SID || ''
+  const apiKey = process.env.TWILIO_API_KEY
+  const apiSecret = process.env.TWILIO_API_SECRET
+  const authToken = process.env.TWILIO_AUTH_TOKEN
+  if (apiKey && apiSecret) {
+    return { sid: rawSid, key: apiKey, secret: apiSecret }
+  }
+  return { sid: rawSid, key: rawSid, secret: authToken || '' }
+}
+
+async function twilioSend(to: string, from: string, body: string, mediaUrl?: string): Promise<{ success: boolean; sid?: string; error?: string }> {
+  const { sid, key, secret } = getTwilioAuth()
+  const params: Record<string, string> = { To: to, From: from, Body: body }
+  if (mediaUrl) params.MediaUrl = mediaUrl
+  try {
+    const resp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64'),
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams(params).toString(),
+      }
+    )
+    const data = await resp.json()
+    if (data.error_code || data.status === 'failed') {
+      console.error('[approval] Twilio error:', data.message, data.error_code)
+      return { success: false, error: `${data.error_code}: ${data.message}` }
+    }
+    return { success: true, sid: data.sid }
+  } catch (e: any) {
+    console.error('[approval] fetch error:', e.message)
+    return { success: false, error: e.message }
+  }
 }
 
 function formatPhone(phone: string): string {
@@ -93,14 +127,12 @@ export async function sendCustomerApprovalRequest(
     return false
   }
 
-  const client = getTwilioClient()
   const supabase = createAdminSupabase()
 
   // Generate a fresh signed URL valid for 2 hours so Twilio can always fetch it
   let mediaUrlToSend = photoUrl
   try {
     if (photoUrl && photoUrl.includes('supabase')) {
-      // Extract storage path from public URL
       const pathMatch = photoUrl.match(/material-photos\/(.+)$/)
       if (pathMatch) {
         const { data: signed } = await supabase.storage
@@ -108,7 +140,6 @@ export async function sendCustomerApprovalRequest(
           .createSignedUrl(pathMatch[1], 7200)
         if (signed?.signedUrl) {
           mediaUrlToSend = signed.signedUrl
-          console.log('[approval] using signed URL:', mediaUrlToSend.slice(0, 80))
         }
       }
     }
@@ -127,36 +158,25 @@ export async function sendCustomerApprovalRequest(
 
   const body = `DumpSite: ${driverName} has dirt ready to deliver to your property — ${yardsNeeded} yds. Reply YES to approve or NO to decline.`
 
-  // Try MMS with photo
+  // Try MMS with photo using same auth as lib/sms.ts
   if (mediaUrlToSend) {
-    try {
-      const msg = await client.messages.create({
-        to: formattedPhone,
-        from: fromNumber,
-        body,
-        mediaUrl: [mediaUrlToSend]
-      })
-      console.log('[approval] MMS sent. SID:', msg.sid)
+    const result = await twilioSend(formattedPhone, fromNumber, body, mediaUrlToSend)
+    if (result.success) {
+      console.log('[approval] MMS sent. SID:', result.sid)
       return true
-    } catch (mmsErr: any) {
-      console.error('[approval] MMS failed:', mmsErr?.message, mmsErr?.code)
     }
+    console.error('[approval] MMS failed:', result.error)
   }
 
-  // Fallback: SMS with link
-  try {
-    const fallbackBody = body + (mediaUrlToSend ? `\nDirt photo: ${mediaUrlToSend}` : '')
-    const msg = await client.messages.create({
-      to: formattedPhone,
-      from: fromNumber,
-      body: fallbackBody
-    })
-    console.log('[approval] SMS fallback sent. SID:', msg.sid)
+  // Fallback: SMS without photo
+  const fallbackBody = body + (mediaUrlToSend ? `\nDirt photo: ${mediaUrlToSend}` : '')
+  const result = await twilioSend(formattedPhone, fromNumber, fallbackBody)
+  if (result.success) {
+    console.log('[approval] SMS fallback sent. SID:', result.sid)
     return true
-  } catch (smsErr: any) {
-    console.error('[approval] ALL sends failed:', smsErr?.message, smsErr?.code, 'to:', formattedPhone, 'from:', fromNumber)
-    return false
   }
+  console.error('[approval] ALL sends failed:', result.error, 'to:', formattedPhone, 'from:', fromNumber)
+  return false
 }
 
 export async function makeVoiceCallToCustomer(
@@ -166,26 +186,24 @@ export async function makeVoiceCallToCustomer(
   approvalCode: string
 ): Promise<boolean> {
   try {
-    const client = getTwilioClient()
+    const { sid, key, secret } = getTwilioAuth()
     const formattedPhone = formatPhone(customerPhone)
+    const from = getTwilioFrom()
+    const twiml = `<Response><Say voice="man" language="en-US">Hello, this is Dumpsite. ${driverName} has clean fill dirt ready to deliver to your property right now, ${yardsNeeded} yards. Please reply YES to the text message to approve the delivery, or NO to decline. Your approval code is ${approvalCode.split('').join(', ')}. Thank you.</Say><Pause length="2"/><Say voice="man" language="en-US">Again, reply YES to approve or NO to decline. Goodbye.</Say></Response>`
 
-    await client.calls.create({
-      to: formattedPhone,
-      from: getTwilioFrom(),
-      twiml: `<Response>
-        <Say voice="man" language="en-US">
-          Hello, this is Dumpsite. ${driverName} has clean fill dirt ready to deliver to your property right now — ${yardsNeeded} yards.
-          Please reply YES to the text message to approve the delivery, or NO to decline.
-          Your approval code is ${approvalCode.split('').join(', ')}.
-          Thank you.
-        </Say>
-        <Pause length="2"/>
-        <Say voice="man" language="en-US">
-          Again, reply YES to approve or NO to decline. Goodbye.
-        </Say>
-      </Response>`
+    const resp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Calls.json`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ To: formattedPhone, From: from, Twiml: twiml }).toString(),
     })
-
+    const data = await resp.json()
+    if (data.error_code) {
+      console.error('[voiceCall] Twilio error:', data.message)
+      return false
+    }
     return true
   } catch (err: any) {
     console.error('[voiceCall]', err?.message)
@@ -205,18 +223,13 @@ export async function sendAdminEscalation(
   approvalCode: string
 ): Promise<void> {
   try {
-    const client = getTwilioClient()
     const message = `DumpSite ESCALATION (${reason}):
 Job: ${orderJobNumber} — ${city}
 Driver: ${driverName} (${driverPhone})
 ${yards} yds — $${payPerLoad}/load
 Reply: APPROVE-${approvalCode} or REJECT-${approvalCode}`
 
-    await client.messages.create({
-      to: formatPhone(ADMIN_PHONE),
-      from: getTwilioFrom(),
-      body: message
-    })
+    await twilioSend(formatPhone(ADMIN_PHONE), getTwilioFrom(), message)
   } catch (err: any) {
     console.error('[adminEscalation]', err?.message)
   }
