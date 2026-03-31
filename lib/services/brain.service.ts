@@ -158,7 +158,10 @@ async function saveConv(phone: string, u: Record<string, any>) {
   })
 }
 async function resetConv(phone: string) {
-  await createAdminSupabase().from("conversations").update({
+  const sb = createAdminSupabase()
+  // Release any active reservations for this driver
+  await sb.from("site_reservations").update({ status: "released" }).eq("driver_phone", phone).eq("status", "active")
+  await sb.from("conversations").update({
     state: "DISCOVERY", job_state: null, active_order_id: null,
     pending_approval_order_id: null, reservation_id: null, extracted_city: null,
     extracted_yards: null, extracted_truck_type: null, extracted_material: null,
