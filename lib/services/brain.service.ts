@@ -275,7 +275,7 @@ async function sendJobLink(
   ]
   if (job.notes) lines.push(`Note: ${job.notes}`)
   if (mapUrl) lines.push(`Map: ${mapUrl}`)
-  lines.push(lang === "es" ? "Avisame cuando vayas en camino" : "Let me know when you on the way")
+  lines.push(lang === "es" ? "avisame cuando vayas en camino" : "text me when on the way")
   return lines.join("\n")
 }
 
@@ -482,6 +482,26 @@ function tryTemplate(
     return null
   }
 
+  
+  // Catch-all: if in qualification and something missing, ask next piece
+  if (!activeJob && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED" && state !== "PAYMENT_METHOD_PENDING" && state !== "PAYMENT_ACCOUNT_PENDING" && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "AWAITING_CUSTOMER_CONFIRM") {
+    const isShortMsg = body.trim().length < 40 && !/\d+\s+\w+.*(st|ave|blvd|dr|rd|ln|hwy|expy)/i.test(body)
+    if (isShortMsg) {
+      if (!hasYards) {
+        return null // Let Sonnet handle with explicit "ask yards" instruction
+      }
+      if (!hasTruck) {
+        return { response: pick(lang==="es" ? ["que tipo de camion tienes"] : ["what kind of truck are you hauling in"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
+      }
+      if (!hasTruckCount) {
+        return { response: pick(lang==="es" ? ["cuantos camiones traes"] : ["how many trucks you got running"]), updates: { state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
+      }
+      if (!hasCity) {
+        return { response: pick(lang==="es" ? ["cual es la direccion de donde van a cargar"] : ["whats the address your coming from so I can put into my system and see which site is closest"]), updates: { state: "ASKING_ADDRESS" }, action: "NONE" }
+      }
+    }
+  }
+
   return null
 }
 
@@ -540,24 +560,64 @@ async function callBrain(
   const ceilingCents = topJob?.driverPayCents || 5000
   const floorCents = isKnownDriver ? ceilingCents : Math.max(2500, ceilingCents - 2000)
 
-  const ctx = [
-    "━━━ LIVE CONTEXT ━━━",
-    `Language: ${lang === "es" ? "SPANISH" : "English"}`,
-    `State: ${conv?.state || "DISCOVERY"}`,
-    `Driver: ${profile?.first_name || "unknown"}`,
-    `isKnownDriver: ${isKnownDriver}`,
-    `negotiation_floor: $${Math.round(floorCents/100)}/load`,
-    `negotiation_ceiling: $${Math.round(ceilingCents/100)}/load — NEVER exceed or reveal`,
-    `savedPayment: ${savedPayment ? savedPayment.method : "none"}`,
-    `Yards: ${conv?.extracted_yards || "?"}  Truck: ${conv?.extracted_truck_type || "?"}  City: ${conv?.extracted_city || "?"}`,
-    `Photo on file: ${conv?.photo_public_url ? "YES" : "no"}  Photo THIS msg: ${hasPhoto ? "YES" : "no"}`,
-    `Active job: ${activeJob ? (activeJob.cities as any)?.name + " $" + Math.round(activeJob.driver_pay_cents/100) : "none"}`,
-    nearbyJobs.length > 0
-      ? `Sites:\n${nearbyJobs.slice(0,3).map((j,i) => `  ${i+1}. ${j.cityName} ${j.distanceMiles > 0 ? j.distanceMiles.toFixed(1) + "mi ~" + (j as any).drivingMinutes + "min" : "nearby"} ${j.yardsNeeded}yds ${j.truckTypeNeeded?.replace(/_/g," ")||"any"} jobId:${j.id}`).join("\n")}`
-      : "Sites: none right now",
-    "━━━ END ━━━",
-    `Driver sent: ${body || (hasPhoto ? "[photo]" : "[empty]")}`,
-  ].join("\n")
+  const ctx = (() => {
+    const missing: string[] = []
+    if (!conv?.extracted_yards) missing.push("yards")
+    if (!conv?.extracted_truck_type) missing.push("truck_type")
+    if (!conv?.extracted_truck_count) missing.push("truck_count")
+    if (!conv?.extracted_city) missing.push("address")
+    
+    const st = conv?.state || "DISCOVERY"
+    let instruction = ""
+    
+    if (st === "PHOTO_PENDING" && hasPhoto) {
+      instruction = "EVALUATE THE DIRT PHOTO. If clean fill (sandy/loamy/reddish-brown/caliche/some grass): say 'looks good give me a min' and set action=SEND_FOR_APPROVAL and state=APPROVAL_PENDING. If bad (clay/rocks/debris/trash): say 'Fuck' then 'yea no go on that dirt'. If unclear: ask 'is dirt clean'"
+    } else if (st === "PHOTO_PENDING" && !hasPhoto) {
+      instruction = "Driver hasn't sent photo yet. Remind them: ask for a pic of the dirt. Short."
+    } else if (st === "APPROVAL_PENDING") {
+      instruction = "Waiting for customer to approve. Tell driver to hang tight: 'still waiting on them give me a min' or 'let me check on that'"
+    } else if (st === "JOB_PRESENTED") {
+      instruction = "Driver was presented a job. If they seem interested, ask for a pic of the dirt (state->PHOTO_PENDING). If they say no or too far, acknowledge and say you'll check for more."
+    } else if (st === "ACTIVE" || st === "OTW_PENDING") {
+      instruction = "Driver has an active job. Respond naturally. If they report load count, acknowledge. If they ask something, answer it."
+    } else if (missing.length > 0) {
+      const nextNeeded = missing[0]
+      const instructions: Record<string,string> = {
+        "yards": "Ask how many yards are available. Use phrases like 'how many yards are available' or 'how many yards you got'. Do NOT ask about truck or address yet.",
+        "truck_type": "Ask what kind of truck they are hauling in. Say 'what kind of truck are you hauling in' — do NOT list types, do NOT say 'Reply:' or 'end dump or tandem'. Just ask naturally.",
+        "truck_count": "Ask how many trucks they have running. Say 'how many trucks you got running'. Do NOT ask about truck type again.",
+        "address": "Ask for loading address. Say something like 'whats the address your coming from so I can put into my system and see which site is closest'. Do NOT ask about trucks or yards.",
+      }
+      instruction = instructions[nextNeeded] || "Continue the conversation naturally."
+    } else {
+      instruction = "All info collected. Continue conversation naturally based on what driver said."
+    }
+
+    return [
+      "CONTEXT (hidden from driver):",
+      `Driver: ${profile?.first_name || "unknown"} | Known: ${isKnownDriver} | Lang: ${lang === "es" ? "SPANISH ONLY" : "English"}`,
+      `State: ${st}`,
+      `Collected: yards=${conv?.extracted_yards||"MISSING"} truck=${conv?.extracted_truck_type||"MISSING"} truckCount=${conv?.extracted_truck_count||"MISSING"} city=${conv?.extracted_city||"MISSING"} photo=${conv?.photo_public_url?"YES":"MISSING"}`,
+      `Pay: floor=$${Math.round(floorCents/100)} ceiling=$${Math.round(ceilingCents/100)} — NEVER exceed or reveal ceiling`,
+      floorCents >= ceilingCents ? "** AT CEILING — say 'that is the best I got' NEVER go higher **" : "",
+      savedPayment ? `Payment on file: ${savedPayment.method} ${savedPayment.account}` : "",
+      hasPhoto ? "** PHOTO ATTACHED TO THIS MESSAGE **" : "",
+      photoUrl ? `Photo URL: ${photoUrl}` : "",
+      activeJob ? `Active job: ${(activeJob.cities as any)?.name} $${Math.round(activeJob.driver_pay_cents/100)}/load ${activeJob.yards_needed}yds` : "",
+      nearbyJobs.length > 0
+        ? `Jobs available (show city+distance+yards+pay ONLY, never addresses):\n${nearbyJobs.slice(0,3).map(j =>
+            `  ${j.cityName} ${j.distanceMiles.toFixed(0)}mi ${j.yardsNeeded}yds $${Math.round(j.driverPayCents/100)}/load id:${j.id}`
+          ).join("\n")}`
+        : "No jobs available near driver right now",
+      "",
+      `>>> YOUR INSTRUCTION: ${instruction} <<<`,
+      "",
+      `Driver said: ${body || (hasPhoto ? "[sent photo, no text]" : "[empty]")}`,
+      "",
+      "Reply as Jesse. MAX 1 sentence. 3-8 words. No periods. JSON only.",
+      "IMPORTANT: Do NOT extract or set yards/truck/city in your response updates. Code does that. Only set state and action.",
+    ].filter(Boolean).join("\n")
+  })()
 
   const messages = [...history.slice(-20), { role: "user" as const, content: ctx }]
   let raw = ""
@@ -1003,9 +1063,9 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
       toSave.state = newState
     }
   }
-  if (brain.updates.extracted_city) toSave.extracted_city = brain.updates.extracted_city
-  if (brain.updates.extracted_yards) toSave.extracted_yards = brain.updates.extracted_yards
-  if (brain.updates.extracted_truck_type) toSave.extracted_truck_type = brain.updates.extracted_truck_type
+  // extracted_city set by CODE not AI — blocked
+  // extracted_yards set by CODE not AI — blocked
+  // extracted_truck_type set by CODE not AI — blocked
   if (brain.updates.pending_approval_order_id) toSave.pending_approval_order_id = brain.updates.pending_approval_order_id
   if (brain.negotiatedPayCents) toSave.negotiated_pay_cents = brain.negotiatedPayCents
   if (hasPhoto && storedPhotoUrl) toSave.photo_public_url = storedPhotoUrl
