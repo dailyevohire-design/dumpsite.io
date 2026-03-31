@@ -2,7 +2,10 @@ import { createAdminSupabase } from '../supabase'
 import twilio from 'twilio'
 
 const ADMIN_PHONE = '7134439223'
-const TWILIO_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
+
+function getTwilioFrom(): string {
+  return process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
+}
 
 function getTwilioClient() {
   return twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
@@ -75,7 +78,7 @@ export async function sendCustomerApprovalRequest(
   photoUrl: string,
   approvalCode: string
 ): Promise<boolean> {
-  const fromNumber = TWILIO_FROM
+  const fromNumber = getTwilioFrom()
   const formattedPhone = formatPhone(customerPhone)
 
   console.log('[approval] sending to:', formattedPhone, 'from:', fromNumber, 'photo:', photoUrl?.slice(0,80))
@@ -168,7 +171,7 @@ export async function makeVoiceCallToCustomer(
 
     await client.calls.create({
       to: formattedPhone,
-      from: TWILIO_FROM,
+      from: getTwilioFrom(),
       twiml: `<Response>
         <Say voice="man" language="en-US">
           Hello, this is Dumpsite. ${driverName} has clean fill dirt ready to deliver to your property right now — ${yardsNeeded} yards.
@@ -211,7 +214,7 @@ Reply: APPROVE-${approvalCode} or REJECT-${approvalCode}`
 
     await client.messages.create({
       to: formatPhone(ADMIN_PHONE),
-      from: TWILIO_FROM,
+      from: getTwilioFrom(),
       body: message
     })
   } catch (err: any) {
