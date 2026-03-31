@@ -410,6 +410,109 @@ function tryTemplate(
     return { response: pick(["good man just grinding","cant complain","good, staying busy"]) + pick([", you got dirt today","",", whats good"]), updates: {}, action: "NONE" }
   }
 
+  // ═══════════════════════════════════════════════════
+  // STUPID / RANDOM / UNEXPECTED — handle EVERYTHING
+  // Fire in ANY state so system never breaks
+  // ═══════════════════════════════════════════════════
+
+  // ── GIBBERISH / LAZY ──
+  if (/^[\?\.\!\,\s]+$/.test(body) || /^\?+$/.test(lower)) {
+    return { response: pick(["whats up","you good","what you need"]), updates: {}, action: "NONE" }
+  }
+  if (/^(k|kk|ok|lol|lmao|haha|ha|😂|👍|💪|🤙|😎|👌|bet)$/i.test(lower)) {
+    // Don't respond to pure acknowledgments during active flow — just ignore
+    if (state === "ACTIVE" || state === "OTW_PENDING") return { response: "10.4", updates: {}, action: "NONE" }
+    return null // Let Sonnet handle contextually
+  }
+  if (/^\.+$/.test(body.trim())) {
+    return { response: pick(["you there","whats up","you need something"]), updates: {}, action: "NONE" }
+  }
+
+  // ── CONFUSED ABOUT DUMPSITE ──
+  if (/\b(what is (this|dumpsite)|what.*(dumpsite|dump site) do|how does this work|como funciona|que es esto)\b/i.test(lower)) {
+    return { response: pick(["DumpSite.io — we match drivers with paid dump sites across DFW. You got dirt you need to dump, we find you a site and pay you per load","we connect drivers who have dirt with sites that need fill. you haul it there, we pay you per load"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(i need dirt|need.*buy.*dirt|sell.*dirt|do you sell|buy.*dirt|where can i get dirt|necesito tierra|venden tierra)\b/i.test(lower)) {
+    return { response: pick(["we dont sell dirt, we find dump sites for drivers who HAVE dirt to get rid of. You got dirt you need to dump","nah we dont sell, we pay drivers to dump their dirt at our sites. You sitting on some dirt"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(who gave you my number|how did you get my number|how you get my number|donde sacaste mi numero|spam)\b/i.test(lower)) {
+    return { response: pick(["you signed up on dumpsite.io or someone referred you. You got dirt to move","you registered on our site. If you dont want texts reply STOP"]), updates: {}, action: "NONE" }
+  }
+  if (/^(wrong number|wrong person|no soy|i didn.?t text|i did not text|quien es)\s*$/i.test(lower)) {
+    return { response: pick(["my bad, if you ever need a dumpsite hit us up. DumpSite.io","all good, reply STOP if you dont want texts"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(what is this|who is this|que es esto|quien es)\b/i.test(lower) && !(/dumpsite/i.test(lower))) {
+    return { response: pick(["this is jesse from DumpSite.io, we match drivers with paid dump sites","jesse from dumpsite — we pay drivers to dump dirt at our sites"]), updates: {}, action: "NONE" }
+  }
+
+  // ── ON-SITE PROBLEMS ──
+  if (/\b(gate.*(lock|closed|shut)|locked|cerrado|no puedo entrar|cant get in|can.?t get in)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(["let me call the site owner, give me a min","hold on let me get ahold of them"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(nobody here|no one here|no ones here|nadie aqui|nadie esta|where is everyone|empty)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(["let me call them real quick, standby","give me a sec let me reach the site owner"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(where do i dump|where exactly|donde tiro|donde descargo|where do i go|which way|where.*(put|dump|drop))\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(["let me check with the site owner, one sec","standby let me find out for you"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(i.?m lost|cant find|can.?t find|no encuentro|estoy perdido|wrong turn|wrong address)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(["send me your location and I'll get you there","where you at right now, I'll help you find it"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(broke down|broken down|flat tire|truck broke|engine|overheated|se descompuso|se poncho)\b/i.test(lower)) {
+    return { response: pick(["damn that sucks, no worries. hit me up when you back rolling","all good man, text me when you get it going again"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(rain|raining|lluvia|lloviendo|weather|storm|tormenta|flooding|flooded)\b/i.test(lower)) {
+    return { response: pick(["yea this weather is trash. you wanna hold off","no worries, hit me up when it clears up"]), updates: {}, action: "NONE" }
+  }
+
+  // ── MATERIAL ISSUES ──
+  if (/\b(concrete|asphalt|asbestos|trash|basura|escombro|demolition|c&d|construction debris)\b/i.test(lower) && state !== "PHOTO_PENDING") {
+    return { response: pick(["we only do clean fill dirt, no concrete or debris. You got clean dirt","nah we cant take that, clean fill only. You got any clean dirt"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(topsoil|top soil|caliche|sand|arena|gravel|grava|clay|arcilla)\b/i.test(lower) && state !== "PHOTO_PENDING") {
+    return { response: pick(["send me a pic and I'll let you know if it works","yea might work, send me a picture of it"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(mixed|2 types|two types|different.*dirt|mezclado|revuelto)\b/i.test(lower)) {
+    return { response: pick(["send me a pic and I'll see if it works","yea send me a picture, I'll check with the site"]), updates: {}, action: "NONE" }
+  }
+
+  // ── BUSINESS QUESTIONS ──
+  if (/\b(too far|thats far|muy lejos|esta lejos|anything closer|got.*closer|something closer|mas cerca)\b/i.test(lower)) {
+    return { response: pick(["that's the closest I got right now, I'll hit you up if something opens up closer","nothing closer right now but I'll let you know"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(too low|too cheap|not enough|mas dinero|more money|better.*price|can you do better|better rate|raise.*price|mas precio)\b/i.test(lower)) {
+    return null // Let Sonnet negotiate
+  }
+  if (/\b(how many loads|is there a limit|any limit|cuantas cargas puedo|load limit|max loads)\b/i.test(lower)) {
+    return { response: pick(["no limit, dump as many as you can","as many as you can haul, no cap"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(come back tomorrow|can i come back|puedo regresar|come.*another day|tomorrow too)\b/i.test(lower)) {
+    return { response: pick(["yea for sure, just text me when you heading out","absolutely, just hit me up when you ready"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(call me|can you call|llamame|puedes llamar|give me a call|need.*call)\b/i.test(lower)) {
+    return { response: pick(["I'm better on text, whats up","text is easier for me, what you need"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(receipt|invoice|recibo|factura|proof|documentation|tax)\b/i.test(lower)) {
+    return { response: pick(["yea I can send you a summary after, no problem","we'll get you that after the loads are done"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(what.*hours|when.*open|site.*hours|horario|que horas|open.*weekend|weekend|saturday|sunday|sabado|domingo)\b/i.test(lower)) {
+    return { response: pick(["most sites open 7am-5pm monday thru saturday","sites usually run 7 to 5 monday thru saturday, some open sunday"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(insurance|insured|licensed|license|bonded|insur|seguro|licencia)\b/i.test(lower)) {
+    return { response: pick(["yea we're legit, dumpsite.io. check the site","we're good, fully set up. DumpSite.io"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(bring.*buddy|another driver|got.*friend|my boy|my partner|mi compa|otro chofer|more drivers)\b/i.test(lower)) {
+    return { response: pick(["yea have them text this number and I'll get them set up too","for sure, tell them to text me and I'll hook them up"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(do you have anything|got any(thing)?|any jobs|any work|tienes algo|hay trabajo)\b/i.test(lower) && state === "DISCOVERY") {
+    return { response: pick(["yea I got sites open, how many yards you sitting on","I got some spots, how many yards you got"]), updates: {}, action: "NONE" }
+  }
+
+  // ── PHOTO AVOIDANCE ──
+  if (/\b(no.*(pic|photo|picture|foto)|dont have.*(pic|photo|camera)|can.?t.*(pic|photo|take)|camera.*(broke|broken|doesnt)|skip.*(pic|photo)|later.*(pic|photo)|trust me|no tengo foto|sin foto|no puedo tomar)\b/i.test(lower) && (state === "PHOTO_PENDING" || state === "JOB_PRESENTED")) {
+    return { response: pick(lang==="es" ? ["necesito una foto de la tierra para que el sitio lo apruebe, es rapido"] : ["I need a picture of the dirt to get approval from the site, just a quick pic","gotta have a pic of the material for the site to approve it, real quick one"]), updates: {}, action: "NONE" }
+  }
+
   if (/\b(on my way|otw|heading there|headed there|leaving now|en camino|voy para alla|saliendo|on the way|im on my way|i.?m otw|bout to leave|pulling out|headed to site|ya voy|voy pa ya)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
     return { response: pick(lang==="es" ? ["10.4 avisame cuando llegues","dale avisame cuando estes ahi"] : ["10.4 let me know when you pull up","10.4"]), updates: { state: "OTW_PENDING" }, action: "NONE" }
   }
