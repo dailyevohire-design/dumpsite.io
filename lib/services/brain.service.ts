@@ -1073,8 +1073,15 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   // ── ACTIONS ──────────────────────────────────────────────────
   
   // Handle photo approval — brain approved the dirt, send to customer
-  if (brain.action === "SEND_FOR_APPROVAL" || (hasPhoto && toSave.state === "APPROVAL_PENDING")) {
+  // Trigger if: (1) Sonnet explicitly said SEND_FOR_APPROVAL, OR
+  //             (2) photo was sent during PHOTO_PENDING and Sonnet didn't reject the dirt
+  const dirtRejected = /no go|can.?t accept|rejected|trash|debris|concrete|clay/i.test(brain.response)
+  const photoApprovalNeeded = brain.action === "SEND_FOR_APPROVAL"
+    || (hasPhoto && toSave.state === "APPROVAL_PENDING")
+    || (hasPhoto && convState === "PHOTO_PENDING" && !dirtRejected)
+  if (photoApprovalNeeded) {
     const orderId = toSave.pending_approval_order_id || conv.pending_approval_order_id
+    console.log(`[Brain] Photo approval: orderId=${orderId} action=${brain.action} convState=${convState} dirtRejected=${dirtRejected}`)
     if (orderId) {
       if (photoUrl) {
         try {
@@ -1116,6 +1123,10 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
         toSave.approval_sent_at = new Date().toISOString()
         toSave.voice_call_made = false
       }
+    } else {
+      console.error(`[Brain] PHOTO APPROVAL BLOCKED — no orderId. conv.pending_approval_order_id=${conv.pending_approval_order_id} toSave.pending_approval_order_id=${toSave.pending_approval_order_id}`)
+      // Still set state so driver doesn't get stuck
+      toSave.state = "APPROVAL_PENDING"
     }
   }
 
@@ -1141,29 +1152,7 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     return await handleDelivery(phone, conv, profile, activeJob, parseLoads(body) || 1, lang)
   }
 
-  // Photo approved by brain → send customer approval
-  if (hasPhoto && storedPhotoUrl && toSave.state === "APPROVAL_PENDING" && toSave.pending_approval_order_id) {
-    const orderId = toSave.pending_approval_order_id
-    const { data: order } = await createAdminSupabase().from("dispatch_orders")
-      .select("id, client_phone, client_name, yards_needed, driver_pay_cents, cities(name)")
-      .eq("id", orderId).maybeSingle()
-    if (order?.client_phone) {
-      const approvalCode = generateJobNumber(orderId)
-      const yards = enriched.extracted_yards || order.yards_needed
-      if (yards >= LARGE_JOB_YARDS) {
-        await sendAdminEscalation(orderId, approvalCode, firstName, phone,
-          (order.cities as any)?.name || "", yards, Math.round(order.driver_pay_cents/100),
-          "HIGH VALUE >= 500 yds", approvalCode)
-      }
-      await sendCustomerApprovalRequest(
-        order.client_phone.replace(/\D/g,"").replace(/^1/,""),
-        order.client_name || "Site Owner", firstName,
-        orderId, yards, storedPhotoUrl, approvalCode
-      ).catch(() => {})
-      toSave.approval_sent_at = new Date().toISOString()
-      toSave.voice_call_made = false
-    }
-  }
+  // Photo approval handled above in SEND_FOR_APPROVAL block
 
   await saveConv(phone, toSave)
   const driverAddr = body.match(/\d+\s+\w+.*(?:st|ave|blvd|dr|rd|ln|ct|way|pkwy|hwy)/i)?.[0] || null
