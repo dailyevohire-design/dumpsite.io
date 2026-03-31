@@ -155,6 +155,7 @@ async function saveConv(phone: string, u: Record<string, any>) {
     p_phone: phone, p_state: u.state ?? null, p_job_state: u.job_state ?? null,
     p_active_order_id: u.active_order_id ?? null, p_extracted_city: u.extracted_city ?? null,
     p_extracted_yards: u.extracted_yards ?? null, p_extracted_truck_type: u.extracted_truck_type ?? null,
+    p_extracted_truck_count: u.extracted_truck_count ?? null,
     p_extracted_material: u.extracted_material ?? null, p_photo_storage_path: u.photo_storage_path ?? null,
     p_photo_public_url: u.photo_public_url ?? null, p_reservation_id: u.reservation_id ?? null,
     p_pending_approval_order_id: u.pending_approval_order_id ?? null,
