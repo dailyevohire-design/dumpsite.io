@@ -481,7 +481,7 @@ function tryTemplate(
       const payDollars = Math.round(job.driverPayCents / 100)
       const resp = lang === "es"
         ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas de ti, ${job.yardsNeeded} yardas — $${payDollars}/carga — te sirve`
-        : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles from you, ${job.yardsNeeded} yards available — $${payDollars}/load — think that works`
+        : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles from you, ${job.yardsNeeded} yards needed — $${payDollars}/load — think that works`
       return { response: resp, updates: { extracted_city: mentionedCity || nearbyJobs[0].cityName, state: "JOB_PRESENTED", pending_approval_order_id: job.id }, action: "NONE" }
     }
 
@@ -625,6 +625,8 @@ async function callBrain(
       instruction = "Driver was presented a job. If they seem interested, ask for a pic of the dirt (state->PHOTO_PENDING). If they say no or too far, acknowledge and say you'll check for more."
     } else if (st === "ACTIVE" || st === "OTW_PENDING") {
       instruction = "Driver has an active job. Respond naturally. If they report load count, acknowledge. If they ask something, answer it."
+    } else if (st === "CLOSED") {
+      instruction = "Job is done, payment handled. Chat naturally like a real person. If driver asks about new work, ask if they got more dirt to haul. If they're just chatting, be friendly and brief. If they want to start a new job, say 'you got more dirt' and set state to DISCOVERY."
     } else if (missing.length > 0) {
       const nextNeeded = missing[0]
       const instructions: Record<string,string> = {
@@ -726,23 +728,23 @@ async function handleDelivery(
   if (job.client_phone) {
     const cp = job.client_phone.replace(/\D/g,"").replace(/^1/,"")
     const msg = lang==="es"
-      ? `${profile.first_name} termino. ${loads} carga${loads>1?"s":""}. Todo bien`
-      : `${profile.first_name} finished. ${loads} load${loads>1?"s":""}. Everything look good`
+      ? `DumpSite: ${profile.first_name} entrego ${loads} carga${loads>1?"s":""}. Todo bien con la entrega? Necesitas mas cargas? Responde YES o NO`
+      : `DumpSite: Did all go well with the delivery of ${loads} load${loads>1?"s":""}? Do you need anymore loads? Reply YES or NO`
     await sendSMS(cp, msg)
   }
 
   const savedPay = await getPaymentInfo(phone)
   if (savedPay) {
-    await resetConv(phone)
+    await saveConv(phone, { ...conv, state: "CLOSED", active_order_id: null })
     await sendAdminAlert(`PAYMENT: ${profile.first_name} — ${savedPay.method} — ${savedPay.account} — $${totalDollars}`)
     return lang==="es"
-      ? `10.4 — ${loads} carga${loads>1?"s":""}. Mandando a tu ${savedPay.method}`
-      : `10.4 — ${loads} load${loads>1?"s":""}. Sending to your ${savedPay.method} shortly`
+      ? `10.4 — ${loads} carga${loads>1?"s":""}. $${totalDollars} mandando a tu ${savedPay.method}`
+      : `10.4 — ${loads} load${loads>1?"s":""}. $${totalDollars} sending to your ${savedPay.method} shortly`
   }
-  await saveConv(phone, { state: "PAYMENT_METHOD_PENDING", active_order_id: job.id })
+  await saveConv(phone, { ...conv, state: "PAYMENT_METHOD_PENDING", active_order_id: job.id, pending_pay_dollars: totalDollars })
   return lang==="es"
-    ? `10.4 — ${loads} carga${loads>1?"s":""}. Como quieres que te paguemos, zelle o venmo`
-    : `10.4 — ${loads} load${loads>1?"s":""}. $${totalDollars} coming. Zelle or venmo`
+    ? `10.4 — ${loads} carga${loads>1?"s":""}. $${totalDollars} listo. Zelle o venmo`
+    : `10.4 — ${loads} load${loads>1?"s":""}. $${totalDollars} coming your way. Zelle or venmo`
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -791,8 +793,9 @@ async function handlePayment(phone: string, body: string, conv: any, lang: "en"|
     }
 
     await savePaymentInfo(phone, method, acct)
-    await resetConv(phone)
-    await sendAdminAlert(`PAYMENT: ${phone} — ${method} — ${acct}`)
+    await saveConv(phone, { ...conv, state: "CLOSED", active_order_id: null, pending_approval_order_id: null })
+    const payAmount = conv.pending_pay_dollars ? ` — $${conv.pending_pay_dollars}` : ""
+    await sendAdminAlert(`PAYMENT: ${phone} — ${method} — ${acct}${payAmount}`)
     return lang==="es" ? "listo, te mandamos en rato" : "got it, we will have it sent shortly"
   }
   return "10.4"
@@ -1094,7 +1097,7 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   brain.response = response
 
   // ── PERSIST (with state validation) ──────────────────────────
-  const VALID_STATES = new Set(["DISCOVERY","GETTING_NAME","ASKING_TRUCK","PHOTO_PENDING","APPROVAL_PENDING","ACTIVE","OTW_PENDING","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_CUSTOMER_CONFIRM","CLOSED"])
+  const VALID_STATES = new Set(["DISCOVERY","GETTING_NAME","ASKING_TRUCK","ASKING_TRUCK_COUNT","ASKING_ADDRESS","JOB_PRESENTED","PHOTO_PENDING","APPROVAL_PENDING","ACTIVE","OTW_PENDING","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_CUSTOMER_CONFIRM","CLOSED"])
   const toSave: Record<string,any> = { ...enriched }
   // Only accept state from brain if it's valid AND the transition makes sense
   if (brain.updates.state && VALID_STATES.has(brain.updates.state)) {
