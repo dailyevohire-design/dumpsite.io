@@ -539,7 +539,7 @@ async function callBrain(
   let raw = ""
   try {
     const resp = /* caught */ await anthropic.messages.create({
-      model: "claude-sonnet-4-6-20250514", max_tokens: 200, system: JESSE_PROMPT, messages,
+      model: "claude-sonnet-4-6", max_tokens: 200, system: JESSE_PROMPT, messages,
     })
     raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""
     raw = raw.replace(/^```json\s*/i,"").replace(/```\s*$/i,"").trim()
@@ -557,7 +557,7 @@ async function callBrain(
   } catch (err) {
     console.error("[Brain] raw:", raw?.slice(0,200), err)
     const fb: Record<string,string> = {
-      DISCOVERY: lang==="es"?"tienes tierra hoy":"you got dirt today",
+      DISCOVERY: lang==="es"?pick(["que onda, tienes tierra hoy","oye andas moviendo tierra hoy"]):pick(["what up, you hauling today","yo you running loads today","what up, you got dirt today"]),
       ASKING_TRUCK: "end dump or tandem", PHOTO_PENDING: "send pic of dirt",
       APPROVAL_PENDING: "give me a min", ACTIVE: "10.4",
       PAYMENT_METHOD_PENDING: "how you want it, zelle or venmo",
