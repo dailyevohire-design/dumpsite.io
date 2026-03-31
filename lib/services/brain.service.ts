@@ -913,6 +913,13 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
         if (result) {
           const dc = await getConv(result.driverPhone)
           const dp = await getProfile(result.driverPhone)
+          // NOW reserve the order — customer approved
+          try {
+            const rid = await atomicClaimJob(result.orderId, result.driverPhone, dp?.user_id || null)
+            if (rid && dc) {
+              await saveConv(result.driverPhone, { ...dc, reservation_id: rid, active_order_id: result.orderId })
+            }
+          } catch (e) { console.error("[reservation on approval]", e) }
           const dj = await getActiveJob({ active_order_id: result.orderId })
           const dl: "en"|"es" = dp?.preferred_language === "es" ? "es" : "en"
           if (dj) {
@@ -1051,15 +1058,9 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
       await sendSMS(ADMIN_PHONE, `PAYMENT: ${phone} — ${method} — ${body.trim()}${enriched.pending_pay_dollars ? " — $"+enriched.pending_pay_dollars : ""}`)
     }
     
-    // Handle job presentation — claim the job
-    if (tpl.updates.state === "JOB_PRESENTED" && tpl.updates.pending_approval_order_id) {
-      try {
-        const claimed = await atomicClaimJob(tpl.updates.pending_approval_order_id, phone, profile?.user_id || null)
-        if (claimed) {
-          toSaveTpl.reservation_id = (claimed as any).reservationId || null
-        }
-      } catch {}
-    }
+    // Job presentation — do NOT reserve yet. Reservation happens only after
+    // customer approves the dirt photo. This keeps the order available to
+    // other drivers until a real commitment is made.
     
     await saveConv(phone, toSaveTpl)
     const validatedTpl = validateResponse(tpl.response, null, toSaveTpl.state || convState, lang)
@@ -1198,15 +1199,11 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     }
   }
 
+  // CLAIM_JOB from Sonnet — do NOT reserve. Just track the order ID.
+  // Reservation only happens when customer approves.
   if (brain.action === "CLAIM_JOB" && brain.claimJobId) {
-    try {
-      const rid = await atomicClaimJob(brain.claimJobId, phone, profile.user_id)
-      if (rid) {
-        toSave.reservation_id = rid
-        toSave.active_order_id = brain.claimJobId
-        toSave.state = "PHOTO_PENDING"
-      }
-    } catch {}
+    toSave.pending_approval_order_id = brain.claimJobId
+    toSave.state = "PHOTO_PENDING"
   }
 
   if (brain.action === "CANCEL_JOB" && conv?.reservation_id) {
