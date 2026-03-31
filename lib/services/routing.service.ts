@@ -136,11 +136,9 @@ export async function findNearbyJobs(
       })
       .sort((a, b) => a.distanceMiles - b.distanceMiles)
 
-    // SELF-MATCH FILTER: only apply when driver gave a specific address
-    // When driver just says a city name, distance 0 is expected and correct
-    // (the job and the city center are the same point)
-    const minDistance = driverGeo.precision === 'address' ? 0.3 : 0
-    const filtered = withDistance.filter(o => o.distanceMiles >= minDistance)
+    // No minimum distance — a driver close to a dump site is ideal
+    // The dispatch address is the DUMP SITE, not the driver's loading address
+    const filtered = withDistance
 
     // Try 15 miles, expand to 30 if nothing found
     let nearby = filtered.filter(o => o.distanceMiles <= maxMiles)

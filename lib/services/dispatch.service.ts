@@ -55,8 +55,31 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
 
   if (!city) return { success: false, driversNotified: 0, cityName: '', error: 'City not found' }
 
-  // Resolve delivery coordinates — city center as fallback
+  // Resolve delivery coordinates — geocode actual address, city center as fallback
   const cityCoords = CITY_COORDS[city.name]
+  let deliveryLat = cityCoords?.lat || null
+  let deliveryLng = cityCoords?.lng || null
+
+  // Geocode the actual client address for precise distance matching
+  if (input.clientAddress) {
+    try {
+      const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY
+      if (GOOGLE_MAPS_KEY) {
+        const addr = input.clientAddress.includes('TX') || input.clientAddress.includes('Texas')
+          ? input.clientAddress : `${input.clientAddress}, Texas, USA`
+        const q = encodeURIComponent(addr)
+        const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${q}&key=${GOOGLE_MAPS_KEY}&components=country:US`
+        const r = await fetch(url)
+        const data = await r.json()
+        if (data.status === 'OK' && data.results?.[0]) {
+          deliveryLat = data.results[0].geometry.location.lat
+          deliveryLng = data.results[0].geometry.location.lng
+        }
+      }
+    } catch (e) {
+      console.error('[dispatch] geocode error:', e)
+    }
+  }
 
   // PERMANENT FIX: Driver pay is ALWAYS determined by city rate.
   // Never use the customer quote or admin input — prevents showing
@@ -80,8 +103,8 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
       zapier_row_id: input.zapierRowId,
       created_by: input.createdBy,
       status: 'dispatching',
-      delivery_latitude: cityCoords?.lat || null,
-      delivery_longitude: cityCoords?.lng || null,
+      delivery_latitude: deliveryLat,
+      delivery_longitude: deliveryLng,
     })
     .select()
     .single()
