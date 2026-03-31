@@ -509,8 +509,93 @@ function tryTemplate(
   }
 
   // ── PHOTO AVOIDANCE ──
-  if (/\b(no.*(pic|photo|picture|foto)|dont have.*(pic|photo|camera)|can.?t.*(pic|photo|take)|camera.*(broke|broken|doesnt)|skip.*(pic|photo)|later.*(pic|photo)|trust me|no tengo foto|sin foto|no puedo tomar)\b/i.test(lower) && (state === "PHOTO_PENDING" || state === "JOB_PRESENTED")) {
+  if (/\b(no.*(pic|photo|picture|foto)|dont have.*(pic|photo|camera)|can.?t.*(pic|photo|take)|camera.*(broke|broken|doesnt)|skip.*(pic|photo)|later.*(pic|photo)|trust me|no tengo foto|sin foto|no puedo tomar|just send.*(address|addy)|send me the address|give me the address)\b/i.test(lower) && (state === "PHOTO_PENDING" || state === "JOB_PRESENTED")) {
     return { response: pick(lang==="es" ? ["necesito una foto de la tierra para que el sitio lo apruebe, es rapido"] : ["I need a picture of the dirt to get approval from the site, just a quick pic","gotta have a pic of the material for the site to approve it, real quick one"]), updates: {}, action: "NONE" }
+  }
+
+  // ── FIX #1: DRIVER SAYS YES THEN IMMEDIATELY NO ──
+  if (/^(actually no|actually nah|nvm|never ?mind|wait no|hold on no|changed my mind|ya no|no ya|cancel that)$/i.test(lower) && (state === "PHOTO_PENDING" || state === "JOB_PRESENTED" || state === "APPROVAL_PENDING")) {
+    return { response: pick(lang==="es" ? ["10.4 sin problema, avisame si necesitas algo"] : ["all good, hit me up when you ready","no worries, text me when you got another load"]), updates: { state: "DISCOVERY", pending_approval_order_id: null }, action: "NONE" }
+  }
+
+  // ── FIX #3: LOAD COUNT IN WORDS ──
+  const wordNums: Record<string,number> = { one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9, ten:10, eleven:11, twelve:12, fifteen:15, twenty:20, dozen:12, un:1, dos:2, tres:3, cuatro:4, cinco:5, seis:6, siete:7, ocho:8, nueve:9, diez:10 }
+  if ((state === "ACTIVE" || state === "OTW_PENDING")) {
+    const wordMatch = lower.match(/\b(dropped|delivered|dumped|did|hauled|tiramos|tire|hice)\b.*?\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|dozen|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\b/i)
+    if (wordMatch) {
+      const count = wordNums[wordMatch[2].toLowerCase()]
+      if (count) {
+        return { response: "__DELIVERY__:" + count, updates: { state: "AWAITING_CUSTOMER_CONFIRM" }, action: "COMPLETE_JOB" }
+      }
+    }
+  }
+
+  // ── FIX #4: "DONE FOR THE DAY" vs "DONE WITH LOADS" ──
+  if (/\b(done for (the |to)?day|done for now|calling it|heading home|ya me voy|me retiro|thats it for today|thats all for today|im out)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(lang==="es" ? ["10.4 cuantas cargas tiraste hoy en total"] : ["10.4 how many loads total you drop today","copy, how many loads you get in"]), updates: {}, action: "NONE" }
+  }
+
+  // ── FIX #8: CASHAPP / PAYPAL / CASH ──
+  if (state === "PAYMENT_METHOD_PENDING") {
+    if (/cash\s*app|cashapp/i.test(lower)) {
+      return { response: pick(["we only do zelle or venmo right now, which one works for you"]), updates: {}, action: "NONE" }
+    }
+    if (/paypal|pay\s*pal/i.test(lower)) {
+      return { response: pick(["no paypal, just zelle or venmo. which one"]), updates: {}, action: "NONE" }
+    }
+    if (/^cash$/i.test(lower) || /pay.*cash|in cash|efectivo/i.test(lower)) {
+      return { response: pick(["we do zelle or venmo, no cash. which one works"]), updates: {}, action: "NONE" }
+    }
+  }
+
+  // ── FIX #9: "DID YOU SEND PAYMENT" / "I DIDN'T GET PAID" ──
+  if (/\b(did you (send|pay)|you (send|pay) (it|me)|i didn.?t get paid|haven.?t been paid|still waiting.*pay|where.?s my (money|pay)|cuando me pagan|no me han pagado|ya me pagaron)\b/i.test(lower)) {
+    return { response: pick(lang==="es"
+      ? ["los pagos se mandan al final del dia en batch, si no te llega hoy mandame texto manana y lo verifico"]
+      : ["payments go out end of day in batches, if it doesnt hit by tonight text me tomorrow and I'll check on it","should go out today, all payments process end of day. if you dont see it by tomorrow lmk"]), updates: {}, action: "NONE" }
+  }
+
+  // ── FIX #10: CHANGE PAYMENT INFO ──
+  if (/\b(change.*(zelle|venmo|payment)|different.*(zelle|venmo|account)|update.*(zelle|venmo|payment)|new.*(zelle|venmo|account)|cambiar.*(zelle|venmo|pago))\b/i.test(lower)) {
+    return { response: pick(lang==="es" ? ["dale, mandame la nueva info"] : ["no problem, send me the new info"]), updates: { state: "PAYMENT_ACCOUNT_PENDING" }, action: "NONE" }
+  }
+
+  // ── FIX #12: SITE-SPECIFIC QUESTIONS ──
+  if (/\b(who do i (talk|speak|ask)|who.?s the contact|contact at the site|quien esta ahi|con quien hablo|check in)\b/i.test(lower)) {
+    return { response: pick(["when you get there someone will show you where to dump, just text me when you pull up","the site owner will be there, just text me when you arrive"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(scale|weigh|weight limit|peso|bascula|tonnage|tons)\b/i.test(lower)) {
+    return { response: pick(["no scale, just dump and go","nah no scale on site, just dump it"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(tarp|tarping|cover|lona|cubrir)\b/i.test(lower)) {
+    return { response: pick(["nah no tarp needed","you good, no tarping required"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(room for|fit.*(semi|truck|rig)|wide enough|entrance|turn around|dar vuelta|espacio)\b/i.test(lower)) {
+    return { response: pick(["yea theres room, you'll be good","should be fine, other trucks get in and out no problem"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(site.*(full|closed|shut)|no more room|already full|ya esta lleno|no hay espacio)\b/i.test(lower)) {
+    return { response: pick(["let me check on that, give me a sec","hold on let me call them"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(rude|asshole|pendejo|attitude|disrespect|grosero|mala onda|being a dick)\b/i.test(lower)) {
+    return { response: pick(["my bad bro, let me talk to them. that aint cool","damn sorry about that, I'll handle it"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(rejected|said.*not clean|wont accept|didnt accept|no.*accept|rechazaron|no.*aceptaron|turned.*away)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(["damn, send me a pic of what they're looking at and let me talk to them","my bad, let me call the site owner real quick"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(spread|spread it|want me to spread|esparcir|regar)\b/i.test(lower)) {
+    return { response: pick(["nah just dump it, you dont need to spread","dump and go, spreading aint part of the deal"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(po number|purchase order|orden de compra|work order)\b/i.test(lower)) {
+    return { response: pick(["no PO needed, we handle all that on our end","you dont need one, we track everything"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(wet|mojado|wet dirt|muddy|lodo|mud)\b/i.test(lower) && (state === "PHOTO_PENDING" || state === "DISCOVERY")) {
+    return { response: pick(["send me a pic and I'll check if the site takes it","yea might be fine, send me a picture"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(my truck holds|truck.*holds|capacity|capacidad|cuanto cabe)\b/i.test(lower)) {
+    return { response: pick(["you good, just haul what you can","thats fine, bring whatever your truck holds"]), updates: {}, action: "NONE" }
+  }
+  if (/\b(someone else.*(phone|number)|my buddy.*(phone|texting)|using.*(his|her|their) phone|desde otro telefono)\b/i.test(lower)) {
+    return { response: pick(["have them text me from their number so I can set them up","they gotta text me from their own phone so I can track their loads"]), updates: {}, action: "NONE" }
   }
 
   if (/\b(on my way|otw|heading there|headed there|leaving now|en camino|voy para alla|saliendo|on the way|im on my way|i.?m otw|bout to leave|pulling out|headed to site|ya voy|voy pa ya)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
@@ -1442,6 +1527,15 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     const orderId = toSave.pending_approval_order_id || conv.pending_approval_order_id
     console.log(`[Brain] Photo approval: orderId=${orderId} action=${brain.action} convState=${convState} dirtRejected=${dirtRejected}`)
     if (orderId) {
+      // FIX #6: Verify order still exists and is valid
+      const { data: orderCheck } = await createAdminSupabase().from("dispatch_orders")
+        .select("status").eq("id", orderId).maybeSingle()
+      if (!orderCheck || !["dispatching","active","pending"].includes(orderCheck.status)) {
+        console.warn(`[Brain] Order ${orderId} is ${orderCheck?.status || "GONE"} — clearing`)
+        toSave.pending_approval_order_id = null
+        toSave.state = "DISCOVERY"
+        brain.response = pick(lang==="es" ? ["ese sitio ya no esta disponible, dejame buscarte otro"] : ["that site just got taken, let me find you another one"])
+      } else {
       // FIX #5: Soft lock — create short reservation so other drivers see a different job
       try { await atomicClaimJob(orderId, phone, profile?.user_id || null) } catch {}
       if (photoUrl) {
@@ -1501,6 +1595,7 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
         await sendAdminAlert(`⚠ NO CLIENT PHONE: Order ${orderId} has no customer phone. Driver ${phone} sent photo but cannot send approval. Fix order in admin.`)
         toSave.state = "APPROVAL_PENDING"
       }
+      } // close order-valid else block
     } else {
       console.error(`[Brain] PHOTO APPROVAL BLOCKED — no orderId. conv.pending_approval_order_id=${conv.pending_approval_order_id} toSave.pending_approval_order_id=${toSave.pending_approval_order_id}`)
       // Still set state so driver doesn't get stuck
