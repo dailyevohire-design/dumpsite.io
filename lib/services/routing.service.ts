@@ -136,9 +136,10 @@ export async function findNearbyJobs(
       })
       .sort((a, b) => a.distanceMiles - b.distanceMiles)
 
-    // SELF-MATCH FILTER: if geocoding was city-level, minimum distance is 1 mile
-    // If address-level, minimum is 0.3 miles (300 yards — different property)
-    const minDistance = driverGeo.precision === 'address' ? 0.3 : 1.0
+    // SELF-MATCH FILTER: only apply when driver gave a specific address
+    // When driver just says a city name, distance 0 is expected and correct
+    // (the job and the city center are the same point)
+    const minDistance = driverGeo.precision === 'address' ? 0.3 : 0
     const filtered = withDistance.filter(o => o.distanceMiles >= minDistance)
 
     // Try 15 miles, expand to 30 if nothing found
