@@ -161,6 +161,8 @@ async function resetConv(phone: string) {
   const sb = createAdminSupabase()
   // Release any active reservations for this driver
   await sb.from("site_reservations").update({ status: "released" }).eq("driver_phone", phone).eq("status", "active")
+  // Mark conversation boundary so old SMS history is ignored
+  try { await sb.from("sms_logs").insert({ phone, body: "[CONVERSATION RESET]", direction: "outbound" as const }) } catch {}
   await sb.from("conversations").update({
     state: "DISCOVERY", job_state: null, active_order_id: null,
     pending_approval_order_id: null, reservation_id: null, extracted_city: null,
@@ -174,9 +176,15 @@ async function isDuplicate(sid: string): Promise<boolean> {
 }
 async function getHistory(phone: string) {
   const { data } = await createAdminSupabase().from("sms_logs").select("body, direction")
-    .eq("phone", phone).order("created_at", { ascending: false }).limit(24)
+    .eq("phone", phone).order("created_at", { ascending: false }).limit(40)
   if (!data) return []
-  return data.reverse().map((m: any) => ({
+  // Only include messages from CURRENT conversation (after last reset marker)
+  const msgs: typeof data = []
+  for (const m of data) {
+    if (m.body === "[CONVERSATION RESET]") break // Stop at reset boundary
+    msgs.push(m)
+  }
+  return msgs.reverse().slice(-24).map((m: any) => ({
     role: (m.direction === "inbound" ? "user" : "assistant") as "user" | "assistant",
     content: (m.body || "").trim(),
   })).filter((m: any) => m.content.length > 0)
