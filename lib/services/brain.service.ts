@@ -402,6 +402,22 @@ function tryTemplate(
     return { response: pick(lang==="es" ? ["todavia esperando confirmacion, dame un min","dejame verificar"] : ["still waiting on them, give me a min","let me check on that"]), updates: {}, action: "NONE" }
   }
 
+  // ═══════════════════════════════════════════════════
+  // CLOSED — job done, payment handled. Be natural.
+  // ═══════════════════════════════════════════════════
+  if (state === "CLOSED") {
+    // Gratitude — "thanks", "appreciate it", etc.
+    if (/^(thanks|thank you|thx|appreciate|gracias|good looking out|bet|preciate it|thank u|ty)$/i.test(lower) || /thanks|thank you|appreciate/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["de nada","a la orden","sin problema"] : ["no problem","anytime","you got it","fasho"]), updates: {}, action: "NONE" }
+    }
+    // Driver mentions new dirt / new job for later
+    if (/tomorrow|manana|mañana|next week|later|got more|have more|another load|mas tierra|got dirt|have dirt|i got|need.*dump/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["dale mandame foto de la tierra cuando estes ahi"] : ["no problem, send me a pic of the dirt when you get there","10.4 just hit me up when you ready"]), updates: {}, action: "NONE" }
+    }
+    // Anything else in CLOSED — let Sonnet handle naturally
+    return null
+  }
+
   const isYes = /^(yes|yeah|yep|yea|yessir|yessirr|bet|fasho|si|fs|sure|absolutely|for sure|copy|10-4|ok|okay|yup|hell yeah|of course|definitely|correct|right|affirmative|dale|simon|claro|lets go|lets do it|down|im down|send it|works for me|that works|sounds good)$/i.test(lower)
 
   if (isYes && state === "JOB_PRESENTED") {
@@ -637,7 +653,7 @@ async function callBrain(
     } else if (st === "ACTIVE" || st === "OTW_PENDING") {
       instruction = "Driver has an active job. Respond naturally. If they report load count, acknowledge. If they ask something, answer it."
     } else if (st === "CLOSED") {
-      instruction = "Job is done, payment handled. Chat naturally like a real person. If driver asks about new work, ask if they got more dirt to haul. If they're just chatting, be friendly and brief. If they want to start a new job, say 'you got more dirt' and set state to DISCOVERY."
+      instruction = "Job is DONE. Payment HANDLED. DO NOT ask about trucks, yards, addresses, or dirt. DO NOT say 'text when on way'. The delivery is FINISHED. Just chat naturally like a friend. If driver says thanks, say 'no problem' or 'anytime'. If they mention new dirt for later/tomorrow, say 'no problem just hit me up when ready' or 'send me a pic of the dirt when you get there'. Keep it super short and casual. If driver wants to start a completely new job RIGHT NOW, set state to DISCOVERY."
     } else if (missing.length > 0) {
       const nextNeeded = missing[0]
       const instructions: Record<string,string> = {
