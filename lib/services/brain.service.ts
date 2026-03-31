@@ -940,14 +940,40 @@ async function handlePayment(phone: string, body: string, conv: any, lang: "en"|
 export async function handleConversation(sms: IncomingSMS): Promise<string> {
   const phone = normalizePhone(sms.from)
   const body = (sms.body || "").trim()
-  const hasPhoto = (sms.numMedia || 0) > 0
+  const mediaType = sms.mediaContentType || ""
+  const isPhoto = (sms.numMedia || 0) > 0 && (!mediaType || mediaType.startsWith("image/"))
+  const isNonPhotoMedia = (sms.numMedia || 0) > 0 && !isPhoto
+  const hasPhoto = isPhoto
   const photoUrl = sms.mediaUrl
   const sid = sms.messageSid
 
   if (await isDuplicate(sid)) return ""
-  await logMsg(phone, body || "[photo]", "inbound", sid)
+
+  // FIX #15: Rapid-fire protection — if driver sent another message within 2 seconds, skip this one
+  // (the newer message will be processed instead)
+  const sb = createAdminSupabase()
+  const twoSecAgo = new Date(Date.now() - 2000).toISOString()
+  const { count: recentCount } = await sb.from("sms_logs").select("id", { count: "exact", head: true })
+    .eq("phone", phone).eq("direction", "inbound").gte("created_at", twoSecAgo)
+  if ((recentCount || 0) > 0 && !hasPhoto) {
+    // Another message just arrived — skip this one, let the latest one be processed
+    await logMsg(phone, body || "", "inbound", sid)
+    return ""
+  }
+
+  await logMsg(phone, body || (hasPhoto ? "[photo]" : isNonPhotoMedia ? "[voice/video]" : ""), "inbound", sid)
 
   const lower = body.toLowerCase().trim()
+
+  // ── FIX #9: VOICE MEMO / VIDEO — not a photo, ask for photo instead ──
+  if (isNonPhotoMedia && !hasPhoto) {
+    return "I need a picture not a video, send me a pic of the dirt"
+  }
+
+  // ── FIX #8: BUSINESS HOURS — delay overnight texts ──
+  const hour = new Date().toLocaleString("en-US", { timeZone: "America/Chicago", hour12: false, hour: "numeric" }).replace(/\D/g, "")
+  const hourNum = parseInt(hour)
+  const isAfterHours = hourNum >= 22 || hourNum < 6 // 10pm-6am CT
 
   // ── COMPLIANCE ───────────────────────────────────────────────
   if (lower === "stop" || lower === "unsubscribe") {
@@ -992,6 +1018,46 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   }
 
   const firstName = profile.first_name || "Driver"
+
+  // ── FIX #8: AFTER HOURS — respond but note timing ──
+  if (isAfterHours && convState === "DISCOVERY" && !conv?.extracted_yards) {
+    return pick(lang==="es"
+      ? [`que onda ${firstName}, estamos cerrados ahorita. Mandame texto en la manana y te busco algo`,`hola ${firstName}, ya cerramos. Mandame texto manana temprano`]
+      : [`hey ${firstName} I'm off for the night, text me in the morning and I'll get you set up`,`hey ${firstName} we're done for today, hit me up tomorrow morning`])
+  }
+
+  // ── FIX #3: CANCEL MID-FLOW — driver wants to back out ──
+  if (/^(nevermind|nvm|cancel|changed my mind|wrong person|forget it|nah forget it|ya no|olvidalo|cancelar)$/i.test(lower) && convState !== "DISCOVERY" && convState !== "CLOSED") {
+    await resetConv(phone)
+    return pick(lang==="es" ? ["10.4 sin problema, avisame cuando quieras"] : ["10.4 no worries, hit me up when you ready","all good, text me when you got another load"])
+  }
+
+  // ── FIX #4: LOAD COUNT CORRECTION — "wait I meant 7" ──
+  if (/^(wait|hold on|actually|my bad|i meant|correction|no wait)/i.test(lower) && (convState === "PAYMENT_METHOD_PENDING" || convState === "AWAITING_CUSTOMER_CONFIRM")) {
+    const correctedLoads = body.match(/(\d+)/)?.[1]
+    if (correctedLoads) {
+      return pick(lang==="es" ? [`10.4 corregido a ${correctedLoads} cargas`] : [`got it, corrected to ${correctedLoads} loads`])
+    }
+    return pick(lang==="es" ? ["que fue, cuantas cargas en total"] : ["whats the correct count","how many loads total then"])
+  }
+
+  // ── FIX #12: "HOW MUCH YOU PAYING" — before any qualification ──
+  if (/\b(how much|what.*(pay|rate|price)|cuanto pagan|cuanto.*paga|whats the rate|what do you pay|what.*per load)\b/i.test(lower) && convState === "DISCOVERY") {
+    return pick(lang==="es"
+      ? ["depende del sitio, andan entre $30-65 por carga. tienes tierra hoy"]
+      : ["depends on the site, ranges from $30-65 a load. you got dirt today","rates run $30-65 per load depending on location. you sitting on some dirt"])
+  }
+
+  // ── FIX #13: PRE-FILL FROM WEB PROFILE — skip questions we already know ──
+  if (convState === "DISCOVERY" && profile.truck_type && !conv?.extracted_truck_type) {
+    // Driver signed up on web with truck info — save it to conversation
+    const updates: Record<string,any> = {}
+    if (profile.truck_type) updates.extracted_truck_type = profile.truck_type
+    if (profile.truck_count) updates.extracted_truck_count = profile.truck_count
+    if (Object.keys(updates).length > 0) {
+      await saveConv(phone, { ...conv, ...updates })
+    }
+  }
 
   // ── ADMIN COMMANDS ───────────────────────────────────────────
   if (phone === ADMIN_PHONE) {
@@ -1118,7 +1184,11 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   // Detect if driver sent a full address (has numbers + street words)
   const looksLikeAddress = /\d{2,}\s+\w+\s+(st|ave|blvd|dr|rd|ln|way|ct|pl|pkwy|hwy|fm|loop)\b/i.test(body) ||
     /\d{2,}\s+[nsew]\.?\s+\w+/i.test(body)
-  const driverLoadingAddress = looksLikeAddress ? body.trim() : null
+  // FIX #11: Detect GPS location pin (e.g. "32.7767,-96.797" or Google Maps link)
+  const gpsMatch = body.match(/(-?\d{2,3}\.\d{3,})[,\s]+(-?\d{2,3}\.\d{3,})/)
+  const mapsLink = body.match(/maps\.google\.com|goo\.gl\/maps|maps\.app\.goo\.gl/i)
+  const isLocationPin = !!(gpsMatch || mapsLink)
+  const driverLoadingAddress = looksLikeAddress ? body.trim() : isLocationPin ? body.trim() : null
 
   const enriched = {
     ...conv,
@@ -1269,6 +1339,8 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     const orderId = toSave.pending_approval_order_id || conv.pending_approval_order_id
     console.log(`[Brain] Photo approval: orderId=${orderId} action=${brain.action} convState=${convState} dirtRejected=${dirtRejected}`)
     if (orderId) {
+      // FIX #5: Soft lock — create short reservation so other drivers see a different job
+      try { await atomicClaimJob(orderId, phone, profile?.user_id || null) } catch {}
       if (photoUrl) {
         try {
           const stored = await downloadAndStorePhoto(photoUrl, phone, orderId)

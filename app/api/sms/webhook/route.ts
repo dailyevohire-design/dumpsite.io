@@ -54,6 +54,7 @@ export async function POST(request: Request) {
   const messageSid = formData.get('MessageSid') || ''
   const numMedia = parseInt(formData.get('NumMedia') || '0')
   const mediaUrl = numMedia > 0 ? formData.get('MediaUrl0') || undefined : undefined
+  const mediaContentType = numMedia > 0 ? formData.get('MediaContentType0') || undefined : undefined
 
   if (!from || !messageSid) {
     return new Response('<Response></Response>', { status: 200, headers: { 'Content-Type': 'text/xml' } })
@@ -71,7 +72,7 @@ export async function POST(request: Request) {
 
   try {
     const reply = await smsDispatchService.handleIncoming({
-      from, body: body.trim(), messageSid, mediaUrl, numMedia
+      from, body: body.trim(), messageSid, mediaUrl, mediaContentType, numMedia
     })
     if (!reply) return new Response('<Response></Response>', { status: 200, headers: { 'Content-Type': 'text/xml' } })
 
