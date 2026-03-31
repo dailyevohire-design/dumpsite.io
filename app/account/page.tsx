@@ -126,7 +126,7 @@ export default function AccountPage() {
           <span style={{fontFamily:'Georgia,serif',fontSize:'18px',fontWeight:'700',letterSpacing:'0.02em',color:'#F0EDE8'}}>DUMPSITE<span style={{color:'#F5A623'}}>.IO</span></span>
           
         </div>
-        <a href="/dashboard" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',textDecoration:'none',fontSize:'13px'}}>← Back to Dashboard</a>
+        <a href="/map" style={{background:'transparent',border:'1px solid #272B33',color:'#606670',padding:'7px 14px',borderRadius:'8px',textDecoration:'none',fontSize:'13px'}}>← Back to Jobs</a>
       </div>
 
       <div style={{maxWidth:'700px',margin:'0 auto',padding:'24px 20px'}}>

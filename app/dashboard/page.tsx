@@ -42,7 +42,7 @@ export default function Dashboard() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { router.replace('/login'); return }
       const role = user.user_metadata?.role
-      if (role !== 'admin' && role !== 'superadmin') { router.replace('/account'); return }
+      if (role !== 'admin' && role !== 'superadmin') { router.replace('/map'); return }
       setAuthorized(true)
     }
     checkRole()
