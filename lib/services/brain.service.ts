@@ -1147,29 +1147,46 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
         const driverName = profile ? `${profile.first_name} ${profile.last_name || ""}`.trim() : phone
         const customerPhone = order.client_phone.replace(/\D/g, "").replace(/^1/, "")
         const approvalCode = crypto.randomBytes(4).toString("hex").toUpperCase()
-        
+        const photoToSend = toSave.photo_public_url || photoUrl || ""
+
+        let approvalSent = false
         try {
-          await sendCustomerApprovalRequest(
+          approvalSent = await sendCustomerApprovalRequest(
             customerPhone, order.client_name || "Site Owner",
             driverName, order.id, order.yards_needed,
-            toSave.photo_public_url || photoUrl || "", approvalCode
+            photoToSend, approvalCode
           )
-        } catch (e) { console.error("[customer approval]", e) }
-        
-        if ((order.yards_needed || 0) >= 500) {
+        } catch (e: any) {
+          console.error("[customer approval] EXCEPTION:", e?.message || e)
+        }
+
+        // ALWAYS notify admin — whether approval sent or failed
+        const jobNum = generateJobNumber(order.id)
+        if (approvalSent) {
+          await sendAdminAlert(`APPROVAL SENT: ${jobNum} — ${driverName} → ${order.client_name || "customer"} (${customerPhone}) — ${order.yards_needed}yds — code: ${approvalCode}`)
+        } else {
+          // CRITICAL: Approval FAILED — admin must know immediately
+          await sendAdminAlert(`⚠ APPROVAL FAILED: ${jobNum} — could not reach customer ${order.client_name || ""} at ${customerPhone}. Driver: ${driverName} (${phone}). Photo: ${photoToSend ? "yes" : "no"}. Manual action needed.`)
+        }
+
+        if ((order.yards_needed || 0) >= LARGE_JOB_YARDS) {
           try {
             await sendAdminEscalation(
-              order.id, generateJobNumber(order.id), driverName, phone,
+              order.id, jobNum, driverName, phone,
               conv.extracted_city || "", order.yards_needed,
               Math.round((order.driver_pay_cents || 0) / 100),
               "Large job", approvalCode
             )
           } catch {}
         }
-        
+
         toSave.state = "APPROVAL_PENDING"
         toSave.approval_sent_at = new Date().toISOString()
         toSave.voice_call_made = false
+      } else {
+        // No client phone on the order — alert admin
+        await sendAdminAlert(`⚠ NO CLIENT PHONE: Order ${orderId} has no customer phone. Driver ${phone} sent photo but cannot send approval. Fix order in admin.`)
+        toSave.state = "APPROVAL_PENDING"
       }
     } else {
       console.error(`[Brain] PHOTO APPROVAL BLOCKED — no orderId. conv.pending_approval_order_id=${conv.pending_approval_order_id} toSave.pending_approval_order_id=${toSave.pending_approval_order_id}`)

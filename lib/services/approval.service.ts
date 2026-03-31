@@ -113,6 +113,15 @@ export async function sendCustomerApprovalRequest(
     console.error('[approval] signed URL error:', signErr?.message)
   }
 
+  // Store approval attempt in DB for tracking
+  try {
+    await supabase.from('sms_logs').insert({
+      phone: customerPhone.replace(/\D/g, ''),
+      body: `[APPROVAL REQUEST to ${customerName}] driver=${driverName} yards=${yardsNeeded} order=${orderId} code=${approvalCode}`,
+      direction: 'outbound',
+    })
+  } catch {}
+
   const body = `DumpSite: ${driverName} has dirt ready to deliver to your property — ${yardsNeeded} yds. Reply YES to approve or NO to decline.`
 
   // Try MMS with photo
