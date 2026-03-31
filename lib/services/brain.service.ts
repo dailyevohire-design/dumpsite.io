@@ -492,31 +492,58 @@ function tryTemplate(
     return null
   }
 
+  // ── PHOTO — only allowed during PHOTO_PENDING state ──
   if (hasPhoto && state === "PHOTO_PENDING") {
-    return null
+    return null // Let Sonnet evaluate the dirt
   }
 
+  // Photo sent but NOT in PHOTO_PENDING — driver jumped ahead.
+  // Acknowledge photo but enforce qualification flow.
   if (hasPhoto) {
+    if (!hasYards) {
+      return { response: pick(lang==="es" ? ["recibida — cuantas yardas hay disponibles"] : ["got it — how many yards are available"]), updates: {}, action: "NONE" }
+    }
+    if (!hasTruck) {
+      return { response: pick(lang==="es" ? ["recibida — que tipo de camion tienes"] : ["got the pic — what kind of truck are you hauling in"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
+    }
+    if (!hasTruckCount) {
+      return { response: pick(lang==="es" ? ["recibida — cuantos camiones traes"] : ["got it — how many trucks you got running"]), updates: { state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
+    }
+    if (!hasCity) {
+      return { response: pick(lang==="es" ? ["recibida — cual es la direccion de donde van a cargar"] : ["got the pic — whats the address your loading from so I can find the closest site"]), updates: { state: "ASKING_ADDRESS" }, action: "NONE" }
+    }
+    // Has everything — let Sonnet evaluate
     return null
   }
 
-  
-  // Catch-all: if in qualification and something missing, ask next piece
-  if (!activeJob && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED" && state !== "PAYMENT_METHOD_PENDING" && state !== "PAYMENT_ACCOUNT_PENDING" && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "AWAITING_CUSTOMER_CONFIRM") {
-    const isShortMsg = body.trim().length < 40 && !/\d+\s+\w+.*(st|ave|blvd|dr|rd|ln|hwy|expy)/i.test(body)
-    if (isShortMsg) {
-      if (!hasYards) {
-        return null // Let Sonnet handle with explicit "ask yards" instruction
-      }
-      if (!hasTruck) {
-        return { response: pick(lang==="es" ? ["que tipo de camion tienes"] : ["what kind of truck are you hauling in"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
-      }
-      if (!hasTruckCount) {
-        return { response: pick(lang==="es" ? ["cuantos camiones traes"] : ["how many trucks you got running"]), updates: { state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
-      }
-      if (!hasCity) {
-        return { response: pick(lang==="es" ? ["cual es la direccion de donde van a cargar"] : ["whats the address your coming from so I can put into my system and see which site is closest"]), updates: { state: "ASKING_ADDRESS" }, action: "NONE" }
-      }
+  // ═══════════════════════════════════════════════════
+  // CATCH-ALL: qualification is NOT complete — NEVER let
+  // Sonnet skip steps. Template enforces the order.
+  // ═══════════════════════════════════════════════════
+  const inQualification = !activeJob && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED" && state !== "PAYMENT_METHOD_PENDING" && state !== "PAYMENT_ACCOUNT_PENDING" && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "AWAITING_CUSTOMER_CONFIRM" && state !== "CLOSED"
+  const qualificationMissing = !hasYards || !hasTruck || !hasTruckCount || !hasCity
+
+  if (inQualification && qualificationMissing) {
+    // Something is still missing — ask for the next piece
+    // Only let Sonnet handle if this is the FIRST message (opener/greeting)
+    // After that, template controls the flow
+    const isFirstMessage = state === "DISCOVERY" && !hasYards && !hasTruck && !hasCity
+    if (isFirstMessage) {
+      return null // Let Sonnet do the natural opener, but with strict instruction to ask yards
+    }
+
+    // NOT first message — template takes over, no exceptions
+    if (!hasYards) {
+      return { response: pick(lang==="es" ? ["cuantas yardas hay disponibles"] : ["how many yards are available","how many yards you got"]), updates: {}, action: "NONE" }
+    }
+    if (!hasTruck) {
+      return { response: pick(lang==="es" ? ["que tipo de camion tienes"] : ["what kind of truck are you hauling in"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
+    }
+    if (!hasTruckCount) {
+      return { response: pick(lang==="es" ? ["cuantos camiones traes"] : ["how many trucks you got running"]), updates: { state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
+    }
+    if (!hasCity) {
+      return { response: pick(lang==="es" ? ["cual es la direccion de donde van a cargar"] : ["whats the address your loading from so I can find the closest site"]), updates: { state: "ASKING_ADDRESS" }, action: "NONE" }
     }
   }
 
