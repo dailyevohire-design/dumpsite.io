@@ -129,12 +129,34 @@ function detectLanguage(text: string): "en" | "es" {
 }
 function parseTruck(text: string): string | null {
   const t = text.toLowerCase()
-  if (/tandem|tandum/.test(t)) return "tandem_axle"
-  if (/tri.?ax/.test(t)) return "tri_axle"
-  if (/quad/.test(t)) return "quad_axle"
-  if (/end.?dump/.test(t)) return "end_dump"
-  if (/belly/.test(t)) return "belly_dump"
-  if (/side.?dump/.test(t)) return "side_dump"
+  // Tandem + all misspellings
+  if (/tandem|tandum|tandm|tnadem|tandam|tandim|tand[ae]m/i.test(t)) return "tandem_axle"
+  // Tri-axle + misspellings
+  if (/tri.?ax|triax|tri.?axel|triaxel|tri axle/i.test(t)) return "tri_axle"
+  // Quad
+  if (/quad|qaud|quaad/i.test(t)) return "quad_axle"
+  // End dump + misspellings
+  if (/end.?dump|end dumb|enddmp|in dump/i.test(t)) return "end_dump"
+  if (/belly/i.test(t)) return "belly_dump"
+  if (/side.?dump/i.test(t)) return "side_dump"
+  if (/super.?dump/i.test(t)) return "super_dump"
+  if (/transfer/i.test(t)) return "transfer"
+  if (/pup/i.test(t)) return "pup_trailer"
+  if (/semi|18.?wheel/i.test(t)) return "semi"
+  if (/dump\s*truck|dump/i.test(t)) return "end_dump"
+  return null
+}
+function parseYardsFromText(text: string): number | null {
+  const t = text.toLowerCase()
+  // "100 yards" / "100 yds" / "100yds" / "100 yardas"
+  const m = t.match(/(\d+)\s*(yds?|yards?|yardas?|cubic)/i)
+  if (m) return parseInt(m[1])
+  // Just a number in context of yards question
+  const justNum = t.match(/^(\d+)$/)
+  if (justNum) {
+    const n = parseInt(justNum[1])
+    if (n > 0 && n < 50000) return n
+  }
   return null
 }
 function parseLoads(text: string): number | null {
@@ -596,6 +618,136 @@ function tryTemplate(
   }
   if (/\b(someone else.*(phone|number)|my buddy.*(phone|texting)|using.*(his|her|their) phone|desde otro telefono)\b/i.test(lower)) {
     return { response: pick(["have them text me from their number so I can set them up","they gotta text me from their own phone so I can track their loads"]), updates: {}, action: "NONE" }
+  }
+
+  // ═══════════════════════════════════════════════════
+  // DEEP EDGE CASES — unbreakable layer
+  // ═══════════════════════════════════════════════════
+
+  // ── EMPTY / WHITESPACE ONLY ──
+  if (!body.trim() && !hasPhoto) {
+    return { response: pick(["you there","whats up","you need something"]), updates: {}, action: "NONE" }
+  }
+
+  // ── ZIP CODE MISTAKEN FOR YARDS ──
+  if (/^\d{5}$/.test(lower) && !hasYards && (state === "DISCOVERY" || state === "ASKING_ADDRESS")) {
+    return { response: pick(["is that a zip code? I need the full address so I can find whats closest","send me the full street address not just the zip"]), updates: {}, action: "NONE" }
+  }
+
+  // ── PHONE NUMBER GIVEN AS TEXT (not payment info) ──
+  if (/^\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}$/.test(body.trim()) && state !== "PAYMENT_ACCOUNT_PENDING") {
+    return { response: pick(["I'm better on text, what you need","text is faster for me, whats going on"]), updates: {}, action: "NONE" }
+  }
+
+  // ── DOLLAR AMOUNT — negotiation or confusion ──
+  if (/^\$\d+/.test(body.trim()) && state !== "PAYMENT_METHOD_PENDING" && state !== "PAYMENT_ACCOUNT_PENDING") {
+    return null // Let Sonnet handle negotiation
+  }
+
+  // ── TIME — "3pm" "at 7" "in the morning" ──
+  if (/^\d{1,2}\s*(am|pm|a\.m|p\.m)$/i.test(lower) || /^(morning|afternoon|evening|manana|en la manana|en la tarde)$/i.test(lower)) {
+    return { response: pick(["what time works for you is fine, just text me when you heading out","whenever works, just hit me up when you ready to roll"]), updates: {}, action: "NONE" }
+  }
+
+  // ── UNREASONABLE LOAD COUNT ──
+  if (/^\d+$/.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    const n = parseInt(lower)
+    if (n === 0) {
+      return { response: pick(["so you didnt dump any? whats going on","zero loads? what happened"]), updates: {}, action: "NONE" }
+    }
+    if (n > 50) {
+      return { response: pick(["thats a lot of loads bro, whats the real count","for real? how many loads you actually drop"]), updates: {}, action: "NONE" }
+    }
+  }
+
+  // ── "HALF A LOAD" / PARTIAL ──
+  if (/\b(half|partial|medio|media|not full|not a full)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
+    return { response: pick(["that counts as 1 load","yea just count it as 1"]), updates: {}, action: "NONE" }
+  }
+
+  // ── RELATIVE LOCATIONS (not real addresses) ──
+  if (/\b(behind|next to|across from|near the|by the|off of|off the|al lado|cerca de|atras de|junto a)\b/i.test(lower) && (state === "ASKING_ADDRESS" || !hasCity)) {
+    return { response: pick(["I need the actual street address so I can put it in my system","send me the street address with the number, like 1234 Main St"]), updates: {}, action: "NONE" }
+  }
+
+  // ── CROSS STREETS ──
+  if (/\b\w+\s+(and|&|y)\s+\w+\b/i.test(lower) && !/\d/.test(body) && (state === "ASKING_ADDRESS" || !hasCity) && body.length < 40) {
+    return { response: pick(["I need the full street address with the number, not just cross streets","send me the actual address like 1234 Main St Dallas"]), updates: {}, action: "NONE" }
+  }
+
+  // ── "HELP" — actual help request, not reset ──
+  if (/^help$/i.test(lower)) {
+    return { response: pick(["whats up, how can I help","what you need"]), updates: {}, action: "NONE" }
+  }
+
+  // ── COMPOUND MESSAGE — driver drops all info at once ──
+  if (body.length > 50 && state === "DISCOVERY" && !hasYards) {
+    const compoundYards = body.match(/(\d+)\s*(yds?|yards?|yardas?)/i)
+    const compoundTruck = parseTruck(body)
+    const compoundCount = body.match(/(\d+)\s*(trucks?|camion)/i)
+    if (compoundYards) {
+      const updates: Record<string,any> = { extracted_yards: parseInt(compoundYards[1]) }
+      if (compoundTruck) updates.extracted_truck_type = compoundTruck
+      if (compoundCount) updates.extracted_truck_count = parseInt(compoundCount[1])
+      // Check for address in the compound message
+      const hasAddr = /\d{2,}\s+\w+\s+(st|ave|blvd|dr|rd|ln|way|ct|hwy|fm)/i.test(body)
+      if (hasAddr && compoundTruck) {
+        // Has everything — try to present a job
+        return null // Let the normal flow handle with enriched data
+      }
+      // Return next missing piece
+      if (!compoundTruck) {
+        return { response: pick(lang==="es" ? ["10.4 que tipo de camion tienes"] : ["got it, what kind of truck you running"]), updates, action: "NONE" }
+      }
+      if (!compoundCount) {
+        return { response: pick(lang==="es" ? ["10.4 cuantos camiones traes"] : ["copy, how many trucks you got running"]), updates, action: "NONE" }
+      }
+      return { response: pick(lang==="es" ? ["10.4 cual es la direccion de donde cargan"] : ["10.4 whats the address your loading from"]), updates, action: "NONE" }
+    }
+  }
+
+  // ── AUTO-REPLY / DRIVING MESSAGES ──
+  if (/\b(im driving|currently driving|driving right now|i.?ll (call|text|get) (you |)back|auto.?reply|manejando|estoy manejando|busy right now|in a meeting)\b/i.test(lower)) {
+    return { response: pick(["no rush, text me when you free","all good hit me up later"]), updates: {}, action: "NONE" }
+  }
+
+  // ── FORWARDED MESSAGES ──
+  if (/^(fwd|fw|forwarded|reenviado)[\s:]/i.test(lower)) {
+    return { response: pick(["I cant read forwarded messages, just tell me whats up","whats this about"]), updates: {}, action: "NONE" }
+  }
+
+  // ── MANAGER / ESCALATION ──
+  if (/\b(manager|supervisor|boss|owner|jefe|dueno|speak.*(manager|someone)|talk.*(manager|boss)|higher up)\b/i.test(lower)) {
+    return { response: pick(["you're talking to him, whats going on","this is it bro, whats the issue"]), updates: {}, action: "NONE" }
+  }
+
+  // ── VERY LONG MESSAGE (>200 chars) that isn't an address ──
+  if (body.length > 200 && !/\d{2,}\s+\w+.*(st|ave|blvd|dr|rd|ln|way|hwy)/i.test(body)) {
+    return null // Let Sonnet handle — it can parse long messages
+  }
+
+  // ── AMBIGUOUS "2" — could be yards, trucks, or loads ──
+  if (/^[2-9]$/.test(lower) && state === "DISCOVERY" && !hasYards && !hasTruck) {
+    // Single digit in DISCOVERY with nothing collected — assume yards
+    return { response: pick(lang==="es" ? ["que tipo de camion tienes"] : ["what kind of truck you running"]), updates: { extracted_yards: parseInt(lower) }, action: "NONE" }
+  }
+
+  // ── CITY NAME TYPOS — common DFW misspellings ──
+  const cityTypos: Record<string,string> = {
+    "ft worth":"Fort Worth", "ft. worth":"Fort Worth", "fortworth":"Fort Worth", "fourt worth":"Fort Worth",
+    "dalls":"Dallas", "dallass":"Dallas", "dal":"Dallas",
+    "arlington":"Arlington", "arlinton":"Arlington",
+    "waxa":"Waxahachie", "waxahatchie":"Waxahachie", "waxahachee":"Waxahachie",
+    "mckinney":"McKinney", "mckinny":"McKinney", "mkinney":"McKinney",
+    "lewisvile":"Lewisville", "lewsiville":"Lewisville",
+    "dennison":"Denison", "denisson":"Denison",
+    "midlothain":"Midlothian", "midlothien":"Midlothian",
+    "colleyville":"Colleyville", "collyville":"Colleyville",
+    "grapvine":"Grapevine", "gravevine":"Grapevine",
+  }
+  const typoCity = cityTypos[lower] || cityTypos[lower.replace(/[^a-z ]/g, "")]
+  if (typoCity && (state === "ASKING_ADDRESS" || state === "DISCOVERY")) {
+    return { response: pick(lang==="es" ? ["cual es la direccion exacta en " + typoCity] : ["whats the exact address in " + typoCity + " so I can find the closest site"]), updates: { extracted_city: typoCity, state: "ASKING_ADDRESS" }, action: "NONE" }
   }
 
   if (/\b(on my way|otw|heading there|headed there|leaving now|en camino|voy para alla|saliendo|on the way|im on my way|i.?m otw|bout to leave|pulling out|headed to site|ya voy|voy pa ya)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
@@ -1173,8 +1325,8 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     return "Yea you back on"
   }
 
-  // ── UNIVERSAL RESET — escape from ANY stuck state ───────────
-  if (/^(reset|start over|new|restart|menu|help|cancel)$/i.test(lower)) {
+  // ── UNIVERSAL RESET — only on clear intent ───────────
+  if (/^(reset|start over|restart|menu)$/i.test(lower)) {
     await resetConv(phone)
     await logMsg(phone, "Conversation reset", "outbound", `reset_${sid}`)
     return "10.4 starting fresh. You got dirt today"
