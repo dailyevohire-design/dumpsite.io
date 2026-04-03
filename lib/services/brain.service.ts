@@ -15,6 +15,7 @@ const anthropic = new Anthropic()
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"
 const LARGE_JOB_YARDS = 500
+const DFW_CITIES = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale","Venus","Ponder","Justin","Boyd","Blum","Gainesville","Hutchins","Everman","Hillsboro","Matador","Elizabeth"]
 
 // ─────────────────────────────────────────────────────────────
 // TYPES
@@ -104,8 +105,8 @@ Start at floor. Pushback = +$5. At ceiling = "that is the best I got" — NEVER 
 PAYMENT TIMING:
 If driver asks about payment after delivery: "payments go out end of day, we process them in batches with the other drivers"
 
-JOBS: "[City] [X] miles — $[pay]/load — think that works"
-Never show addresses. Never show job codes.
+JOBS: "[City] [X] miles — [yards] yds — $[pay]/load — [dump truck access or end dump access] — think that works"
+Never show addresses. Never show job codes. ALWAYS mention truck access type.
 
 OFF-TOPIC: Respond naturally like a real person. Short. Then steer back to business if appropriate.
 
@@ -140,10 +141,12 @@ function parseTruck(text: string): string | null {
   if (/belly/i.test(t)) return "belly_dump"
   if (/side.?dump/i.test(t)) return "side_dump"
   if (/super.?dump/i.test(t)) return "super_dump"
-  if (/transfer/i.test(t)) return "transfer"
+  if (/\btransfer\s*(truck|trailer|rig)?\s*$/i.test(t)) return "transfer"
   if (/pup/i.test(t)) return "pup_trailer"
   if (/semi|18.?wheel/i.test(t)) return "semi"
-  if (/dump\s*truck|dump/i.test(t)) return "end_dump"
+  if (/dump\s*truck/i.test(t)) return "end_dump"
+  // Only match bare "dump" if it's the whole message (driver answering "what truck"), not in "dump site" or "where can I dump"
+  if (/^dump$/i.test(t.trim())) return "end_dump"
   return null
 }
 function parseYardsFromText(text: string): number | null {
@@ -177,6 +180,14 @@ function isAddressResend(text: string): boolean {
 }
 export function generateJobNumber(id: string): string {
   return "DS-" + id.replace(/-/g, "").slice(0, 6).toUpperCase()
+}
+
+function formatTruckAccess(truckType: string): string {
+  const dumpTrucks = ["tandem_axle", "tri_axle", "quad_axle", "super_dump"]
+  const endDumpTrucks = ["end_dump", "belly_dump", "side_dump", "semi", "transfer", "18_wheeler", "pup_trailer"]
+  if (endDumpTrucks.includes(truckType)) return "end dump access"
+  if (dumpTrucks.includes(truckType)) return "dump truck access"
+  return "dump truck access"
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -253,7 +264,9 @@ async function getActiveJob(conv: any) {
   if (!conv?.active_order_id) return null
   const { data } = await createAdminSupabase().from("dispatch_orders")
     .select("id, client_address, client_name, client_phone, yards_needed, driver_pay_cents, status, notes, cities(name)")
-    .eq("id", conv.active_order_id).maybeSingle()
+    .eq("id", conv.active_order_id)
+    .in("status", ["dispatching", "active", "pending"])
+    .maybeSingle()
   return data
 }
 async function getPaymentInfo(phone: string) {
@@ -284,6 +297,22 @@ async function sendJobLink(
   const pay = Math.round(job.driver_pay_cents / 100)
   const city = (job.cities as any)?.name || ""
   const driverName = profile ? `${profile.first_name || ""} ${profile.last_name || ""}`.trim() : driverPhone
+
+  // Verify reservation is still active before sending address
+  if (conv?.reservation_id) {
+    const { data: res } = await sb.from("site_reservations").select("status, expires_at")
+      .eq("id", conv.reservation_id).maybeSingle()
+    if (res && (res.status !== "active" || new Date(res.expires_at) < new Date())) {
+      // Reservation expired — try to re-claim
+      const newRid = await atomicClaimJob(job.id, driverPhone, profile?.user_id || null)
+      if (!newRid) {
+        return lang === "es"
+          ? "ese sitio se lo llevo otro driver mientras esperabamos, dejame buscarte otro"
+          : "that site got taken while we were waiting, let me find you another one"
+      }
+      conv.reservation_id = newRid
+    }
+  }
 
   // Upsert load_request
   const idempKey = `${profile?.user_id}-${job.id}`
@@ -499,8 +528,26 @@ function tryTemplate(
   }
 
   // ── BUSINESS QUESTIONS ──
-  if (/\b(too far|thats far|muy lejos|esta lejos|anything closer|got.*closer|something closer|mas cerca)\b/i.test(lower)) {
-    return { response: pick(["that's the closest I got right now, I'll hit you up if something opens up closer","nothing closer right now but I'll let you know"]), updates: {}, action: "NONE" }
+  // "too far" / "anything closer" / "what else" / "what about [city]" / "no" during job presentation — show next available job
+  if (/\b(too far|thats far|muy lejos|esta lejos|anything closer|got.*closer|something closer|mas cerca|anything else|what else|next one|otro sitio|otra opcion|something else|other option|show me another|got another|que mas tienes|what about|how about|que hay en|nah what about|no what about)\b/i.test(lower) || (state === "JOB_PRESENTED" && /^(no|nah|nope|pass|too far|negative|nel|na|next)$/i.test(lower))) {
+    if (!hasTruck) {
+      return { response: pick(lang==="es" ? ["que tipo de camion tienes"] : ["what kind of truck you running"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
+    }
+    // Track ALL rejected job IDs (stored comma-separated in job_state during JOB_PRESENTED)
+    const currentJobId = conv?.pending_approval_order_id
+    const priorRejected = (conv?.job_state || "").split(",").filter(Boolean)
+    const allRejected = new Set([...priorRejected, ...(currentJobId ? [currentJobId] : [])])
+    const nextJob = nearbyJobs.find(j => !allRejected.has(j.id))
+    if (nextJob) {
+      const payDollars = Math.round(nextJob.driverPayCents / 100)
+      const truckLabel = formatTruckAccess(nextJob.truckTypeNeeded)
+      const resp = lang === "es"
+        ? `Tengo ${nextJob.cityName} ${nextJob.distanceMiles.toFixed(0)} millas — ${nextJob.yardsNeeded} yardas — $${payDollars}/carga — ${truckLabel} — te sirve`
+        : `I got ${nextJob.cityName} ${nextJob.distanceMiles.toFixed(0)} miles — ${nextJob.yardsNeeded} yds — $${payDollars}/load — ${truckLabel} — think that works`
+      const rejectedList = [...allRejected].join(",")
+      return { response: resp, updates: { state: "JOB_PRESENTED", pending_approval_order_id: nextJob.id, job_state: rejectedList }, action: "NONE" }
+    }
+    return { response: pick(lang==="es" ? ["eso es todo lo que tengo ahorita, te aviso si sale algo mas"] : ["thats all I got right now, I'll hit you up when something opens up"]), updates: { job_state: null }, action: "NONE" }
   }
   if (/\b(too low|too cheap|not enough|mas dinero|more money|better.*price|can you do better|better rate|raise.*price|mas precio)\b/i.test(lower)) {
     return null // Let Sonnet negotiate
@@ -526,8 +573,27 @@ function tryTemplate(
   if (/\b(bring.*buddy|another driver|got.*friend|my boy|my partner|mi compa|otro chofer|more drivers)\b/i.test(lower)) {
     return { response: pick(["yea have them text this number and I'll get them set up too","for sure, tell them to text me and I'll hook them up"]), updates: {}, action: "NONE" }
   }
-  if (/\b(do you have anything|got any(thing)?|any jobs|any work|tienes algo|hay trabajo)\b/i.test(lower) && state === "DISCOVERY") {
-    return { response: pick(["yea I got sites open, how many yards you sitting on","I got some spots, how many yards you got"]), updates: {}, action: "NONE" }
+  if (/\b(do you have anything|got any(thing)?|any jobs|any work|tienes algo|hay trabajo)\b/i.test(lower) && (state === "DISCOVERY" || state === "CLOSED")) {
+    // Must know truck type before presenting jobs — wrong truck = wrong site access
+    if (!hasTruck) {
+      return { response: pick(lang==="es"
+        ? ["si tengo sitios, que tipo de camion tienes"]
+        : ["yea I got sites, what kind of truck you running"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
+    }
+    // If we found nearby jobs from a city they mentioned, present the closest
+    if (nearbyJobs.length > 0) {
+      const job = nearbyJobs[0]
+      const payDollars = Math.round(job.driverPayCents / 100)
+      const truckLabel = formatTruckAccess(job.truckTypeNeeded)
+      const resp = lang === "es"
+        ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas — ${job.yardsNeeded} yardas — $${payDollars}/carga — ${truckLabel} — te sirve`
+        : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles — ${job.yardsNeeded} yds — $${payDollars}/load — ${truckLabel} — think that works`
+      return { response: resp, updates: { state: "JOB_PRESENTED", pending_approval_order_id: job.id, extracted_city: job.cityName }, action: "NONE" }
+    }
+    // No location info yet — ask for their address
+    return { response: pick(lang==="es"
+      ? ["si tengo sitios, mandame la direccion de donde cargan y te busco el mas cerca"]
+      : ["yea I got sites open, whats the address your coming from so I can find the closest one","I got spots, send me the address your loading from and I'll find whats nearest"]), updates: { state: "ASKING_ADDRESS" }, action: "NONE" }
   }
 
   // ── PHOTO AVOIDANCE ──
@@ -746,8 +812,21 @@ function tryTemplate(
     "grapvine":"Grapevine", "gravevine":"Grapevine",
   }
   const typoCity = cityTypos[lower] || cityTypos[lower.replace(/[^a-z ]/g, "")]
-  if (typoCity && (state === "ASKING_ADDRESS" || state === "DISCOVERY")) {
-    return { response: pick(lang==="es" ? ["cual es la direccion exacta en " + typoCity] : ["whats the exact address in " + typoCity + " so I can find the closest site"]), updates: { extracted_city: typoCity, state: "ASKING_ADDRESS" }, action: "NONE" }
+  if (typoCity && (state === "ASKING_ADDRESS" || state === "DISCOVERY" || state === "CLOSED")) {
+    if (!hasTruck) {
+      return { response: pick(lang==="es" ? ["que tipo de camion tienes"] : ["what kind of truck you running"]), updates: { extracted_city: typoCity, state: "ASKING_TRUCK" }, action: "NONE" }
+    }
+    // If we already have nearby jobs (from inline city extraction), present the closest one
+    if (nearbyJobs.length > 0) {
+      const job = nearbyJobs[0]
+      const payDollars = Math.round(job.driverPayCents / 100)
+      const truckLabel = formatTruckAccess(job.truckTypeNeeded)
+      const resp = lang === "es"
+        ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas — ${job.yardsNeeded} yardas — $${payDollars}/carga — ${truckLabel} — te sirve`
+        : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles — ${job.yardsNeeded} yds — $${payDollars}/load — ${truckLabel} — think that works`
+      return { response: resp, updates: { extracted_city: typoCity, state: "JOB_PRESENTED", pending_approval_order_id: job.id }, action: "NONE" }
+    }
+    return { response: pick(lang==="es" ? ["mandame la direccion exacta de donde cargan en " + typoCity + " y te busco el sitio mas cerca"] : ["whats the exact address in " + typoCity + " so I can find the closest site"]), updates: { extracted_city: typoCity, state: "ASKING_ADDRESS" }, action: "NONE" }
   }
 
   if (/\b(on my way|otw|heading there|headed there|leaving now|en camino|voy para alla|saliendo|on the way|im on my way|i.?m otw|bout to leave|pulling out|headed to site|ya voy|voy pa ya)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
@@ -762,10 +841,11 @@ function tryTemplate(
     return { response: pick(lang==="es" ? ["cuantas cargas tiraste","cuantas cargas en total"] : ["how many loads total","how many loads you drop"]), updates: {}, action: "NONE" }
   }
 
-  const loadMatch = lower.match(/^(\d{1,3})\s*(loads?|down|total|done|delivered|drops?|cargas?)?$/) 
-                 || lower.match(/(done|delivered|dropped|tiramos)\s*(\d{1,3})/i)
+  const loadMatch1 = lower.match(/^(\d{1,3})\s*(loads?|down|total|done|delivered|drops?|cargas?)?$/)
+  const loadMatch2 = lower.match(/(done|delivered|dropped|tiramos)\s+(\d{1,3})/i)
+  const loadMatch = loadMatch1 || loadMatch2
   if (loadMatch && activeJob && (state === "ACTIVE" || state === "OTW_PENDING")) {
-    const loads = parseInt(loadMatch[1] || loadMatch[2])
+    const loads = parseInt(loadMatch1 ? loadMatch1[1] : loadMatch2![2])
     if (loads > 0 && loads <= 100) {
       return { response: "__DELIVERY__:" + loads, updates: { state: "AWAITING_CUSTOMER_CONFIRM" }, action: "COMPLETE_JOB" }
     }
@@ -785,13 +865,31 @@ function tryTemplate(
   }
 
   if (state === "PAYMENT_ACCOUNT_PENDING") {
-    const looksLikeAccount = /\d{7,}/.test(body) || /@/.test(body) || /^@?\w{3,}$/.test(body.trim()) || /^[A-Z][a-z]+ [A-Z][a-z]+/.test(body.trim()) || /^[a-z]+\s+[a-z]+$/i.test(body.trim()) || /^[a-z]+\s+\d{3}/.test(body.trim().toLowerCase())
+    // Let driver switch payment method or escape
+    if (/\b(zelle|venmo|check|cheque)\b/i.test(lower) && /\b(switch|change|different|instead|actually|mejor|cambiar)\b/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["dale, zelle o venmo"] : ["no problem, zelle or venmo"]), updates: { state: "PAYMENT_METHOD_PENDING", job_state: null }, action: "NONE" }
+    }
+    if (/^(zelle)$/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["mandame el nombre y numero de tu zelle"] : ["send the name and number the zelle account it to"]), updates: { state: "PAYMENT_ACCOUNT_PENDING", job_state: "zelle" }, action: "NONE" }
+    }
+    if (/^(venmo)$/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["mandame tu venmo"] : ["whats your venmo"]), updates: { state: "PAYMENT_ACCOUNT_PENDING", job_state: "venmo" }, action: "NONE" }
+    }
+    if (/\b(don.?t have|dont have|no tengo|i don.?t|cant|can.?t|switch|cambiar)\b/i.test(lower)) {
+      return { response: pick(lang==="es" ? ["dale, zelle o venmo"] : ["no problem, zelle or venmo"]), updates: { state: "PAYMENT_METHOD_PENDING", job_state: null }, action: "NONE" }
+    }
+    // Block conversational words from being saved as accounts
+    const CONVERSATIONAL = /^(yes|yeah|no|nah|ok|okay|sure|hey|hi|hello|yo|sup|what|why|how|when|where|who|send|help|please|thanks|thank|cool|good|nice|bet|done|idk|nope|yep|yea|lol|haha|damn|bro|man|dude|word|bruh|right|true|copy|got it|aight|my venmo|my zelle|venmo|zelle|check)$/i
+    const looksLikeAccount = /\d{7,}/.test(body) || /@/.test(body) || (/^@?\w{4,}$/.test(body.trim()) && !CONVERSATIONAL.test(body.trim())) || /^[A-Z][a-z]+ [A-Z][a-z]+/.test(body.trim()) || /^[a-z]+\s+\d{3}/i.test(body.trim())
     if (looksLikeAccount) {
       return { response: pick(lang==="es" ? ["listo, te mandamos en rato"] : ["got it, we will have it sent shortly"]), updates: { state: "CLOSED" }, action: "COLLECT_PAYMENT" }
     }
     const method = conv?.job_state || "zelle"
-    if (method === "venmo") return { response: lang==="es" ? "mandame tu venmo" : "whats your venmo", updates: {}, action: "NONE" }
-    return { response: lang==="es" ? "mandame el nombre y numero de tu zelle" : "send the name and number the zelle account it to", updates: {}, action: "NONE" }
+    // Use __PAY_REASK__ marker — template caller counts these in history to escalate
+    if (method === "venmo") {
+      return { response: "__PAY_REASK__:venmo", updates: {}, action: "NONE" }
+    }
+    return { response: "__PAY_REASK__:zelle", updates: {}, action: "NONE" }
   }
 
   if (state === "APPROVAL_PENDING") {
@@ -830,6 +928,34 @@ function tryTemplate(
         : ["whats up, you got more dirt","hey how you doing, you got more material to move","hey whats going on, you sitting on more dirt"]),
         updates: { state: "DISCOVERY" }, action: "NONE" }
     }
+    // Driver asking about jobs / mentioning a city / wanting to work
+    // If we have nearby jobs already (from city they mentioned), present the closest one
+    // Otherwise reset to DISCOVERY and start qualification
+    if (/\b(anything|got any|any jobs|any work|tienes algo|hay trabajo|where can i|do you have|what do you have|que tienes|donde puedo|have anything|got something|need.*site|need.*dump|looking for|spots?|open)\b/i.test(lower) || /\b(denton|fort worth|dallas|arlington|waxahachie|midlothian|cleburne|mansfield|burleson|frisco|plano|mckinney|garland|irving|mesquite|grand prairie|cedar hill|desoto|lancaster|rockwall|rowlett|weatherford|azle|joshua|crowley|ennis|corsicana|hillsboro|hutchins|carrollton|colleyville)\b/i.test(lower)) {
+      // Must know truck type before showing jobs — access type matters
+      // KEEP truck type from previous job — driver's truck doesn't change between jobs
+      if (!hasTruck) {
+        return { response: pick(lang==="es"
+          ? ["dale, que tipo de camion tienes"]
+          : ["yea I got spots, what kind of truck you running"]),
+          updates: { state: "ASKING_TRUCK", extracted_yards: null, extracted_material: null, pending_approval_order_id: null, job_state: null }, action: "NONE" }
+      }
+      if (nearbyJobs.length > 0) {
+        const job = nearbyJobs[0]
+        const payDollars = Math.round(job.driverPayCents / 100)
+        const truckLabel = formatTruckAccess(job.truckTypeNeeded)
+        const resp = lang === "es"
+          ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas — ${job.yardsNeeded} yardas — $${payDollars}/carga — ${truckLabel} — te sirve`
+          : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles — ${job.yardsNeeded} yds — $${payDollars}/load — ${truckLabel} — think that works`
+        return { response: resp, updates: { state: "JOB_PRESENTED", pending_approval_order_id: job.id, extracted_city: job.cityName, job_state: null }, action: "NONE" }
+      }
+      // No jobs found — ask for their loading address so we can find the closest site
+      // Keep truck type/count — only clear location-related fields
+      return { response: pick(lang==="es"
+        ? ["dale, mandame la direccion de donde estan cargando y te busco el sitio mas cerca"]
+        : ["yea I got spots open, whats the address your loading from so I can find the closest site","for sure, send me the address your coming from and I'll find whats closest"]),
+        updates: { state: "ASKING_ADDRESS", extracted_city: null, extracted_yards: null, extracted_material: null, job_state: null }, action: "NONE" }
+    }
     // Driver mentions new dirt / new job
     if (/tomorrow|manana|mañana|next week|later|got more|have more|another load|mas tierra|got dirt|have dirt|i got|need.*dump|more dirt|load ready|ready to|haul/i.test(lower)) {
       return { response: pick(lang==="es"
@@ -841,7 +967,7 @@ function tryTemplate(
     return null
   }
 
-  const isYes = /^(yes|yeah|yep|yea|yessir|yessirr|bet|fasho|si|fs|sure|absolutely|for sure|copy|10-4|ok|okay|yup|hell yeah|of course|definitely|correct|right|affirmative|dale|simon|claro|lets go|lets do it|down|im down|send it|works for me|that works|sounds good)$/i.test(lower)
+  const isYes = /^(yes|yeah|yep|yea|yessir|yessirr|yes sir|yes ma.?am|yes please|yea please|bet|fasho|si|fs|sure|absolutely|for sure|copy|10-4|10\.4|ok|okay|yup|hell yeah|hell yea|of course|definitely|correct|right|affirmative|dale|simon|claro|lets go|lets do it|down|im down|send it|works for me|that works|sounds good|im interested|i.?m interested|i.?m down|perfect|do it|go ahead)$/i.test(lower)
 
   if (isYes && state === "JOB_PRESENTED") {
     return { response: pick(lang==="es" ? ["mandame una foto de la tierra","dame una foto de la tierra"] : ["send me a pic of the dirt","send me a picture of the material"]), updates: { state: "PHOTO_PENDING" }, action: "NONE" }
@@ -879,11 +1005,11 @@ function tryTemplate(
     [/belly/i, "belly_dump"],
     [/side.?dump/i, "side_dump"],
     [/super.?dump|super\s+dump/i, "super_dump"],
-    [/transfer/i, "transfer"],
-    [/pup/i, "pup_trailer"],
+    [/\btransfer\s*(truck|trailer|rig)?\s*$/i, "transfer"],
+    [/\bpup\b/i, "pup_trailer"],
     [/semi|18.?wheel/i, "semi"],
     [/volteo|camion de volteo/i, "end_dump"],
-    [/dump\s*truck|dump/i, "end_dump"],
+    [/dump\s*truck/i, "end_dump"],
   ]
   for (const [rx, val] of truckPatterns) {
     if (rx.test(lower) && (state === "ASKING_TRUCK" || state === "DISCOVERY" || !hasTruck)) {
@@ -911,29 +1037,41 @@ function tryTemplate(
       updates: { extracted_truck_count: count, state: "ASKING_ADDRESS" }, action: "NONE" }
   }
 
-  const looksLikeAddress = /\d+\s+\w+.*(st|ave|blvd|dr|rd|ln|ct|way|pkwy|hwy|street|avenue|drive|road|lane|expy|expressway)/i.test(body) || /\d+\s+\w+\s+\w+/.test(body)
+  // Address must have a street number + street type suffix OR look like "1234 Street Name City"
+  const looksLikeAddress = /\d+\s+\w+.*(st|ave|blvd|dr|rd|ln|ct|way|pkwy|hwy|street|avenue|drive|road|lane|expy|expressway|fm|loop|cr|county)/i.test(body)
 
-  // City names list for extraction
-  const cityNames = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale"]
-
-  // Check if message contains a known city name
+  // Check if message contains a known city name (word-boundary match)
   let mentionedCity = null as string | null
-  for (const c of cityNames) {
-    if (body.toLowerCase().includes(c.toLowerCase())) { mentionedCity = c; break }
+  for (const c of DFW_CITIES) {
+    const pattern = new RegExp("\\b" + c.replace(/\s+/g, "\\s+") + "\\b", "i")
+    if (pattern.test(body)) { mentionedCity = c; break }
   }
 
-  // Driver gave an address OR a city name while we're asking for location
-  const isLocationInput = looksLikeAddress || (mentionedCity && (state === "ASKING_ADDRESS" || state === "DISCOVERY"))
+  // Driver gave an address OR a city name — fire in any qualifying state
+  const isLocationInput = looksLikeAddress || (mentionedCity && (state === "ASKING_ADDRESS" || state === "DISCOVERY" || state === "CLOSED" || state === "JOB_PRESENTED"))
 
-  if (isLocationInput && (state === "ASKING_ADDRESS" || (!hasCity && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED"))) {
+  if (isLocationInput && (state === "ASKING_ADDRESS" || state === "CLOSED" || state === "JOB_PRESENTED" || (!hasCity && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "ASKING_TRUCK" && state !== "ASKING_TRUCK_COUNT"))) {
 
-    // If driver just gave a city name (no street address), ask for the actual address
-    // so we can find the CLOSEST site by distance
+    // Must know truck type before presenting any job
+    if (!hasTruck) {
+      return { response: pick(lang==="es" ? ["que tipo de camion tienes"] : ["what kind of truck you running"]), updates: { extracted_city: mentionedCity, state: "ASKING_TRUCK" }, action: "NONE" }
+    }
+
+    // If driver gave a city name — present closest job if we found any, otherwise ask for address
     if (!looksLikeAddress && mentionedCity) {
-      // They gave a city — we need the actual loading address for accurate routing
+      if (nearbyJobs.length > 0) {
+        const job = nearbyJobs[0]
+        const payDollars = Math.round(job.driverPayCents / 100)
+        const truckLabel = formatTruckAccess(job.truckTypeNeeded)
+        const resp = lang === "es"
+          ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas — ${job.yardsNeeded} yardas — $${payDollars}/carga — ${truckLabel} — te sirve`
+          : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles — ${job.yardsNeeded} yds — $${payDollars}/load — ${truckLabel} — think that works`
+        return { response: resp, updates: { extracted_city: mentionedCity, state: "JOB_PRESENTED", pending_approval_order_id: job.id }, action: "NONE" }
+      }
+      // No jobs found from city geocode — ask for exact address to improve search
       return { response: pick(lang==="es"
-        ? ["cual es la direccion exacta de donde van a cargar"]
-        : ["whats the exact address your loading from so I can find the closest site","send me the loading address so I can see which site is closest"]),
+        ? ["mandame la direccion exacta de donde cargan y te busco el sitio mas cerca"]
+        : ["send me the address your loading from so I can find whats closest","whats the exact address your coming from so I can find the closest site"]),
         updates: { extracted_city: mentionedCity, state: "ASKING_ADDRESS" }, action: "NONE" }
     }
 
@@ -941,9 +1079,10 @@ function tryTemplate(
     if (nearbyJobs.length > 0) {
       const job = nearbyJobs[0]
       const payDollars = Math.round(job.driverPayCents / 100)
+      const truckLabel = formatTruckAccess(job.truckTypeNeeded)
       const resp = lang === "es"
-        ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas de ti, ${job.yardsNeeded} yardas — $${payDollars}/carga — te sirve`
-        : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles from you, ${job.yardsNeeded} yards needed — $${payDollars}/load — think that works`
+        ? `Tengo ${job.cityName} ${job.distanceMiles.toFixed(0)} millas de ti — ${job.yardsNeeded} yardas — $${payDollars}/carga — ${truckLabel} — te sirve`
+        : `I got ${job.cityName} ${job.distanceMiles.toFixed(0)} miles from you — ${job.yardsNeeded} yds — $${payDollars}/load — ${truckLabel} — think that works`
       return { response: resp, updates: { extracted_city: mentionedCity || nearbyJobs[0].cityName, state: "JOB_PRESENTED", pending_approval_order_id: job.id }, action: "NONE" }
     }
 
@@ -1125,8 +1264,8 @@ async function callBrain(
       photoUrl ? `Photo URL: ${photoUrl}` : "",
       activeJob ? `Active job: ${(activeJob.cities as any)?.name} $${Math.round(activeJob.driver_pay_cents/100)}/load ${activeJob.yards_needed}yds` : "",
       nearbyJobs.length > 0
-        ? `Jobs available (show city+distance+yards+pay ONLY, never addresses):\n${nearbyJobs.slice(0,3).map(j =>
-            `  ${j.cityName} ${j.distanceMiles.toFixed(0)}mi ${j.yardsNeeded}yds $${Math.round(j.driverPayCents/100)}/load id:${j.id}`
+        ? `Jobs available (show city+distance+yards+pay+truck access ONLY, never addresses):\n${nearbyJobs.slice(0,3).map(j =>
+            `  ${j.cityName} ${j.distanceMiles.toFixed(0)}mi ${j.yardsNeeded}yds $${Math.round(j.driverPayCents/100)}/load ${formatTruckAccess(j.truckTypeNeeded)} id:${j.id}`
           ).join("\n")}`
         : "No jobs available near driver right now",
       "",
@@ -1162,7 +1301,7 @@ async function callBrain(
     console.error("[Brain] raw:", raw?.slice(0,200), err)
     const fb: Record<string,string> = {
       DISCOVERY: lang==="es"?pick(["que onda, tienes tierra hoy","como estas, tienes tierra"]):pick(["how are you, you got dirt today","hey whats up, you got material to haul","hey how you doing, you got dirt to move"]),
-      ASKING_TRUCK: "end dump or tandem", PHOTO_PENDING: "send pic of dirt",
+      ASKING_TRUCK: "what kind of truck you running", PHOTO_PENDING: "send pic of dirt",
       APPROVAL_PENDING: "give me a min", ACTIVE: "10.4",
       PAYMENT_METHOD_PENDING: "how you want it, zelle or venmo",
     }
@@ -1191,9 +1330,15 @@ async function handleDelivery(
       payout_cents: totalCents, truck_count: loads,
     }).eq("id", lr.id)
   }
-  try { await sb.from("driver_payments").insert({
-    driver_id: profile.user_id, load_request_id: lr?.id, amount_cents: totalCents, status: "pending",
-  }) } catch (e: any) { console.error("[payment]", e.message) }
+  // Idempotency: only insert payment if no existing payment for this load request
+  if (lr?.id) {
+    const { data: existingPay } = await sb.from("driver_payments").select("id").eq("load_request_id", lr.id).maybeSingle()
+    if (!existingPay) {
+      try { await sb.from("driver_payments").insert({
+        driver_id: profile.user_id, load_request_id: lr.id, amount_cents: totalCents, status: "pending",
+      }) } catch (e: any) { console.error("[payment]", e.message) }
+    }
+  }
 
   await logEvent("DELIVERY_VERIFIED", { phone, jobNum, loads, totalDollars }, job.id)
   await sendAdminAlert(`${jobNum} complete — ${profile.first_name} ${loads} load${loads>1?"s":""} $${totalDollars}`)
@@ -1258,11 +1403,24 @@ async function handlePayment(phone: string, body: string, conv: any, lang: "en"|
       (acct.startsWith("@") && acct.length >= 4)       // Venmo @handle
 
     if (!looksLikeAccount) {
-      // Doesn't look like account info — re-ask
+      // Count how many times we already asked in recent history
+      const payHistory = await getHistory(phone)
+      const payAskCount = payHistory.filter(h =>
+        h.role === "assistant" && (
+          /whats your venmo|send me your venmo|need your venmo|mandame tu venmo|necesito tu venmo/i.test(h.content) ||
+          /send the name and number|zelle account|necesito.*zelle|mandame.*zelle|info de zelle/i.test(h.content)
+        )
+      ).length
       if (method === "zelle") {
-        return lang==="es" ? "mandame el nombre y numero de tu zelle" : "send the name and number the zelle account it to"
+        const asks = lang === "es"
+          ? ["mandame el nombre y numero de tu zelle", "necesito el nombre y numero de tu zelle para pagarte", "bro mandame tu info de zelle para que te pueda pagar", "no puedo mandarte nada sin tu info de zelle"]
+          : ["send the name and number the zelle account it to", "I'm trying to get you paid, send me the name and number on your zelle", "need your zelle info before we can proceed bro", "cant pay you without your zelle info"]
+        return asks[Math.min(payAskCount, asks.length - 1)]
       }
-      return lang==="es" ? "mandame tu venmo" : "whats your venmo"
+      const asks = lang === "es"
+        ? ["mandame tu venmo", "necesito tu venmo para mandarte el pago", "bro mandame tu venmo para que te pueda pagar", "no puedo mandarte nada sin tu venmo"]
+        : ["whats your venmo", "I'm trying to get you paid, send me your venmo", "need your venmo before I can send payment bro", "cant pay you without your venmo"]
+      return asks[Math.min(payAskCount, asks.length - 1)]
     }
 
     await savePaymentInfo(phone, method, acct)
@@ -1289,19 +1447,29 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
 
   if (await isDuplicate(sid)) return ""
 
-  // FIX #15: Rapid-fire protection — if driver sent another message within 2 seconds, skip this one
-  // (the newer message will be processed instead)
+  // Rapid-fire protection — wait 1.5s, then grab any additional messages and combine them
   const sb = createAdminSupabase()
-  const twoSecAgo = new Date(Date.now() - 2000).toISOString()
-  const { count: recentCount } = await sb.from("sms_logs").select("id", { count: "exact", head: true })
-    .eq("phone", phone).eq("direction", "inbound").gte("created_at", twoSecAgo)
-  if ((recentCount || 0) > 0 && !hasPhoto) {
-    // Another message just arrived — skip this one, let the latest one be processed
-    await logMsg(phone, body || "", "inbound", sid)
-    return ""
-  }
-
   await logMsg(phone, body || (hasPhoto ? "[photo]" : isNonPhotoMedia ? "[voice/video]" : ""), "inbound", sid)
+
+  if (!hasPhoto && body.length < 20) {
+    // Short messages often come in bursts — wait briefly to combine
+    await new Promise(r => setTimeout(r, 1500))
+    const cutoff = new Date(Date.now() - 3000).toISOString()
+    const { data: recentMsgs } = await sb.from("sms_logs").select("body, message_sid")
+      .eq("phone", phone).eq("direction", "inbound").gte("created_at", cutoff)
+      .order("created_at", { ascending: true })
+    if (recentMsgs && recentMsgs.length > 1) {
+      // Combine all recent burst messages into one
+      const combined = recentMsgs.map(m => m.body).filter(Boolean).join(" ").trim()
+      if (combined && combined !== body) {
+        // Use combined text, but only process once (skip if this isn't the last message)
+        const lastSid = recentMsgs[recentMsgs.length - 1].message_sid
+        if (lastSid !== sid) return "" // Let the last message handle the combined text
+        // This IS the last message — use combined body
+        return await handleConversation({ ...sms, body: combined, messageSid: sid + "_combined" })
+      }
+    }
+  }
 
   const lower = body.toLowerCase().trim()
 
@@ -1354,13 +1522,18 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     await createAdminSupabase().rpc("create_sms_driver", { p_phone: phone, p_first_name: first, p_last_name: last })
     await saveConv(phone, { state: "DISCOVERY" })
     await logEvent("CONTACT_CREATED", { phone, firstName: first })
+    if (isAfterHours) {
+      return lang==="es" ? `${first} te tengo. Estamos cerrados ahorita, mandame texto en la manana` : `${first} got you. I'm off for the night, text me in the morning and I'll get you set up`
+    }
     return lang==="es" ? `${first} te tengo. Tienes tierra hoy` : `${first} got you. You got dirt today`
   }
 
   const firstName = profile.first_name || "Driver"
 
-  // ── FIX #8: AFTER HOURS — respond but note timing ──
-  if (isAfterHours && convState === "DISCOVERY" && !conv?.extracted_yards) {
+  // ── AFTER HOURS — don't start new flows or send customer approvals at night ──
+  // Allow active jobs and payment flows to continue (driver may be finishing late)
+  const afterHoursNewFlow = isAfterHours && (convState === "DISCOVERY" || convState === "CLOSED" || convState === "GETTING_NAME")
+  if (afterHoursNewFlow) {
     return pick(lang==="es"
       ? [`que onda ${firstName}, estamos cerrados ahorita. Mandame texto en la manana y te busco algo`,`hola ${firstName}, ya cerramos. Mandame texto manana temprano`]
       : [`hey ${firstName} I'm off for the night, text me in the morning and I'll get you set up`,`hey ${firstName} we're done for today, hit me up tomorrow morning`])
@@ -1376,6 +1549,24 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   if (/^(wait|hold on|actually|my bad|i meant|correction|no wait)/i.test(lower) && (convState === "PAYMENT_METHOD_PENDING" || convState === "AWAITING_CUSTOMER_CONFIRM")) {
     const correctedLoads = body.match(/(\d+)/)?.[1]
     if (correctedLoads) {
+      const newCount = Math.min(parseInt(correctedLoads), 50)
+      const activeOrderId = conv?.active_order_id
+      if (activeOrderId && profile?.user_id) {
+        const sb = createAdminSupabase()
+        // Find the load request and update payout
+        const { data: lr } = await sb.from("load_requests").select("id, dispatch_orders(driver_pay_cents)")
+          .eq("dispatch_order_id", activeOrderId).eq("driver_id", profile.user_id)
+          .order("created_at", { ascending: false }).maybeSingle()
+        if (lr) {
+          const payPerLoad = (lr.dispatch_orders as any)?.driver_pay_cents || 4500
+          const newTotalCents = payPerLoad * newCount
+          await sb.from("load_requests").update({ payout_cents: newTotalCents, truck_count: newCount }).eq("id", lr.id)
+          // Update driver_payments too
+          await sb.from("driver_payments").update({ amount_cents: newTotalCents }).eq("load_request_id", lr.id).eq("status", "pending")
+          const newDollars = Math.round(newTotalCents / 100)
+          await sendAdminAlert(`CORRECTION: ${firstName} changed count to ${newCount} loads — $${newDollars}`)
+        }
+      }
       return pick(lang==="es" ? [`10.4 corregido a ${correctedLoads} cargas`] : [`got it, corrected to ${correctedLoads} loads`])
     }
     return pick(lang==="es" ? ["que fue, cuantas cargas en total"] : ["whats the correct count","how many loads total then"])
@@ -1424,6 +1615,8 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
           return `Approved. Driver notified`
         } else {
           await sendSMS(result.driverPhone, dl==="es" ? "No se aprobo esa tierra. Sorry bro" : "Yea no go on that dirt. Sorry bro")
+          // Release order back to dispatching so other drivers can claim it
+          await createAdminSupabase().from("dispatch_orders").update({ status: "dispatching" }).eq("id", result.orderId)
           await resetConv(result.driverPhone)
           return `Rejected. Driver notified`
         }
@@ -1436,6 +1629,10 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   const isYes = /^(yes|yeah|yep|approved|ok|okay|go ahead|sounds good|sure|correct|si|bueno|bien|10-4)$/i.test(lower)
   const isNo = /^(no|nope|nah|cancel|decline|reject|dont|don.?t|mal|no esta bien)$/i.test(lower)
   if (isYes || isNo) {
+    // Check if this phone has an active DRIVER conversation — if so, treat as driver, not customer
+    const driverConv = conv
+    const hasActiveDriverFlow = driverConv && ["ACTIVE","OTW_PENDING","PHOTO_PENDING","APPROVAL_PENDING","JOB_PRESENTED","ASKING_TRUCK","ASKING_TRUCK_COUNT","ASKING_ADDRESS","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_PAYMENT_COLLECTION"].includes(driverConv.state)
+
     const sb = createAdminSupabase()
     const { data: clientOrder } = await sb.from("dispatch_orders").select("id, client_phone")
       .in("status", ["dispatching","active","pending"])
@@ -1443,19 +1640,30 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
       const norm = (o.client_phone||"").replace(/\D/g,"").replace(/^1/,"")
       return norm === phone
     })
-    if (isCustomer && phone !== ADMIN_PHONE) {
+    // Only treat as customer if they don't have an active driver conversation
+    if (isCustomer && phone !== ADMIN_PHONE && !hasActiveDriverFlow) {
       if (isYes) {
         const result = await processCustomerApproval(phone, true)
         if (result) {
           const dc = await getConv(result.driverPhone)
           const dp = await getProfile(result.driverPhone)
           // NOW reserve the order — customer approved
+          let reservationOk = false
           try {
             const rid = await atomicClaimJob(result.orderId, result.driverPhone, dp?.user_id || null)
             if (rid && dc) {
               await saveConv(result.driverPhone, { ...dc, reservation_id: rid, active_order_id: result.orderId })
+              reservationOk = true
             }
           } catch (e) { console.error("[reservation on approval]", e) }
+          if (!reservationOk) {
+            // Reservation failed — order was taken by another driver
+            const dl: "en"|"es" = dp?.preferred_language === "es" ? "es" : "en"
+            await sendSMS(result.driverPhone, dl==="es" ? "ese sitio se lo llevo otro driver, dejame buscarte otro" : "that site just got taken by another driver, let me find you another one")
+            await resetConv(result.driverPhone)
+            await sendAdminAlert(`RESERVATION FAILED on customer approval — order ${result.orderId} already claimed. Driver ${result.driverPhone} notified.`)
+            return "Perfect — we'll get them set up"
+          }
           const dj = await getActiveJob({ active_order_id: result.orderId })
           const dl: "en"|"es" = dp?.preferred_language === "es" ? "es" : "en"
           if (dj) {
@@ -1469,6 +1677,8 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
         const result = await processCustomerApproval(phone, false)
         if (result) {
           await sendSMS(result.driverPhone, "Customer declined. Text new city when you have another")
+          // Release the order back to dispatching so other drivers can claim it
+          await createAdminSupabase().from("dispatch_orders").update({ status: "dispatching" }).eq("id", result.orderId)
           await resetConv(result.driverPhone)
         }
         return "Got it — driver notified"
@@ -1478,11 +1688,23 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
 
   // ── PAYMENT STATES ───────────────────────────────────────────
   if (["PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_PAYMENT_COLLECTION"].includes(convState)) {
-    return await handlePayment(phone, body, conv, lang)
+    const payReply = await handlePayment(phone, body, conv, lang)
+    await logMsg(phone, payReply, "outbound", `pay_${sid}`)
+    return payReply
   }
 
   // ── OTW / ADDRESS RESEND ─────────────────────────────────────
   const activeJob = await getActiveJob(conv)
+
+  // AUTO-RECOVERY: if conv says ACTIVE but order is gone/completed, reset to DISCOVERY
+  if (!activeJob && ["ACTIVE","OTW_PENDING"].includes(convState)) {
+    await resetConv(phone)
+    // Re-run with clean state so driver isn't stuck
+    return pick(lang==="es"
+      ? [`ese trabajo ya se cerro ${firstName}, tienes mas tierra`,`ya se completo ese trabajo, mandame texto si tienes otro`]
+      : [`that job got closed out ${firstName}, you got more dirt`,`that one's done, text me if you got another load`])
+  }
+
   if (isOTW(body) && ["ACTIVE","OTW_PENDING"].includes(convState)) {
     await saveConv(phone, { ...conv, state: "OTW_PENDING" })
     return lang==="es" ? "10.4 avisame cuando llegues" : "10.4 let me know when you pull up"
@@ -1493,7 +1715,7 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
 
   // ── ACTIVE JOB: address, cancel, completion ──────────────────
   if (activeJob && ["ACTIVE","OTW_PENDING"].includes(convState)) {
-    if (/addy|address|where|location|directions/i.test(lower)) {
+    if (/\b(addy|address|directions)\b/i.test(lower) || /\bwhere.*(dump|go|site|head|drive|deliver)\b/i.test(lower) || /\bwhere('s| is| was) (it|the site|the place|the spot|the location)\b/i.test(lower)) {
       return `${activeJob.client_address} — ${(activeJob.cities as any)?.name || ""}`
     }
     if (/^cancel$/i.test(lower)) {
@@ -1530,19 +1752,57 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   const isLocationPin = !!(gpsMatch || mapsLink)
   const driverLoadingAddress = looksLikeAddress ? body.trim() : isLocationPin ? body.trim() : null
 
+  // ── INLINE CITY EXTRACTION — detect city mentioned in current message ──
+  // Also resolve common typos to canonical city names
+  // SKIP during name collection or when message looks like a personal name (short, no numbers)
+  const CITY_TYPOS: Record<string,string> = {
+    "ft worth":"Fort Worth", "ft. worth":"Fort Worth", "fortworth":"Fort Worth", "fourt worth":"Fort Worth",
+    "dalls":"Dallas", "dallass":"Dallas", "dal":"Dallas",
+    "arlinton":"Arlington", "waxa":"Waxahachie", "waxahatchie":"Waxahachie", "waxahachee":"Waxahachie",
+    "mckinny":"McKinney", "mkinney":"McKinney", "lewisvile":"Lewisville", "lewsiville":"Lewisville",
+    "dennison":"Denison", "denisson":"Denison", "midlothain":"Midlothian", "midlothien":"Midlothian",
+    "collyville":"Colleyville", "grapvine":"Grapevine", "gravevine":"Grapevine",
+  }
+  // Cities that are also common first names — only extract if message has clear location context
+  const AMBIGUOUS_CITY_NAMES = new Set(["Anna","Heath","Justin","Boyd","Venus","Elizabeth","Allen","Celina","Fate","Blum"])
+  const isNameLike = body.trim().split(/\s+/).length <= 3 && !/\d/.test(body) && body.trim().length < 25
+  const skipCityExtraction = convState === "GETTING_NAME" || (convState === "DISCOVERY" && !conv?.extracted_yards && !conv?.extracted_truck_type && isNameLike)
+  let inlineCity: string | null = null
+  if (!skipCityExtraction) {
+    // First check exact city names with word boundaries
+    for (const c of DFW_CITIES) {
+      // Skip ambiguous names unless the message has location context words
+      if (AMBIGUOUS_CITY_NAMES.has(c) && isNameLike && !/\b(near|in|from|at|around|heading|going|coming|loading|hauling)\b/i.test(lower)) continue
+      const pattern = new RegExp("\\b" + c.replace(/\s+/g, "\\s+") + "\\b", "i")
+      if (pattern.test(lower)) { inlineCity = c; break }
+    }
+    // If no match, check typos
+    if (!inlineCity) {
+      for (const [typo, canonical] of Object.entries(CITY_TYPOS)) {
+        if (lower.includes(typo)) { inlineCity = canonical; break }
+      }
+    }
+  }
+
+  // extracted_material stores driver loading address for routing (address > material type for this field)
+  // Only overwrite with a new address if one was detected; otherwise keep existing value
   const enriched = {
     ...conv,
-    extracted_truck_type: conv.extracted_truck_type || inlineTruck || null,
-    extracted_yards: conv.extracted_yards || inlineYards || null,
+    // Allow truck type correction: if driver explicitly says a truck type, override saved value
+    extracted_truck_type: inlineTruck || conv.extracted_truck_type || null,
+    extracted_yards: inlineYards || conv.extracted_yards || null,
     photo_public_url: storedPhotoUrl || null,
-    // Store full address when detected — piggyback on extracted_material field
+    // Store loading address for routing — only overwrite if new address detected
     extracted_material: driverLoadingAddress || conv.extracted_material || null,
+    // Prefer NEW city from current message over saved city — driver may be changing location
+    extracted_city: inlineCity || conv.extracted_city || null,
   }
-  if (inlineTruck || inlineYards || storedPhotoUrl || driverLoadingAddress) await saveConv(phone, enriched)
+  if (inlineTruck || inlineYards || storedPhotoUrl || driverLoadingAddress || inlineCity) await saveConv(phone, enriched)
 
-  // ── NEARBY JOBS — use full address when available, fall back to city ──
+  // ── NEARBY JOBS — use full address when available, fall back to city from message or saved ──
   let nearbyJobs: JobMatch[] = []
-  const routingInput = enriched.extracted_material || enriched.extracted_city
+  // Priority: new address in this message > saved address > new city in this message > saved city
+  const routingInput = driverLoadingAddress || enriched.extracted_material || inlineCity || enriched.extracted_city
   if (routingInput) {
     try {
       nearbyJobs = await findNearbyJobs(routingInput, enriched.extracted_truck_type || undefined)
@@ -1575,10 +1835,14 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     }
     
     // Handle address resend
-    if (tpl.action === "RESEND_ADDRESS" && activeJob?.client_address) {
-      await saveConv(phone, toSaveTpl)
-      await logMsg(phone, activeJob.client_address, "outbound", `tpl_${sid}`)
-      return activeJob.client_address
+    if (tpl.action === "RESEND_ADDRESS") {
+      if (activeJob?.client_address) {
+        await saveConv(phone, toSaveTpl)
+        await logMsg(phone, activeJob.client_address, "outbound", `tpl_${sid}`)
+        return activeJob.client_address
+      }
+      // No active job or no address — don't leak internal marker
+      tpl.response = lang === "es" ? "no tengo una direccion activa, mandame tu ciudad" : "dont have an active address for you, text me your city"
     }
     
     // Handle delivery completion
@@ -1589,6 +1853,8 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
         await logMsg(phone, reply, "outbound", `del_${sid}`)
         return reply
       }
+      // No active job found — don't leak internal marker
+      tpl.response = lang === "es" ? "no encuentro un trabajo activo, mandame el numero de trabajo" : "cant find an active job for you, whats the job number"
     }
     
     // Handle payment collection
@@ -1597,7 +1863,30 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
       await savePaymentInfo(phone, method, body.trim())
       await sendSMS(ADMIN_PHONE, `PAYMENT: ${phone} — ${method} — ${body.trim()}${enriched.pending_pay_dollars ? " — $"+enriched.pending_pay_dollars : ""}`)
     }
-    
+
+    // Handle payment re-ask with escalating human-like messages
+    if (tpl.response.startsWith("__PAY_REASK__:")) {
+      const payMethod = tpl.response.split(":")[1]
+      // Count how many times we already asked in recent history
+      const payAskCount = history.filter(h =>
+        h.role === "assistant" && (
+          /whats your venmo|send me your venmo|need your venmo|mandame tu venmo|necesito tu venmo/i.test(h.content) ||
+          /send the name and number|zelle account|necesito.*zelle|mandame.*zelle|info de zelle/i.test(h.content)
+        )
+      ).length
+      if (payMethod === "venmo") {
+        const asks = lang === "es"
+          ? ["mandame tu venmo", "necesito tu venmo para mandarte el pago", "bro mandame tu venmo para que te pueda pagar", "no puedo mandarte nada sin tu venmo"]
+          : ["whats your venmo", "I'm trying to get you paid, send me your venmo", "need your venmo before I can send payment bro", "cant pay you without your venmo"]
+        tpl.response = asks[Math.min(payAskCount, asks.length - 1)]
+      } else {
+        const asks = lang === "es"
+          ? ["mandame el nombre y numero de tu zelle", "necesito el nombre y numero de tu zelle para pagarte", "bro mandame tu info de zelle para que te pueda pagar", "no puedo mandarte nada sin tu info de zelle"]
+          : ["send the name and number the zelle account it to", "I'm trying to get you paid, send me the name and number on your zelle", "need your zelle info before we can proceed bro", "cant pay you without your zelle info"]
+        tpl.response = asks[Math.min(payAskCount, asks.length - 1)]
+      }
+    }
+
     // Job presentation — do NOT reserve yet. Reservation happens only after
     // customer approves the dirt photo. This keeps the order available to
     // other drivers until a real commitment is made.
@@ -1605,7 +1894,11 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     await saveConv(phone, toSaveTpl)
     const lastOutbound = history.filter(h => h.role === "assistant").slice(-1)[0]?.content || ""
     let validatedTpl = validateResponse(tpl.response, null, toSaveTpl.state || convState, lang)
-    if (validatedTpl.toLowerCase().trim() === lastOutbound.toLowerCase().trim() && validatedTpl.length > 5) {
+    // Safety: strip any internal markers that leaked through
+    validatedTpl = validatedTpl.replace(/__\w+__[:\w]*/g, "").trim() || "10.4"
+    // Only deduplicate non-job-presentation messages — job presentations contain "$" and "miles/millas"
+    const isJobPresentation = /\$\d+.*load|\$\d+.*carga/i.test(validatedTpl)
+    if (!isJobPresentation && validatedTpl.toLowerCase().trim() === lastOutbound.toLowerCase().trim() && validatedTpl.length > 5) {
       validatedTpl = "10.4"
     }
     await logMsg(phone, validatedTpl, "outbound", `tpl_${sid}`)
@@ -1651,7 +1944,7 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   if (brain.updates.state && VALID_STATES.has(brain.updates.state)) {
     const newState = brain.updates.state
     // Prevent brain from jumping to payment/active states without proper preconditions
-    const dangerousStates = ["PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING", "ACTIVE", "OTW_PENDING", "AWAITING_CUSTOMER_CONFIRM"]
+    const dangerousStates = ["PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING", "ACTIVE", "OTW_PENDING", "AWAITING_CUSTOMER_CONFIRM", "CLOSED"]
     if (dangerousStates.includes(newState) && !toSave.active_order_id && !conv?.active_order_id) {
       // No active job — brain hallucinated a dangerous state, ignore it
       console.warn(`[Brain] blocked state transition to ${newState} — no active job`)
@@ -1671,6 +1964,7 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   // Handle photo approval — brain approved the dirt, send to customer
   // Trigger if: (1) Sonnet explicitly said SEND_FOR_APPROVAL, OR
   //             (2) photo was sent during PHOTO_PENDING and Sonnet didn't reject the dirt
+  // BLOCK during after hours — don't MMS/call customers at night
   const dirtRejected = /no go|can.?t accept|rejected|trash|debris|concrete|clay/i.test(brain.response)
   const photoApprovalNeeded = brain.action === "SEND_FOR_APPROVAL"
     || (hasPhoto && toSave.state === "APPROVAL_PENDING")
@@ -1741,7 +2035,13 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
 
         toSave.state = "APPROVAL_PENDING"
         toSave.approval_sent_at = new Date().toISOString()
-        toSave.voice_call_made = false
+        // After hours: MMS is fine at night but DON'T trigger voice call — customer is sleeping
+        toSave.voice_call_made = isAfterHours ? true : false
+        if (isAfterHours) {
+          brain.response = lang === "es"
+            ? "se ve bien, lo mande para aprobacion pero puede tardar un poco ya que es tarde. Te aviso en la manana"
+            : "looks good, sent it for approval but might take a bit since its late. I'll let you know in the morning"
+        }
       } else {
         // No client phone on the order — alert admin
         await sendAdminAlert(`⚠ NO CLIENT PHONE: Order ${orderId} has no customer phone. Driver ${phone} sent photo but cannot send approval. Fix order in admin.`)

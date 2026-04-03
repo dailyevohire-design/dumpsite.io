@@ -178,13 +178,30 @@ export async function generateJesseResponse(context: JesseContext): Promise<stri
         : "";
 
     if (!text) return fallbackResponse(context.state);
-    
+
     // Safety: never let AI send a message over 300 chars
     if (text.length > 300) {
       return fallbackResponse(context.state);
     }
-    
-    return text;
+
+    // Safety: never let AI admit to being AI
+    const aiAdmissions = ["i am an ai","i'm an ai","language model","artificial intelligence","claude","anthropic","i am a bot","i'm a bot","as an ai","automated system","i'm not a real","i am not a real"]
+    if (aiAdmissions.some(p => text.toLowerCase().includes(p))) {
+      return "nah this is jesse";
+    }
+
+    // Safety: strip job codes, menus, and multiple questions
+    let cleaned = text.replace(/DS-[A-Z0-9]{4,}/g, "").replace(/\s{2,}/g, " ").trim()
+    if (/reply\s*:/i.test(cleaned) || /option\s+\d/i.test(cleaned) || /select\s+one/i.test(cleaned)) {
+      return fallbackResponse(context.state);
+    }
+    if ((cleaned.match(/\?/g) || []).length > 1) {
+      const idx = cleaned.indexOf("?")
+      if (idx > 0) cleaned = cleaned.slice(0, idx + 1).trim()
+    }
+    cleaned = cleaned.replace(/\.\s*$/, "").trim()
+
+    return cleaned || fallbackResponse(context.state);
   } catch (err) {
     console.error("[Jesse] generation failed:", err);
     return fallbackResponse(context.state);
@@ -215,7 +232,7 @@ function buildContextBlock(context: JesseContext): string {
 function fallbackResponse(state: string): string {
   const map: Record<string, string[]> = {
     DISCOVERY:                   ["you got dirt today", "hauling today", "you running loads today"],
-    ASKING_TRUCK:                ["end dump or tandem", "what truck you in", "end dump?"],
+    ASKING_TRUCK:                ["what truck you in", "what kind of truck you running", "what you hauling in"],
     PHOTO_PENDING:               ["send pic of dirt", "send me a pic first", "need pic of the dirt"],
     APPROVAL_PENDING:            ["Got it, sitting tight", "10.4 waiting on approval", "ok let me verify"],
     ACTIVE:                      ["10.4", "perfect", "10.4 thank you"],

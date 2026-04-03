@@ -95,12 +95,11 @@ export async function findNearbyJobs(
 ): Promise<JobMatch[]> {
   const supabase = createAdminSupabase()
 
-  // Get open orders with coordinates
+  // Get ALL open orders — including ones without coordinates (we'll geocode them)
   const { data: orders, error } = await supabase
     .from('dispatch_orders')
     .select('id, city_id, yards_needed, driver_pay_cents, truck_type_needed, status, delivery_latitude, delivery_longitude, client_phone, client_name, client_address, cities(name)')
     .in('status', ['dispatching', 'active', 'pending'])
-    .not('delivery_latitude', 'is', null)
     .order('created_at', { ascending: false })
 
   if (error) console.error('[routing]', error.message)
@@ -123,6 +122,38 @@ export async function findNearbyJobs(
   let withDistance: (typeof available[0] & { distanceMiles: number; drivingMinutes: number })[]
 
   if (driverGeo) {
+    // For orders missing coordinates, geocode their client_address and backfill
+    const needsGeocode = available.filter(o => !o.delivery_latitude && o.client_address)
+    if (needsGeocode.length > 0) {
+      // Geocode up to 10 missing orders in parallel to avoid rate limits
+      const toGeocode = needsGeocode.slice(0, 10)
+      const geoResults = await Promise.all(
+        toGeocode.map(async (o) => {
+          try {
+            const geo = await geocode(o.client_address!)
+            if (geo) {
+              // Backfill coordinates in DB for future lookups
+              await supabase.from('dispatch_orders').update({
+                delivery_latitude: geo.lat, delivery_longitude: geo.lng
+              }).eq('id', o.id)
+              return { id: o.id, lat: geo.lat, lng: geo.lng }
+            }
+          } catch {}
+          return null
+        })
+      )
+      // Apply geocoded coordinates to the available orders
+      for (const result of geoResults) {
+        if (result) {
+          const order = available.find(o => o.id === result.id)
+          if (order) {
+            ;(order as any).delivery_latitude = result.lat
+            ;(order as any).delivery_longitude = result.lng
+          }
+        }
+      }
+    }
+
     withDistance = available
       .filter(o => o.delivery_latitude && o.delivery_longitude)
       .map(o => {
@@ -138,12 +169,11 @@ export async function findNearbyJobs(
 
     // No minimum distance — a driver close to a dump site is ideal
     // The dispatch address is the DUMP SITE, not the driver's loading address
-    const filtered = withDistance
 
-    // Try 15 miles, expand to 30 if nothing found
-    let nearby = filtered.filter(o => o.distanceMiles <= maxMiles)
-    if (!nearby.length) nearby = filtered.filter(o => o.distanceMiles <= 30)
-    if (!nearby.length) nearby = filtered.slice(0, 3)
+    // Try 15 miles, expand to 30 if nothing found, then just return closest 5
+    let nearby = withDistance.filter(o => o.distanceMiles <= maxMiles)
+    if (!nearby.length) nearby = withDistance.filter(o => o.distanceMiles <= 30)
+    if (!nearby.length) nearby = withDistance.slice(0, 5)
     withDistance = nearby
   } else {
     // Geocoding completely failed — return nothing rather than fake 0-mile results
@@ -157,11 +187,12 @@ export async function findNearbyJobs(
     const eighteenFamily = ['end_dump', 'belly_dump', 'side_dump', '18_wheeler', 'transfer']
     const driverFamily = dumpFamily.includes(truckType) ? dumpFamily : eighteenFamily.includes(truckType) ? eighteenFamily : null
     const truckFiltered = withDistance.filter(o => {
-      if (!o.truck_type_needed) return true
-      if (o.truck_type_needed === truckType) return true
-      if (driverFamily && driverFamily.includes(o.truck_type_needed)) return true
-      if (dumpFamily.includes(o.truck_type_needed) && dumpFamily.includes(truckType)) return true
-      if (eighteenFamily.includes(o.truck_type_needed) && eighteenFamily.includes(truckType)) return true
+      // Orders with no truck type default to dump truck access only
+      const orderTruck = o.truck_type_needed || 'tandem_axle'
+      if (orderTruck === truckType) return true
+      if (driverFamily && driverFamily.includes(orderTruck)) return true
+      if (dumpFamily.includes(orderTruck) && dumpFamily.includes(truckType)) return true
+      if (eighteenFamily.includes(orderTruck) && eighteenFamily.includes(truckType)) return true
       return false
     })
     if (truckFiltered.length) withDistance = truckFiltered
@@ -172,7 +203,7 @@ export async function findNearbyJobs(
     cityName: (o.cities as any)?.name || driverLocation,
     yardsNeeded: o.yards_needed,
     driverPayCents: o.driver_pay_cents || 4500,
-    truckTypeNeeded: o.truck_type_needed || 'tandem_axle',
+    truckTypeNeeded: o.truck_type_needed || 'tandem_axle', // null = dump truck access only
     distanceMiles: Math.round(o.distanceMiles * 10) / 10,
     drivingMinutes: o.drivingMinutes,
     clientPhone: o.client_phone || '',

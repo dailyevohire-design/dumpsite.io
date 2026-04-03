@@ -27,7 +27,7 @@ export async function GET() {
       .order("created_at", { ascending: false })
       .limit(50),
     sb.from("dispatch_orders")
-      .select("status, yards_needed, driver_pay_cents, cities(name)")
+      .select("status, yards_needed, driver_pay_cents, price_quoted_cents, cities(name)")
       .gte("created_at", since24h),
     sb.from("driver_payments")
       .select("amount_cents, status, created_at, driver_phone")
@@ -42,10 +42,14 @@ export async function GET() {
   const statusCounts: Record<string, number> = {}
   let totalYards = 0
   let totalRevenue = 0
+  let totalDriverPay = 0
   for (const o of orderStats || []) {
     statusCounts[o.status] = (statusCounts[o.status] || 0) + 1
     if (o.status === "active" || o.status === "completed") totalYards += o.yards_needed || 0
-    if (o.status === "completed") totalRevenue += (o.driver_pay_cents || 0) / 100
+    if (o.status === "completed") {
+      totalRevenue += ((o as any).price_quoted_cents || o.driver_pay_cents || 0) / 100
+      totalDriverPay += (o.driver_pay_cents || 0) / 100
+    }
   }
 
   const pendingPay = (recentPayments || []).filter(p => p.status === "pending").reduce((s, p) => s + p.amount_cents / 100, 0)
@@ -55,7 +59,7 @@ export async function GET() {
     timestamp: new Date().toISOString(),
     activeConversations: activeConvs || [],
     liveMessages: smsLog || [],
-    orderStats: { statusCounts, totalYards, totalRevenue },
+    orderStats: { statusCounts, totalYards, totalRevenue, totalDriverPay, margin: totalRevenue - totalDriverPay },
     payments: { pending: pendingPay, paid: paidOut, records: recentPayments || [] },
   })
 }

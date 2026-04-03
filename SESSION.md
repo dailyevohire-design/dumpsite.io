@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-03-30T04:15:44.491Z
-> Commit: 53b9b1b fix: CANCEL handled in active job intercept, no longer swallowed by catch-all | Branch: main | Total: 163 commits
+> Auto-generated 2026-04-02T22:43:41.429Z
+> Commit: 503a119 refactor: customer brain v2 — Sonnet writes every response, code handles extraction/state/pricing
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
@@ -10,8 +10,8 @@
 - GitHub: dailyevohire-design/dumpsite.io
 
 ## Live Stats
-- Open orders: 77
-- Active drivers: 7
+- Open orders: 79
+- Active drivers: 134
 - Active reservations: 0
 - Material photos: 11
 - Pending payouts: $0

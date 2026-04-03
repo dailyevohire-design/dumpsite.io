@@ -1,6 +1,6 @@
 import { createAdminSupabase } from '../supabase'
 
-const ADMIN_PHONE = '7134439223'
+const ADMIN_PHONE = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
 
 function getTwilioFrom(): string {
   return process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''

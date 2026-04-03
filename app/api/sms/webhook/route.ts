@@ -76,10 +76,13 @@ export async function POST(request: Request) {
     })
     if (!reply) return new Response('<Response></Response>', { status: 200, headers: { 'Content-Type': 'text/xml' } })
 
-    // Human-like delay: 8-20 seconds before replying
-    // Return empty TwiML immediately, send reply via Twilio API after delay
+    // Human-like delay: scale with message complexity
+    // Short acks (10.4, bet, copy) = 3-8s, medium = 6-15s, long/address = 10-25s
     const phone = from.replace(/\D/g, '').replace(/^1/, '')
-    const delay = 8000 + Math.floor(Math.random() * 12000)
+    const replyLen = reply.length
+    const baseDelay = replyLen < 20 ? 3000 : replyLen < 80 ? 6000 : 10000
+    const jitter = replyLen < 20 ? 5000 : replyLen < 80 ? 9000 : 15000
+    const delay = baseDelay + Math.floor(Math.random() * jitter)
 
     after(async () => {
       await new Promise(r => setTimeout(r, delay))

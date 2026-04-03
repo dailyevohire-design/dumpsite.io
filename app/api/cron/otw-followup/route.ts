@@ -31,7 +31,7 @@ export async function GET(request: Request) {
     return new Response("Unauthorized", { status: 401 })
   }
   const sb = createAdminSupabase()
-  const adminPhone = process.env.ADMIN_PHONE?.replace(/\D/g, '') || '5126161820'
+  const adminPhone = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
   let notified = 0, escalated = 0
 
   // FIX #6: Driver goes dark — check ACTIVE jobs with no update
