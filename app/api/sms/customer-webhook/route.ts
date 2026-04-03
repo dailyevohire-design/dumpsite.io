@@ -67,13 +67,9 @@ export async function POST(req: NextRequest) {
     const reply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl })
     if (!reply) return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })
 
-    // Human-like delay: scale with message length
-    // Short (got it, ok) = 4-10s, medium = 8-18s, long (quotes) = 12-25s
+    // Human-like delay
     const phone = from.replace(/\D/g, "").replace(/^1/, "")
-    const replyLen = reply.length
-    const baseDelay = replyLen < 30 ? 4000 : replyLen < 100 ? 8000 : 12000
-    const jitter = replyLen < 30 ? 6000 : replyLen < 100 ? 10000 : 13000
-    const delay = baseDelay + Math.floor(Math.random() * jitter)
+    const delay = 5000
 
     after(async () => {
       await new Promise(r => setTimeout(r, delay))

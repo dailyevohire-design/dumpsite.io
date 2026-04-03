@@ -618,12 +618,24 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     // Purpose given but material not auto-detected
     instruction = `Customer said they need dirt for: "${merged.material_purpose}". Based on your knowledge, recommend the right material type (fill dirt, structural fill, screened topsoil, or sand). Explain briefly why that material is right for their project. Then ask how many cubic yards they need, and offer to help calculate if they're not sure`
   } else if (!mHas("yards_needed")) {
-    // Check if they said "I don't know"
-    if (/don.?t know|not sure|no idea|how much|figure|calculate|dimensions|measure/i.test(lower)) {
-      instruction = "Customer doesn't know how many yards. Ask them for the dimensions of the area — length, width and depth in feet. Tell them you'll calculate it for them"
+    // Detect if they gave partial dimensions (e.g. "40 x 40" — 2 numbers, missing depth)
+    const hasPartialDims = /\d+\s*[x×]\s*\d+/i.test(body) || /\d+\s*by\s*\d+/i.test(body) || /\d+\s*ft?\s*[x×]\s*\d+/i.test(body)
+    const nums = body.match(/(\d+\.?\d*)/g)
+    if (hasPartialDims && nums && nums.length === 2) {
+      // They gave length x width but no depth — ask for depth, we'll calculate
+      updates.state = "ASKING_DIMENSIONS"
+      instruction = `Customer gave ${nums[0]} x ${nums[1]} but we need the depth too. Ask how deep/thick they need it in feet or inches. For a slab its usually 4-6 inches. Be helpful`
+    } else if (hasPartialDims && nums && nums.length >= 3) {
+      // They gave all 3 — calculate
+      const yards = cubicYards(parseFloat(nums[0]), parseFloat(nums[1]), parseFloat(nums[2]))
+      updates.yards_needed = yards
+      updates.dimensions_raw = body.trim()
+      instruction = `That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+    } else if (/don.?t know|not sure|no idea|how much|figure|calculate|dimensions|measure/i.test(lower)) {
+      instruction = "Customer doesn't know how many yards. Ask them for the dimensions of the area, length width and depth in feet. Tell them you'll calculate it for them"
       updates.state = "ASKING_DIMENSIONS"
     } else {
-      instruction = `Ask how many cubic yards of ${fmtMaterial(merged.material_type)} they need. If they're not sure, you can help calculate from dimensions (length × width × depth in feet)`
+      instruction = `Ask how many cubic yards of ${fmtMaterial(merged.material_type)} they need. If they're not sure, you can help calculate from dimensions (length x width x depth in feet)`
     }
   } else if (!mHas("access_type")) {
     instruction = "Ask if their property has access for dump trucks and 18 wheelers, or just dump trucks. This matters for what size truck you send"
@@ -651,11 +663,41 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.yards_needed = yards
       updates.dimensions_raw = body.trim()
       updates.state = "COLLECTING"
-      instruction = `They gave dimensions. That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
-    } else if (/\d/.test(body)) {
-      instruction = "They gave some numbers but you need length, width AND depth in feet. Ask for the missing dimension"
+      instruction = `That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
     } else {
-      instruction = "Ask for the dimensions — length, width and depth in feet. You'll calculate the cubic yards for them"
+      // Check for partial dimensions or depth-only answers
+      const nums = body.match(/(\d+\.?\d*)/g)
+      if (nums && nums.length >= 3) {
+        const yards = cubicYards(parseFloat(nums[0]), parseFloat(nums[1]), parseFloat(nums[2]))
+        updates.yards_needed = yards
+        updates.dimensions_raw = body.trim()
+        updates.state = "COLLECTING"
+        instruction = `That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+      } else if (nums && nums.length === 1 && conv.dimensions_raw) {
+        // They gave depth after we asked — combine with stored L x W
+        const prior = conv.dimensions_raw.match(/(\d+\.?\d*)/g)
+        if (prior && prior.length >= 2) {
+          let depth = parseFloat(nums[0])
+          // If they said inches (4, 6, 8 etc), convert to feet
+          if (/inch|in\b|"/i.test(body) || depth <= 12) depth = depth / 12
+          const yards = cubicYards(parseFloat(prior[0]), parseFloat(prior[1]), depth)
+          updates.yards_needed = yards
+          updates.dimensions_raw = `${prior[0]} x ${prior[1]} x ${nums[0]}`
+          updates.state = "COLLECTING"
+          instruction = `That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+        } else {
+          instruction = "Need the depth in feet or inches. For reference, 4-6 inches is typical for a slab, 2-4 inches for leveling"
+        }
+      } else if (nums && nums.length === 2) {
+        // Two numbers — assume length x width, still need depth
+        updates.dimensions_raw = body.trim()
+        instruction = `Got ${nums[0]} x ${nums[1]}. Now just need the depth, how thick does it need to be? For a slab usually 4-6 inches`
+      } else if (nums && nums.length === 1) {
+        // Single number — could be depth if we already have L x W
+        instruction = "Need all three measurements, length width and depth in feet. Something like 40 x 40 x 6 inches"
+      } else {
+        instruction = "Ask for the dimensions, length width and depth in feet. You'll calculate the cubic yards for them"
+      }
     }
   }
 
