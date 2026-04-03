@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { createAdminSupabase } from "../supabase"
 import { createDispatchOrder as systemDispatch, type CreateDispatchInput } from "./dispatch.service"
+import { getDualQuote, calcStandardQuote, fmt$, fmtMaterial, MIN_YARDS, haversine, nearestYard, ZONES, SURCHARGE_CENTS } from "./customer-pricing.service"
 import twilio from "twilio"
 
 const anthropic = new Anthropic()
@@ -9,47 +10,9 @@ const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER!
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const LARGE_ORDER = 500
 
-// ─────────────────────────────────────────────────────────
-// PRICING ENGINE — exact match to your Excel
-// ─────────────────────────────────────────────────────────
-const SOURCE_YARDS = [
-  { name: "Dallas", lat: 32.7767, lng: -96.797 },
-  { name: "Fort Worth", lat: 32.7555, lng: -97.3308 },
-  { name: "Denver", lat: 39.7392, lng: -104.9903 },
-]
-const ZONES = [
-  { zone: "A", min: 0, max: 20, base: 2200 },
-  { zone: "B", min: 20, max: 40, base: 2500 },
-  { zone: "C", min: 40, max: 60, base: 3000 },
-]
-const SURCHARGE: Record<string, number> = {
-  fill_dirt: 0, screened_topsoil: 500, structural_fill: 800, sand: 600,
-}
-const MIN_YARDS = 10
-
-function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 3959, dLat = (lat2-lat1)*Math.PI/180, dLon = (lon2-lon1)*Math.PI/180
-  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
-}
-
-function nearestYard(lat: number, lng: number) {
-  let best = SOURCE_YARDS[0], dist = Infinity
-  for (const y of SOURCE_YARDS) { const d = haversine(lat, lng, y.lat, y.lng); if (d < dist) { best = y; dist = d } }
-  return { yard: best, miles: Math.round(dist * 10) / 10 }
-}
-
-function calcQuote(miles: number, material: string, yards: number) {
-  const z = ZONES.find(z => miles >= z.min && miles < z.max)
-  if (!z) return null
-  const perYard = z.base + (SURCHARGE[material] || 0)
-  const billable = Math.max(yards, MIN_YARDS)
-  return { zone: z.zone, perYardCents: perYard, totalCents: billable * perYard, billable }
-}
+// Pricing imported from customer-pricing.service.ts
 
 function cubicYards(l: number, w: number, d: number): number { return Math.ceil((l * w * d) / 27) }
-function fmt$(cents: number): string { return "$" + Math.round(cents / 100).toLocaleString("en-US") }
-function fmtMaterial(k: string): string { return ({ fill_dirt:"fill dirt", screened_topsoil:"screened topsoil", structural_fill:"structural fill", sand:"sand" } as Record<string,string>)[k] || k.replace(/_/g," ") }
 
 // ─────────────────────────────────────────────────────────
 // GEOCODE
@@ -172,6 +135,7 @@ async function saveConv(phone: string, u: Record<string, any>): Promise<void> {
     p_access_type: u.access_type ?? null, p_delivery_date: u.delivery_date ?? null,
     p_zone: u.zone ?? null, p_distance_miles: u.distance_miles ?? null,
     p_price_per_yard_cents: u.price_per_yard_cents ?? null, p_total_price_cents: u.total_price_cents ?? null,
+    p_pricing_type: u.pricing_type ?? null,
     p_payment_method: u.payment_method ?? null, p_payment_account: u.payment_account ?? null,
     p_payment_status: u.payment_status ?? null, p_dispatch_order_id: u.dispatch_order_id ?? null,
     p_follow_up_at: u.follow_up_at ?? null, p_follow_up_count: u.follow_up_count ?? null,
@@ -284,10 +248,10 @@ HOW YOU TEXT:
 - If they ask a question, ANSWER IT before asking your next question.
 
 WHAT YOU KNOW ABOUT DIRT:
-- Fill Dirt: clean, general purpose. Leveling, grading, filling holes, backfill behind retaining walls, general site prep. Most affordable. $22-30/yard depending on distance.
-- Structural Fill: engineered to compact. Foundations, slabs, driveways, pool fills, anything that needs a solid stable base underneath. Slightly more at $30-38/yard.
-- Screened Topsoil: nutrient-rich, great for growing things. Gardens, landscaping, sod prep, raised beds, lawn repair. $27-35/yard.
-- Sand: play areas, sandboxes, septic systems, drainage. $28-36/yard.
+- Fill Dirt: clean, general purpose. Leveling, grading, filling holes, backfill behind retaining walls, general site prep. Most affordable. $12-18/yard depending on distance.
+- Structural Fill: engineered to compact. Foundations, slabs, driveways, pool fills, anything that needs a solid stable base underneath. Slightly more at $20-26/yard.
+- Screened Topsoil: nutrient-rich, great for growing things. Gardens, landscaping, sod prep, raised beds, lawn repair. $17-23/yard.
+- Sand: play areas, sandboxes, septic systems, drainage. $18-24/yard.
 - Minimum delivery is 10 cubic yards (about one tandem dump truck load).
 - Tandem dump truck = 10 yards, tri-axle = 16 yards, end dump = 18 yards.
 - Cubic yard formula: Length(ft) × Width(ft) × Depth(ft) ÷ 27.
@@ -724,18 +688,25 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   } else if (!mHas("delivery_date")) {
     instruction = "Ask about their timeline. Do they need it by a specific date or are they flexible with delivery? Knowing this helps with scheduling"
   } else {
-    // ALL INFO COLLECTED — generate quote
-    const quote = calcQuote(merged.distance_miles || 0, merged.material_type || "fill_dirt", merged.yards_needed || MIN_YARDS)
-    if (quote) {
-      updates.price_per_yard_cents = quote.perYardCents
-      updates.total_price_cents = quote.totalCents
+    // ALL INFO COLLECTED — get dual quote (standard + priority from quarries)
+    const dualQuote = await getDualQuote(
+      merged.customer_name || "",
+      merged.delivery_lat, merged.delivery_lng,
+      merged.delivery_city || "",
+      merged.material_type || "fill_dirt",
+      merged.yards_needed || MIN_YARDS,
+      merged.access_type || "dump_truck_only",
+      merged.delivery_date || undefined,
+    )
+    if (dualQuote) {
+      updates.price_per_yard_cents = dualQuote.standard.perYardCents
+      updates.total_price_cents = dualQuote.standard.totalCents
+      updates.zone = dualQuote.standard.zone
       updates.state = "QUOTING"
-      const firstName = (merged.customer_name || "").split(/\s+/)[0]
-      instruction = `All info collected! Give ${firstName} their quote: ${quote.billable} yards of ${fmtMaterial(merged.material_type||"")} delivered to ${merged.delivery_city||"their location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard). Ask if they'd like to get that scheduled. Sound excited to help them`
+      instruction = `Present this quote exactly: ${dualQuote.formatted}`
     } else {
       instruction = "Unfortunately their delivery address is outside your service area (more than 60 miles from your yards in Dallas, Fort Worth or Denver). Let them know and ask if there's another address"
       updates.state = "COLLECTING"
-      // Reset address so they can provide a new one
       updates.delivery_address = null
       updates.delivery_city = null
       updates.delivery_lat = null
