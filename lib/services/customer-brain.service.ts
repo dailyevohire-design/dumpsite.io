@@ -190,6 +190,11 @@ HOW YOU TEXT:
 - Use their name occasionally but not every message.
 - No bullet points, no lists, no menus, no "Reply X" EVER.
 - No periods at end of last sentence.
+- No dashes (—), no em dashes, no en dashes. Use commas instead.
+- No exclamation marks. Ever. Real people texting dont use them.
+- NEVER apologize. You have nothing to be sorry for. No "sorry", "my bad", "oops", "apologies".
+- NEVER start a message with "Ha", "Haha", "Lol", or any laughing opener.
+- NEVER say "I'm Sarah" or introduce yourself after the first message. They already know who you are.
 - Match their energy — casual customer gets casual Sarah, professional contractor gets professional Sarah.
 - Ask one thing at a time. Never stack questions.
 - If they tell you something unexpected, respond to THAT before moving forward.
@@ -292,12 +297,24 @@ async function callSarah(
 // VALIDATOR
 // ─────────────────────────────────────────────────────────
 function validate(r: string, lastOutbound: string): string {
-  for (const p of ["i am an ai","i'm an ai","language model","claude","anthropic","i am a bot","i'm a bot"]) {
+  // Block AI admissions
+  for (const p of ["i am an ai","i'm an ai","language model","claude","anthropic","i am a bot","i'm a bot","as an ai","artificial intelligence"]) {
     if (r.toLowerCase().includes(p)) return "This is Sarah with Fill Dirt Near Me, how can I help"
   }
-  if (r.length > 400) r = r.split(/[.!?\n]/).filter(s => s.trim().length > 5).slice(0, 3).join(". ").trim()
+  // Strip em dashes, en dashes — replace with comma or nothing
+  r = r.replace(/\s*[—–]\s*/g, ", ").replace(/,\s*,/g, ",").trim()
+  // Strip exclamation marks — real people texting don't use these
+  r = r.replace(/!/g, "")
+  // Strip "Ha " / "Haha " / "Lol " openers — sounds fake
+  r = r.replace(/^(ha|haha|hehe|lol|oops|sorry|my bad|apologies)\s*,?\s*/i, "").trim()
+  // Never apologize — Sarah has nothing to be sorry for
+  r = r.replace(/\b(sorry about that|my apologies|I apologize|sorry for)\b/gi, "").replace(/\s{2,}/g, " ").trim()
+  // Truncate if too long
+  if (r.length > 320) r = r.split(/[.?\n]/).filter(s => s.trim().length > 5).slice(0, 3).join(". ").trim()
   // Remove trailing period
   r = r.replace(/\.\s*$/, "").trim()
+  // Capitalize first letter if needed
+  if (r.length > 0) r = r[0].toUpperCase() + r.slice(1)
   // Dedup — don't send exact same message
   if (r.toLowerCase() === lastOutbound.toLowerCase() && r.length > 10) r = "Let me know if you have any other questions"
   return r || "Give me one sec"
@@ -528,7 +545,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // ── NEW CUSTOMER ──
   if (state === "NEW") {
     updates.state = "COLLECTING"
-    const s = await callSarah(body, conv, history, "New customer just texted. Greet them warmly. Say you're Sarah with Fill Dirt Near Me. Ask their name. Keep it short and friendly")
+    const s = await callSarah(body, conv, history, "New customer just texted. Say hey this is Sarah with Fill Dirt Near Me. Ask what their name is. One short message, nothing else. Do NOT apologize, do NOT use dashes, do NOT use exclamation marks")
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates })
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -538,8 +555,17 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // Code figures out what's missing, extracts data, gives Sonnet instructions
 
   // Try to extract data from whatever they said
-  if (needName && body.trim().length < 40 && !isAddress && !/\d{3}/.test(body)) {
-    updates.customer_name = body.trim()
+  // Name extraction — ONLY save if it actually looks like a name
+  const NOT_A_NAME = /^(hey|hi|hello|yo|sup|whats up|what up|howdy|hola|good morning|good afternoon|good evening|morning|afternoon|evening|yes|yeah|no|nah|ok|okay|sure|thanks|thank you|please|help|info|information|quote|price|pricing|how much|what|when|where|why|how|can you|do you|is this|are you|i need|i want|i'm looking|looking for|need|want|got|have|dirt|fill|topsoil|sand|gravel|delivery|deliver|dump|truck|yard|yards|cubic|material|project|estimate|cost|cheap|affordable|available|asap|urgent|ready|interested|question|stop|start|reset|menu|.)$/i
+  if (needName && body.trim().length > 1 && body.trim().length < 40 && !isAddress && !/\d{3}/.test(body) && !NOT_A_NAME.test(body.trim()) && !inlineMaterial && !isFollowUp) {
+    // Must have at least one word that starts with uppercase (actual name) or be 2+ words
+    const trimmed = body.trim()
+    const words = trimmed.split(/\s+/)
+    const hasCapital = /^[A-Z]/.test(trimmed)
+    const isLikelyName = (words.length >= 2 && words[0].length >= 2) || (hasCapital && words[0].length >= 2 && !/^(I|A|The|My|We|It|Is|At|In|On|To|So|Or|Do|Go|No|Hi|Oh|Ok)$/.test(words[0]))
+    if (isLikelyName) {
+      updates.customer_name = trimmed
+    }
   }
 
   if (isAddress && needAddress) {
@@ -583,7 +609,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   let instruction = ""
 
   if (!mHas("customer_name")) {
-    instruction = "Ask for their name. If they already told you about their project, acknowledge that first, then ask their name"
+    instruction = "You still need their name. Ask naturally, like 'and whats your name' or 'what was your name'. If they told you about their project, acknowledge it briefly first then ask their name. Do NOT re-introduce yourself"
   } else if (!mHas("delivery_address")) {
     instruction = `Ask ${(merged.customer_name||"").split(/\s+/)[0]} for the delivery address. Explain you need it to give an accurate quote based on their location`
   } else if (!mHas("material_purpose")) {
