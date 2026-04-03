@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { createAdminSupabase } from "../supabase"
 import { createDispatchOrder as systemDispatch, type CreateDispatchInput } from "./dispatch.service"
-import { getDualQuote, calcStandardQuote, fmt$, fmtMaterial, MIN_YARDS, haversine, nearestYard, ZONES, SURCHARGE_CENTS } from "./customer-pricing.service"
+import { getDualQuote, calcStandardQuote, fmt$, fmtMaterial, MIN_YARDS, haversine, SOURCE_YARDS, ZONES, SURCHARGE_CENTS } from "./customer-pricing.service"
 import twilio from "twilio"
 
 const anthropic = new Anthropic()
@@ -613,9 +613,14 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.delivery_city = geo.city
       updates.delivery_lat = geo.lat
       updates.delivery_lng = geo.lng
-      const nearest = nearestYard(geo.lat, geo.lng)
-      updates.distance_miles = nearest.miles
-      const zone = ZONES.find(z => nearest.miles >= z.min && nearest.miles < z.max)
+      // Find nearest source yard for distance/zone calculation
+      let nearestMiles = Infinity
+      for (const y of SOURCE_YARDS) {
+        const d = haversine(geo.lat, geo.lng, y.lat, y.lng)
+        if (d < nearestMiles) nearestMiles = d
+      }
+      updates.distance_miles = Math.round(nearestMiles * 10) / 10
+      const zone = ZONES.find(z => nearestMiles >= z.min && nearestMiles < z.max)
       updates.zone = zone?.zone || null
     }
   }
@@ -689,7 +694,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     instruction = "Ask about their timeline. Do they need it by a specific date or are they flexible with delivery? Knowing this helps with scheduling"
   } else {
     // ALL INFO COLLECTED — get dual quote (standard + priority from quarries)
-    const dualQuote = await getDualQuote(
+    const dualQuote = (merged.delivery_lat && merged.delivery_lng) ? await getDualQuote(
       merged.customer_name || "",
       merged.delivery_lat, merged.delivery_lng,
       merged.delivery_city || "",
@@ -697,7 +702,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       merged.yards_needed || MIN_YARDS,
       merged.access_type || "dump_truck_only",
       merged.delivery_date || undefined,
-    )
+    ) : null
     if (dualQuote) {
       updates.price_per_yard_cents = dualQuote.standard.perYardCents
       updates.total_price_cents = dualQuote.standard.totalCents

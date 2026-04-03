@@ -1,35 +1,53 @@
-// ═══════════════════════════════════════════════════════════════
-// FillDirtNearMe — Pricing Engine
-// Standard zone-based pricing + future priority (quarry) pricing
-// ═══════════════════════════════════════════════════════════════
+import { createAdminSupabase } from "../supabase"
 
-export const MIN_YARDS = 10
+// ─────────────────────────────────────────────────────────
+// STANDARD PRICING — from Juan's zone tables
+// ─────────────────────────────────────────────────────────
+const ZONES = [
+  { zone: "A", min: 0, max: 20, baseCents: 1200 },   // $12/yd
+  { zone: "B", min: 20, max: 40, baseCents: 1500 },  // $15/yd
+  { zone: "C", min: 40, max: 60, baseCents: 1800 },  // $18/yd
+]
 
-export const SOURCE_YARDS = [
+const SURCHARGE_CENTS: Record<string, number> = {
+  fill_dirt: 0,
+  screened_topsoil: 500,    // +$5
+  structural_fill: 800,     // +$8
+  sand: 600,                // +$6
+}
+
+const MIN_YARDS = 10
+const MARGIN_PER_YARD_CENTS = 600  // $6/yard on priority
+
+// Truck specs
+const TRUCKS = {
+  tandem:    { capacity: 10, rateCents: 10000 },  // $100/hr
+  triaxle:   { capacity: 16, rateCents: 10000 },  // $100/hr
+  wheeler18: { capacity: 20, rateCents: 12500 },  // $125/hr
+}
+
+const LOAD_TIME_MIN = 15
+const DUMP_TIME_MIN = 10
+
+// Source yards for standard pricing distance calc
+const SOURCE_YARDS = [
   { name: "Dallas", lat: 32.7767, lng: -96.797 },
   { name: "Fort Worth", lat: 32.7555, lng: -97.3308 },
   { name: "Denver", lat: 39.7392, lng: -104.9903 },
 ]
 
-// Zone pricing — base cents per yard for fill dirt
-export const ZONES = [
-  { zone: "A", min: 0, max: 20, baseCents: 1200 },  // $12/yd
-  { zone: "B", min: 20, max: 40, baseCents: 1500 },  // $15/yd
-  { zone: "C", min: 40, max: 60, baseCents: 1800 },  // $18/yd
-]
-
-// Material surcharges (added to zone base)
-export const SURCHARGE_CENTS: Record<string, number> = {
-  fill_dirt: 0,
-  screened_topsoil: 500,   // +$5
-  structural_fill: 800,    // +$8
-  sand: 600,               // +$6
+// Material mapping: our types → quarry database material names
+const QUARRY_MATERIAL_MAP: Record<string, string[]> = {
+  fill_dirt: ["Fill Dirt", "Select Fill"],
+  screened_topsoil: ["Screened Topsoil", "Topsoil"],
+  structural_fill: ["Structural Fill", "Select Fill", "Fill Dirt"],
+  sand: ["Sand", "Concrete Sand", "Masonry Sand", "Washed Sand"],
 }
 
-// ─────────────────────────────────────────────────────
-// MATH
-// ─────────────────────────────────────────────────────
-export function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
+// ─────────────────────────────────────────────────────────
+// UTILS
+// ─────────────────────────────────────────────────────────
+function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 3959
   const dLat = (lat2 - lat1) * Math.PI / 180
   const dLon = (lon2 - lon1) * Math.PI / 180
@@ -37,251 +55,319 @@ export function haversine(lat1: number, lon1: number, lat2: number, lon2: number
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
-export function nearestYard(lat: number, lng: number) {
-  let best = SOURCE_YARDS[0], dist = Infinity
-  for (const y of SOURCE_YARDS) {
-    const d = haversine(lat, lng, y.lat, y.lng)
-    if (d < dist) { best = y; dist = d }
+function fmt$(cents: number): string {
+  return "$" + (cents / 100).toLocaleString("en-US", { maximumFractionDigits: 0 })
+}
+
+function fmtMaterial(key: string): string {
+  return ({ fill_dirt: "fill dirt", screened_topsoil: "screened topsoil", structural_fill: "structural fill", sand: "sand" })[key] || key.replace(/_/g, " ")
+}
+
+// ─────────────────────────────────────────────────────────
+// GOOGLE MAPS DRIVE TIME
+// ─────────────────────────────────────────────────────────
+async function getDriveTimeMinutes(
+  originLat: number, originLng: number,
+  destLat: number, destLng: number
+): Promise<number> {
+  const key = process.env.GOOGLE_MAPS_API_KEY
+  if (!key) {
+    // Fallback: estimate from straight-line distance
+    const miles = haversine(originLat, originLng, destLat, destLng)
+    return Math.round((miles / 35) * 60) // 35mph average fallback
   }
-  return { yard: best, miles: Math.round(dist * 10) / 10 }
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${originLat},${originLng}&destinations=${destLat},${destLng}&departure_time=now&key=${key}`
+    const res = await fetch(url)
+    const data = await res.json()
+
+    if (data.status === "OK" && data.rows?.[0]?.elements?.[0]?.status === "OK") {
+      const el = data.rows[0].elements[0]
+      // Use duration_in_traffic if available, otherwise duration
+      const seconds = el.duration_in_traffic?.value || el.duration?.value || 0
+      return Math.round(seconds / 60)
+    }
+  } catch (e) {
+    console.error("[Drive time API]", e)
+  }
+
+  // Fallback
+  const miles = haversine(originLat, originLng, destLat, destLng)
+  return Math.round((miles / 35) * 60)
 }
 
-// ─────────────────────────────────────────────────────
-// FORMATTING
-// ─────────────────────────────────────────────────────
-export function fmt$(cents: number): string {
-  return "$" + Math.round(cents / 100).toLocaleString("en-US")
-}
-
-export function fmtMaterial(k: string): string {
-  return ({
-    fill_dirt: "fill dirt",
-    screened_topsoil: "screened topsoil",
-    structural_fill: "structural fill",
-    sand: "sand",
-  } as Record<string, string>)[k] || k.replace(/_/g, " ")
-}
-
-// ─────────────────────────────────────────────────────
-// STANDARD QUOTE — zone-based pricing
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────
+// STANDARD QUOTE — zone-based from pricing tables
+// ─────────────────────────────────────────────────────────
 export interface StandardQuote {
+  type: "standard"
   zone: string
   perYardCents: number
   totalCents: number
   billableYards: number
-  material: string
-  deliveryEstimate: string
+  estimatedDelivery: string
 }
 
 export function calcStandardQuote(
-  miles: number,
-  material: string,
-  yards: number,
+  customerLat: number, customerLng: number,
+  materialType: string, yards: number,
 ): StandardQuote | null {
-  const z = ZONES.find(z => miles >= z.min && miles < z.max)
-  if (!z) return null // Outside service area (60+ miles)
+  // Find nearest source yard
+  let nearestMiles = Infinity
+  for (const y of SOURCE_YARDS) {
+    const d = haversine(customerLat, customerLng, y.lat, y.lng)
+    if (d < nearestMiles) nearestMiles = d
+  }
 
-  const surcharge = SURCHARGE_CENTS[material] || 0
-  const perYardCents = z.baseCents + surcharge
-  const billableYards = Math.max(yards, MIN_YARDS)
+  // Get zone
+  const zone = ZONES.find(z => nearestMiles >= z.min && nearestMiles < z.max)
+  if (!zone) return null // Outside service area
+
+  const surcharge = SURCHARGE_CENTS[materialType] || 0
+  const perYard = zone.baseCents + surcharge
+  const billable = Math.max(yards, MIN_YARDS)
+  const total = billable * perYard
 
   return {
-    zone: z.zone,
-    perYardCents,
-    totalCents: billableYards * perYardCents,
-    billableYards,
-    material,
-    deliveryEstimate: "3-5 business days",
+    type: "standard",
+    zone: zone.zone,
+    perYardCents: perYard,
+    totalCents: total,
+    billableYards: billable,
+    estimatedDelivery: "3-5 business days",
   }
 }
 
-// ─────────────────────────────────────────────────────
-// PRIORITY QUOTE — real quarry cost + drive time markup
-// Data from separate Supabase project (quarry/supplier DB)
-// ─────────────────────────────────────────────────────
-const QUARRY_SUPABASE_URL = "https://hnohikjuvxnszyffqqfq.supabase.co"
-const QUARRY_SUPABASE_KEY = process.env.QUARRY_SUPABASE_KEY || ""
-
-// Truck economics for delivery cost calculation
-const TRUCK_HOURLY_RATE_CENTS = 12500  // $125/hr loaded truck + driver
-const MARGIN_PER_YARD_CENTS = 600      // $6/yard profit margin
-const AVG_SPEED_MPH = 35               // Average DFW/Denver metro driving speed
-
-// Map our material keys to quarry DB canonical names
-const MATERIAL_TO_QUARRY: Record<string, string[]> = {
-  fill_dirt: ["Fill Dirt"],
-  structural_fill: ["Structural Fill"],
-  screened_topsoil: ["Screened Topsoil", "Topsoil"],
-  sand: ["Sand", "Fill Sand", "Concrete Sand", "Masonry Sand"],
+// ─────────────────────────────────────────────────────────
+// PRIORITY QUOTE — quarry + real drive time + delivery cost
+// ─────────────────────────────────────────────────────────
+export interface QuarryOption {
+  quarryName: string
+  quarryCity: string
+  quarryLat: number
+  quarryLng: number
+  materialCostPerYardCents: number
+  distanceMiles: number
 }
 
 export interface PriorityQuote {
-  perYardCents: number
-  totalCents: number
-  billableYards: number
-  material: string
+  type: "priority"
   quarryName: string
   quarryCity: string
-  materialCostPerYardCents: number
-  deliveryCostPerYardCents: number
-  driveMiles: number
-  driveMinutes: number
-  deliveryEstimate: string
-}
-
-interface QuarryLocation {
-  id: string
-  name: string
-  supplierName: string
-  city: string
-  lat: number
-  lng: number
-  priceCentsPerYard: number
-}
-
-async function findNearestQuarries(
-  deliveryLat: number,
-  deliveryLng: number,
-  material: string,
-): Promise<QuarryLocation[]> {
-  if (!QUARRY_SUPABASE_KEY) return []
-
-  const canonicalNames = MATERIAL_TO_QUARRY[material]
-  if (!canonicalNames) return []
-
-  try {
-    // Get all active locations with their prices for this material
-    const orFilter = canonicalNames.map(n => `material_canonical.eq.${n}`).join(",")
-    const resp = await fetch(
-      `${QUARRY_SUPABASE_URL}/rest/v1/public_prices?is_current=eq.true&or=(${orFilter})&select=price_per_cy,location_id,material_canonical,locations(id,name,city,latitude,longitude,supplier_id,is_active,suppliers(name))`,
-      {
-        headers: {
-          "apikey": QUARRY_SUPABASE_KEY,
-          "Authorization": `Bearer ${QUARRY_SUPABASE_KEY}`,
-        },
-      }
-    )
-    if (!resp.ok) return []
-    const prices: any[] = await resp.json()
-
-    // Build location list with best price per location
-    const locationMap = new Map<string, QuarryLocation>()
-    for (const p of prices) {
-      const loc = p.locations
-      if (!loc?.is_active || !loc.latitude || !loc.longitude) continue
-      const priceCents = Math.round((p.price_per_cy || 0) * 100)
-      if (priceCents <= 0 || priceCents > 20000) continue // Skip bad data ($0 or >$200/yd)
-
-      const existing = locationMap.get(loc.id)
-      if (!existing || priceCents < existing.priceCentsPerYard) {
-        locationMap.set(loc.id, {
-          id: loc.id,
-          name: loc.name,
-          supplierName: loc.suppliers?.name || "",
-          city: loc.city || "",
-          lat: loc.latitude,
-          lng: loc.longitude,
-          priceCentsPerYard: priceCents,
-        })
-      }
-    }
-
-    // Sort by distance to delivery address
-    const locations = [...locationMap.values()].map(l => ({
-      ...l,
-      distance: haversine(deliveryLat, deliveryLng, l.lat, l.lng),
-    })).sort((a, b) => a.distance - b.distance)
-
-    return locations.slice(0, 5)
-  } catch (e) {
-    console.error("[quarry pricing]", e)
-    return []
-  }
+  materialCostCents: number
+  deliveryCostCents: number
+  marginCents: number
+  totalCents: number
+  perYardCents: number
+  billableYards: number
+  loads: number
+  truckType: string
+  totalHours: number
+  driveTimeMinutes: number
+  guaranteedDate: string
 }
 
 export async function calcPriorityQuote(
-  deliveryLat: number,
-  deliveryLng: number,
-  material: string,
-  yards: number,
+  customerLat: number, customerLng: number,
+  materialType: string, yards: number,
+  accessType: string,
+  standardPerYardCents: number, // to enforce priority >= standard
+  requestedDate?: string,
 ): Promise<PriorityQuote | null> {
-  const quarries = await findNearestQuarries(deliveryLat, deliveryLng, material)
-  if (!quarries.length) return null
+  // ── Step 1: Find quarries within 60 miles with matching material ──
+  const materialNames = QUARRY_MATERIAL_MAP[materialType] || ["Fill Dirt"]
+  const sb = createAdminSupabase()
 
-  // Use nearest quarry with valid pricing
-  const quarry = quarries[0]
-  const distance = haversine(deliveryLat, deliveryLng, quarry.lat, quarry.lng)
-  const driveMinutes = Math.round((distance * 1.3 / AVG_SPEED_MPH) * 60) // 1.3x for road vs straight line
-  const roundTripMinutes = driveMinutes * 2
+  // Query all matching quarries — we filter by distance in code
+  // because Supabase doesn't have PostGIS distance functions easily
+  const { data: rawQuarries, error } = await sb
+    .from("public_prices")
+    .select(`
+      price_per_cy,
+      material_canonical,
+      location:locations!inner (
+        latitude,
+        longitude,
+        city,
+        state,
+        supplier:suppliers!inner (
+          name
+        )
+      )
+    `)
+    .in("material_canonical", materialNames)
+    .eq("is_current", true)
+    .gt("price_per_cy", 0)
+    .lt("price_per_cy", 80) // filter obvious bad data
 
-  // Delivery cost: truck time for round trip
-  const deliveryCostPerYardCents = Math.round((roundTripMinutes / 60) * TRUCK_HOURLY_RATE_CENTS / Math.max(yards, MIN_YARDS))
-
-  // Total: material + delivery + margin
-  const perYardCents = quarry.priceCentsPerYard + deliveryCostPerYardCents + MARGIN_PER_YARD_CENTS
-  const billableYards = Math.max(yards, MIN_YARDS)
-
-  return {
-    perYardCents,
-    totalCents: billableYards * perYardCents,
-    billableYards,
-    material,
-    quarryName: quarry.supplierName || quarry.name,
-    quarryCity: quarry.city,
-    materialCostPerYardCents: quarry.priceCentsPerYard,
-    deliveryCostPerYardCents,
-    driveMiles: Math.round(distance * 10) / 10,
-    driveMinutes,
-    deliveryEstimate: "1-2 business days",
+  if (error || !rawQuarries?.length) {
+    console.error("[Quarry query]", error?.message || "no results")
+    return null
   }
+
+  // ── Step 2: Filter by distance and find all options ──
+  const options: QuarryOption[] = []
+
+  for (const q of rawQuarries) {
+    const loc = q.location as any
+    if (!loc?.latitude || !loc?.longitude) continue
+
+    const dist = haversine(loc.latitude, loc.longitude, customerLat, customerLng)
+    if (dist > 60) continue // Outside service area
+
+    options.push({
+      quarryName: loc.supplier?.name || "Unknown",
+      quarryCity: loc.city || "",
+      quarryLat: loc.latitude,
+      quarryLng: loc.longitude,
+      materialCostPerYardCents: Math.round(q.price_per_cy * 100),
+      distanceMiles: Math.round(dist * 10) / 10,
+    })
+  }
+
+  if (options.length === 0) return null
+
+  // ── Step 3: Calculate total cost for each quarry option ──
+  // Pick truck based on access type and order size
+  let truck = TRUCKS.tandem
+  let truckLabel = "dump truck"
+  const billable = Math.max(yards, MIN_YARDS)
+
+  if (accessType === "dump_truck_and_18wheeler" && billable > 16) {
+    truck = TRUCKS.wheeler18
+    truckLabel = "18-wheeler"
+  } else if (billable > 10) {
+    truck = TRUCKS.triaxle
+    truckLabel = "dump truck"
+  }
+
+  const loads = Math.ceil(billable / truck.capacity)
+
+  // Calculate delivery cost for top 5 closest quarries (limit API calls)
+  const sorted = options.sort((a, b) => {
+    // Sort by estimated total cost (material + rough distance)
+    const costA = a.materialCostPerYardCents * billable + a.distanceMiles * 500
+    const costB = b.materialCostPerYardCents * billable + b.distanceMiles * 500
+    return costA - costB
+  }).slice(0, 5)
+
+  let bestOption: PriorityQuote | null = null
+  let bestTotal = Infinity
+
+  for (const quarry of sorted) {
+    // Get real drive time from Google Maps
+    const driveMin = await getDriveTimeMinutes(
+      quarry.quarryLat, quarry.quarryLng,
+      customerLat, customerLng
+    )
+
+    // Calculate total delivery time
+    // Each load: loading (15min) + drive there + dump (10min) + drive back
+    // Last load: no return trip
+    const cycleMin = LOAD_TIME_MIN + driveMin + DUMP_TIME_MIN + driveMin
+    const lastLoadMin = LOAD_TIME_MIN + driveMin + DUMP_TIME_MIN
+    const totalMin = (loads > 1) ? (loads - 1) * cycleMin + lastLoadMin : lastLoadMin
+    const totalHours = totalMin / 60
+
+    // Costs in cents
+    const deliveryCost = Math.round(totalHours * truck.rateCents)
+    const materialCost = quarry.materialCostPerYardCents * billable
+    const margin = MARGIN_PER_YARD_CENTS * billable
+    let total = materialCost + deliveryCost + margin
+
+    // Enforce: priority per-yard must be >= standard per-yard
+    const perYard = Math.round(total / billable)
+    if (perYard < standardPerYardCents) {
+      // Bump to match standard + small premium ($2/yd)
+      const bumpedPerYard = standardPerYardCents + 200
+      total = bumpedPerYard * billable
+    }
+
+    if (total < bestTotal) {
+      bestTotal = total
+      bestOption = {
+        type: "priority",
+        quarryName: quarry.quarryName,
+        quarryCity: quarry.quarryCity,
+        materialCostCents: materialCost,
+        deliveryCostCents: deliveryCost,
+        marginCents: margin,
+        totalCents: total,
+        perYardCents: Math.round(total / billable),
+        billableYards: billable,
+        loads,
+        truckType: truckLabel,
+        totalHours: Math.round(totalHours * 10) / 10,
+        driveTimeMinutes: driveMin,
+        guaranteedDate: requestedDate || "your requested date",
+      }
+    }
+  }
+
+  return bestOption
 }
 
-// ─────────────────────────────────────────────────────
-// DUAL QUOTE — standard + priority side by side
-// ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────
+// COMBINED QUOTE — both options formatted for Sarah
+// ─────────────────────────────────────────────────────────
 export interface DualQuote {
   standard: StandardQuote
   priority: PriorityQuote | null
-  formatted: string // Human-readable for Sarah to present
+  formatted: string
+  formattedEs: string
 }
 
 export async function getDualQuote(
   customerName: string,
-  deliveryLat: number | null,
-  deliveryLng: number | null,
+  customerLat: number, customerLng: number,
   deliveryCity: string,
-  material: string,
-  yards: number,
+  materialType: string, yards: number,
   accessType: string,
-  deliveryDate?: string,
+  requestedDate?: string,
 ): Promise<DualQuote | null> {
-  if (!deliveryLat || !deliveryLng) return null
+  const standard = calcStandardQuote(customerLat, customerLng, materialType, yards)
+  if (!standard) return null
 
-  const nearest = nearestYard(deliveryLat, deliveryLng)
-  const standard = calcStandardQuote(nearest.miles, material, yards)
-  if (!standard) return null // Outside service area
+  const priority = await calcPriorityQuote(
+    customerLat, customerLng,
+    materialType, yards, accessType,
+    standard.perYardCents,
+    requestedDate,
+  )
 
-  let priority = await calcPriorityQuote(deliveryLat, deliveryLng, material, yards)
-  // Priority must never be cheaper than standard — bump to standard + 20% if so
-  if (priority && priority.perYardCents < standard.perYardCents) {
-    priority.perYardCents = Math.round(standard.perYardCents * 1.2)
-    priority.totalCents = priority.billableYards * priority.perYardCents
-  }
+  const firstName = (customerName || "").split(/\s+/)[0] || ""
+  const matName = fmtMaterial(materialType)
+  const billable = standard.billableYards
 
-  const firstName = (customerName || "").split(/\s+/)[0] || "there"
-  const materialName = fmtMaterial(material)
-  const stdTotal = fmt$(standard.totalCents)
-  const stdPerYd = fmt$(standard.perYardCents)
+  let formatted = ""
+  let formattedEs = ""
 
-  let formatted: string
-  if (priority) {
-    const priTotal = fmt$(priority.totalCents)
-    const priPerYd = fmt$(priority.perYardCents)
-    formatted = `${firstName}, ${standard.billableYards} yards of ${materialName} to ${deliveryCity} comes to ${stdTotal} (${stdPerYd}/yard) with delivery in ${standard.deliveryEstimate}. If you need it faster, we can do guaranteed ${priority.deliveryEstimate} delivery for ${priTotal} (${priPerYd}/yard). Which works better for your timeline`
+  if (priority && priority.perYardCents > standard.perYardCents) {
+    // Different prices — show both options
+    formatted = `${firstName} ${billable} yards of ${matName} to ${deliveryCity}\n\nStandard delivery: ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yard) 3-5 business days\nPriority delivery: ${fmt$(priority.totalCents)} (${fmt$(priority.perYardCents)}/yard) guaranteed by ${priority.guaranteedDate}\n\nWhich works better for you`
+
+    formattedEs = `${firstName} ${billable} yardas de ${matName} a ${deliveryCity}\n\nEntrega estandar: ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yarda) 3-5 dias habiles\nEntrega prioritaria: ${fmt$(priority.totalCents)} (${fmt$(priority.perYardCents)}/yarda) garantizada para ${priority.guaranteedDate}\n\nCual te funciona mejor`
   } else {
-    formatted = `${firstName}, ${standard.billableYards} yards of ${materialName} to ${deliveryCity} comes to ${stdTotal} (${stdPerYd}/yard) with delivery in ${standard.deliveryEstimate}. Want to get that scheduled`
+    // Prices are close or same — just show one price
+    formatted = `${firstName} ${billable} yards of ${matName} to ${deliveryCity} comes to ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yard). Delivery within 3-5 business days, we can also lock in a specific date if you need it. Want me to get that set up`
+
+    formattedEs = `${firstName} ${billable} yardas de ${matName} a ${deliveryCity} sale en ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yarda). Entrega en 3-5 dias habiles, tambien podemos garantizar fecha especifica si lo necesitas. Quieres que lo programe`
   }
 
-  return { standard, priority, formatted }
+  return { standard, priority, formatted, formattedEs }
+}
+
+// ─────────────────────────────────────────────────────────
+// EXPORTS
+// ─────────────────────────────────────────────────────────
+export {
+  fmt$,
+  fmtMaterial,
+  haversine,
+  MIN_YARDS,
+  SOURCE_YARDS,
+  ZONES,
+  SURCHARGE_CENTS,
+  getDriveTimeMinutes,
 }
