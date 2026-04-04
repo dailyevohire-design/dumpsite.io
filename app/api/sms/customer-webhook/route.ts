@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { after } from "next/server"
 import { handleCustomerSMS } from "@/lib/services/customer-brain.service"
+import { createAdminSupabase } from "@/lib/supabase"
 import crypto from "crypto"
 
 function validateTwilioSignature(url: string, params: Record<string, string>, signature: string): boolean {
@@ -40,7 +41,15 @@ async function sendViaTwilioAPI(to: string, body: string) {
     body: new URLSearchParams({ To: toE164, From: from, Body: body }).toString(),
   })
   const data = await resp.json()
-  if (data.error_code) console.error("[customer SMS] Twilio error:", data.message, data.error_code)
+  if (data.error_code) {
+    console.error("[customer SMS] Twilio error:", data.message, data.error_code)
+    try {
+      await createAdminSupabase().from("customer_sms_logs").insert({
+        phone: digits, body: `TWILIO SEND FAILED: ${data.error_code} ${data.message || ""} — attempted body: ${body.slice(0, 200)}`,
+        direction: "error", message_sid: `twilio_err_${Date.now()}`,
+      })
+    } catch {}
+  }
   else console.log("[customer SMS] sent OK SID:", data.sid)
 }
 

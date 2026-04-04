@@ -5,6 +5,7 @@ import twilio from "twilio"
 const tw = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
 const ADMIN = process.env.ADMIN_PHONE || "7134439223"
+const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
 export async function GET() {
   const sb = createAdminSupabase()
@@ -73,6 +74,7 @@ export async function GET() {
   try {
     await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN.replace(/\D/g, "")}` })
   } catch (e) { console.error("[daily-summary]", e) }
+  if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[daily-summary admin2]", e) } }
 
   return NextResponse.json({ sent: true, summary: msg })
 }

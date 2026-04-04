@@ -8,6 +8,7 @@ const anthropic = new Anthropic()
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER!
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
+const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const LARGE_ORDER = 500
 
 // ─────────────────────────────────────────────────────────
@@ -57,16 +58,34 @@ function fmtMaterial(k: string): string { return ({ fill_dirt:"fill dirt", scree
 // ─────────────────────────────────────────────────────────
 async function geocode(address: string): Promise<{ lat: number; lng: number; city: string } | null> {
   const key = process.env.GOOGLE_MAPS_API_KEY
-  if (!key) return null
-  try {
-    const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${key}`)
-    const d = await r.json()
-    if (d.status === "OK" && d.results[0]) {
-      const loc = d.results[0].geometry.location
-      const city = d.results[0].address_components?.find((c: any) => c.types.includes("locality"))?.long_name || ""
-      return { lat: loc.lat, lng: loc.lng, city }
+  // Try Google Maps first
+  if (key) {
+    try {
+      const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${key}`)
+      const d = await r.json()
+      if (d.status === "OK" && d.results[0]) {
+        const loc = d.results[0].geometry.location
+        const city = d.results[0].address_components?.find((c: any) => c.types.includes("locality"))?.long_name || ""
+        return { lat: loc.lat, lng: loc.lng, city }
+      }
+    } catch (err) {
+      console.error("[customer geocode] Google Maps error:", err)
     }
-  } catch {}
+  }
+  // Fallback: Nominatim (city-level)
+  try {
+    await new Promise(r => setTimeout(r, 300))
+    const q = encodeURIComponent(address.includes("Texas") || address.includes("TX") ? address : `${address} Texas USA`)
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`
+    const r = await fetch(url, { headers: { "User-Agent": "DumpSite.io/1.0" } })
+    const data = await r.json()
+    if (data?.[0]) {
+      const city = data[0].display_name?.split(",")[0] || ""
+      return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon), city }
+    }
+  } catch (err) {
+    console.error("[customer geocode] Nominatim fallback error:", err)
+  }
   return null
 }
 
@@ -159,6 +178,7 @@ async function sendSMS(to: string, body: string, sid: string) {
 
 async function notifyAdmin(msg: string, sid: string) {
   try { await sendSMS(ADMIN_PHONE, msg, `adm_${sid}`) } catch {}
+  if (ADMIN_PHONE_2) { try { await sendSMS(ADMIN_PHONE_2, msg, `adm2_${sid}`) } catch {} }
 }
 
 async function createDispatchOrder(conv: any, phone: string): Promise<string | null> {
@@ -323,20 +343,43 @@ async function callSarah(
       "Respond as Sarah. JSON only.",
     ].join("\n")
 
-    const resp = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 250,
-      system: SARAH_SYSTEM,
-      messages: [...history.slice(-16), { role: "user" as const, content: ctx }],
-    })
-    const raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""
-    const cleaned = raw.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()
-    return JSON.parse(cleaned)
+    const attemptSarah = async () => {
+      const resp = await anthropic.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 250,
+        system: SARAH_SYSTEM,
+        messages: [...history.slice(-16), { role: "user" as const, content: ctx }],
+      })
+      const raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""
+      const cleaned = raw.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()
+      return JSON.parse(cleaned)
+    }
+
+    try {
+      return await attemptSarah()
+    } catch (firstErr) {
+      console.error("[Sarah brain] attempt 1 failed, retrying in 2s:", firstErr)
+      await new Promise(r => setTimeout(r, 2000))
+      return await attemptSarah()
+    }
   } catch (e) {
-    console.error("[Sarah brain]", e)
-    // Notify admin on Sonnet failure so they can manually respond
-    try { await createAdminSupabase().from("customer_sms_logs").insert({ phone: "system", body: `SARAH BRAIN FAILED: ${(e as any)?.message || "unknown error"}`, direction: "outbound", message_sid: `err_${Date.now()}` }) } catch {}
-    return { response: "Give me one sec, let me check on that" }
+    console.error("[Sarah brain] both attempts failed:", e)
+    // Notify admin via sms_logs AND SMS
+    const sb = createAdminSupabase()
+    try { await sb.from("customer_sms_logs").insert({ phone: "system", body: `SARAH BRAIN DOWN: ${(e as any)?.message || "unknown error"}. Conv state: ${conv?.state || "unknown"}`, direction: "error", message_sid: `err_${Date.now()}` }) } catch {}
+    try { await notifyAdmin(`SONNET DOWN: Sarah brain failed twice. Customer state: ${conv?.state || "unknown"}. Error: ${(e as any)?.message || "unknown"}`, `sonnet_down_${Date.now()}`) } catch {}
+    // Context-aware fallback based on conversation state
+    const state = conv?.state || "NEW"
+    const fallbacks: Record<string, string> = {
+      NEW: "Hey whats your name",
+      COLLECTING: !conv?.customer_name ? "Hey whats your name" : !conv?.delivery_address ? "Whats the delivery address" : !conv?.material_purpose ? "What are you using the dirt for" : "Let me pull up those numbers, one sec",
+      QUOTING: "Let me pull up those numbers, one sec",
+      ASKING_DIMENSIONS: "What are the dimensions you're working with, length width and depth in feet",
+      AWAITING_PAYMENT: "Just following up on payment, Venmo Zelle or invoice works for us",
+      ORDER_PLACED: "Your order is in, you'll get a text when your driver is heading your way",
+      CLOSED: "Hey how can I help",
+    }
+    return { response: fallbacks[state] || "Give me one sec, let me check on that" }
   }
 }
 

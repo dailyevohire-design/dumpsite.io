@@ -20,11 +20,12 @@ export async function GET() {
     : `missing: ${missingVars.join(', ')}`
 
   // Check database connection
+  let supabase = false
   let database: 'connected' | 'error' = 'error'
   try {
     const admin = createAdminSupabase()
     const { error } = await admin.from('cities').select('id').limit(1)
-    if (!error) database = 'connected'
+    if (!error) { database = 'connected'; supabase = true }
   } catch {}
 
   const status = database === 'error'
@@ -36,7 +37,7 @@ export async function GET() {
   const statusCode = status === 'down' ? 503 : 200
 
   return NextResponse.json(
-    { status, timestamp, database, envVars, version },
+    { status, supabase, timestamp, database, envVars, version },
     { status: statusCode, headers: { 'Cache-Control': 'no-store' } }
   )
 }

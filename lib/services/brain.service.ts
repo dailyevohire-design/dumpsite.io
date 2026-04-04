@@ -13,6 +13,7 @@ import crypto from "crypto"
 
 const anthropic = new Anthropic()
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
+const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"
 const LARGE_JOB_YARDS = 500
 const DFW_CITIES = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale","Venus","Ponder","Justin","Boyd","Blum","Gainesville","Hutchins","Everman","Hillsboro","Matador","Elizabeth"]
@@ -259,7 +260,10 @@ async function sendSMS(toPhone: string, body: string) {
     await client.messages.create({ body, from: from!, to: e164(toPhone) })
   } catch (e: any) { console.error("[sendSMS]", e?.message) }
 }
-async function sendAdminAlert(msg: string) { await sendSMS(ADMIN_PHONE, msg) }
+async function sendAdminAlert(msg: string) {
+  await sendSMS(ADMIN_PHONE, msg)
+  if (ADMIN_PHONE_2) { try { await sendSMS(ADMIN_PHONE_2, msg) } catch {} }
+}
 async function getActiveJob(conv: any) {
   if (!conv?.active_order_id) return null
   const { data } = await createAdminSupabase().from("dispatch_orders")
@@ -1280,8 +1284,9 @@ async function callBrain(
 
   const messages = [...history.slice(-20), { role: "user" as const, content: ctx }]
   let raw = ""
-  try {
-    const resp = /* caught */ await anthropic.messages.create({
+
+  const attemptBrain = async (): Promise<BrainOutput> => {
+    const resp = await anthropic.messages.create({
       model: "claude-sonnet-4-6", max_tokens: 250, system: JESSE_PROMPT, messages,
     })
     raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""
@@ -1297,15 +1302,37 @@ async function callBrain(
     }
     if (parsed.response?.length > 300) parsed.response = parsed.response.slice(0, 300)
     return parsed
-  } catch (err) {
-    console.error("[Brain] raw:", raw?.slice(0,200), err)
-    const fb: Record<string,string> = {
-      DISCOVERY: lang==="es"?pick(["que onda, tienes tierra hoy","como estas, tienes tierra"]):pick(["how are you, you got dirt today","hey whats up, you got material to haul","hey how you doing, you got dirt to move"]),
-      ASKING_TRUCK: "what kind of truck you running", PHOTO_PENDING: "send pic of dirt",
-      APPROVAL_PENDING: "give me a min", ACTIVE: "10.4",
-      PAYMENT_METHOD_PENDING: "how you want it, zelle or venmo",
+  }
+
+  try {
+    return await attemptBrain()
+  } catch (firstErr) {
+    console.error("[Brain] attempt 1 failed, retrying in 2s:", raw?.slice(0,200), firstErr)
+    // Retry once after 2s
+    try {
+      await new Promise(r => setTimeout(r, 2000))
+      return await attemptBrain()
+    } catch (retryErr) {
+      console.error("[Brain] attempt 2 failed, using template fallback:", retryErr)
+      // Notify admin that Sonnet is down
+      try { await sendAdminAlert(`SONNET DOWN: Jesse brain failed twice. Driver ${conv?.phone || "unknown"} got template fallback. Error: ${(retryErr as any)?.message || "unknown"}`) } catch {}
+      // Context-aware template fallback
+      const fb: Record<string,string> = {
+        DISCOVERY: lang==="es"?pick(["que onda, tienes tierra hoy","como estas, tienes tierra"]):pick(["how are you, you got dirt today","hey whats up, you got material to haul","hey how you doing, you got dirt to move"]),
+        ASKING_TRUCK: lang==="es"?"que tipo de camion tienes":"what kind of truck you running",
+        ASKING_YARDS: lang==="es"?"cuantas yardas tienes":"how many yards you got",
+        ASKING_CITY: lang==="es"?"cual es la direccion":"whats the address",
+        PHOTO_PENDING: lang==="es"?"manda foto de la tierra":"send me a pic of the dirt",
+        APPROVAL_PENDING: lang==="es"?"dame un minuto":"give me a min still waiting on them",
+        JOB_PRESENTED: lang==="es"?"te interesa":"you interested",
+        ACTIVE: lang==="es"?"10.4 todo bien":"10.4 you good",
+        OTW_PENDING: lang==="es"?"me avisas cuando llegues":"let me know when you get there",
+        CLOSED: lang==="es"?"que onda":"whats up",
+        PAYMENT_METHOD_PENDING: lang==="es"?"como quieres que te pague, zelle o venmo":"how you want it, zelle or venmo",
+        NEGOTIATE: lang==="es"?"eso es lo mejor que tengo":"that is the best I got",
+      }
+      return { response: fb[conv?.state||"DISCOVERY"]||(lang==="es"?"dame un segundo":"give me a sec"), action:"NONE", updates:{}, confidence:0 }
     }
-    return { response: fb[conv?.state||"DISCOVERY"]||"10.4", action:"NONE", updates:{}, confidence:0 }
   }
 }
 

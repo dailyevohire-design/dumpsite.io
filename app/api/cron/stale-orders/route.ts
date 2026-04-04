@@ -5,9 +5,11 @@ import twilio from "twilio"
 const tw = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
 const ADMIN = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
+const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
 async function alertAdmin(msg: string) {
   try { await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN}` }) } catch (e) { console.error("[alert]", e) }
+  if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[alert admin2]", e) } }
 }
 
 export async function GET() {
