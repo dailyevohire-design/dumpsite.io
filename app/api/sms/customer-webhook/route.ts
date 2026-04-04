@@ -72,6 +72,17 @@ export async function POST(req: NextRequest) {
     return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })
   }
 
+  // Validate Twilio signature in production
+  const twilioSignature = req.headers.get("x-twilio-signature") || ""
+  const webhookUrl = `${process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"}/api/sms/customer-webhook`
+  const params: Record<string, string> = {}
+  formData.forEach((value, key) => { params[key] = value })
+
+  if (process.env.NODE_ENV === "production" && !validateTwilioSignature(webhookUrl, params, twilioSignature)) {
+    console.error("[Customer SMS] Invalid Twilio signature")
+    return new Response("Unauthorized", { status: 401 })
+  }
+
   try {
     const reply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl })
     if (!reply) return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })

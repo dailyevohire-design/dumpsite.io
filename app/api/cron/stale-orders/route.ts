@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import twilio from "twilio"
 
@@ -13,7 +13,11 @@ async function alertAdmin(msg: string) {
   if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[alert admin2]", e) } }
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authHeader = request.headers.get("authorization")
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 })
+  }
   // Kill switch — set PAUSE_STALE_ALERTS=true in Vercel env to silence all alerts
   if (process.env.PAUSE_STALE_ALERTS === "true") {
     return NextResponse.json({ paused: true, alerts: 0 })

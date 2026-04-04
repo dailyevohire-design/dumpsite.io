@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import twilio from "twilio"
 
@@ -14,7 +14,11 @@ async function alertAdmin(msg: string) {
   if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[pw-alert admin2]", e) } }
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const authHeader = request.headers.get("authorization")
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 })
+  }
   const sb = createAdminSupabase()
   const now = Date.now()
   let actions = 0
