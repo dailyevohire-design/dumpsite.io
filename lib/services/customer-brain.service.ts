@@ -333,7 +333,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   try {
 
   if (await isDupe(sid)) return ""
-  await logMsg(phone, body || "[empty]", "inbound", sid)
+  await logMsg(phone, body || (sms.numMedia > 0 ? "[photo]" : "[empty]"), "inbound", sid)
+
+  // Empty body with photo — acknowledge it
+  if (sms.numMedia > 0 && !body) {
+    const s = await callSarah("[Customer sent a photo]", await getConv(phone), await getHistory(phone), "Customer sent a photo. Acknowledge it naturally, like 'thanks for the pic' or 'got the photo'. Then continue with whatever question you need to ask next based on what info is still missing")
+    const r = validate(s.response, "")
+    await logMsg(phone, r, "outbound", `photo_${sid}`)
+    return r
+  }
 
   // STOP/START
   if (lower === "stop" || lower === "unsubscribe") {
@@ -391,9 +399,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     return null
   })()
   const isYes = /^(yes|yeah|yep|sure|ok|okay|lets do it|sounds good|perfect|go ahead|book it|schedule|please|absolutely|definitely|si|dale|do it|im down|im in|ready|set it up)$/i.test(lower)
-  const isNo = /^(no|nah|nope|too much|expensive|pass|never mind|cancel|not now|not interested)$/i.test(lower)
+  const isNo = /^(no|nah|nope|too much|expensive|pass|never mind|cancel|not now|not interested|no thanks|no thank you|nah im good|nah i'm good|too expensive|way too much|too high|cant afford|can't afford|out of my budget|too pricey|hard pass|no way)$/i.test(lower)
   const isCancel = /cancel|refund|money back/i.test(lower)
-  const isStatus = /status|update|where|when.*deliver|order|tracking|driver|eta|how long/i.test(lower)
+  const isStatus = /\b(status|tracking|eta)\b|where.*(my|is my|the).*(order|delivery|driver|truck)|when.*(my|is my|the).*(order|delivery|driver|truck|arriving|coming|getting here)|how long.*(until|till|before|for)/i.test(lower)
   const isPaymentConfirm = /sent|paid|done|confirmed|just sent|payment sent|transferred|just paid/i.test(lower)
 
   // Determine what info is missing
@@ -414,8 +422,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // Cancel request — any state
   if (isCancel) {
-    await notifyAdmin(`Customer ${conv.customer_name || phone} requesting cancellation`, sid)
-    const s = await callSarah(body, conv, history, "Customer wants to cancel. Say you'll have someone from the team reach out to help with that. Be empathetic.")
+    await notifyAdmin(`Customer ${conv.customer_name || phone} requesting cancellation | State: ${state} | Order: ${conv.dispatch_order_id || "none"}`, sid)
+    updates.state = "CLOSED"
+    const s = await callSarah(body, conv, history, "Customer wants to cancel. Say you'll have someone from the team reach out to help with that. Be empathetic but dont push")
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates })
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -505,6 +514,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
+  // ── CLOSED — customer cancelled or completed. Let them restart. ──
+  if (state === "CLOSED") {
+    const s = await callSarah(body, conv, history, "This customer had a previous order that's now closed. If they want to place a new order, help them get started fresh. Ask what they need")
+    updates.state = "COLLECTING"
+    reply = validate(s.response, lastOut)
+    await saveConv(phone, { ...conv, ...updates })
+    await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+  }
+
   // ── ACTIVE ORDER ──
   if (state === "ORDER_PLACED" || state === "DELIVERED") {
     const s = await callSarah(body, conv, history, "Customer has a confirmed order. Answer their question helpfully. If they ask about status say delivery is being scheduled and they'll get a text when driver is on the way. If they want to cancel, say you'll have someone reach out")
@@ -583,19 +601,22 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // Try to extract data from whatever they said
   // Name extraction — ONLY save if it actually looks like a name
-  const NOT_A_NAME = /^(hey|hi|hello|yo|sup|whats up|what up|howdy|hola|good morning|good afternoon|good evening|morning|afternoon|evening|yes|yeah|no|nah|ok|okay|sure|thanks|thank you|please|help|info|information|quote|price|pricing|how much|what|when|where|why|how|can you|do you|is this|are you|i need|i want|i'm looking|looking for|need|want|got|have|dirt|fill|topsoil|sand|gravel|delivery|deliver|dump|truck|yard|yards|cubic|material|project|estimate|cost|cheap|affordable|available|asap|urgent|ready|interested|question|stop|start|reset|menu|.)$/i
-  if (needName && body.trim().length > 1 && body.trim().length < 40 && !isAddress && !/\d{3}/.test(body) && !NOT_A_NAME.test(body.trim()) && !inlineMaterial && !isFollowUp) {
-    // Must have at least one word that starts with uppercase (actual name) or be 2+ words
+  const NOT_A_NAME = /^(hey|hi|hello|yo|sup|whats up|what up|howdy|hola|good morning|good afternoon|good evening|morning|afternoon|evening|yes|yeah|yep|yea|no|nah|nope|ok|okay|sure|thanks|thank you|please|help|info|information|quote|price|pricing|how much|what|when|where|why|how|can you|do you|is this|are you|i need|i want|i'm looking|looking for|need|want|got|have|dirt|fill|topsoil|sand|gravel|delivery|deliver|dump|truck|yard|yards|cubic|material|project|estimate|cost|cheap|affordable|available|asap|urgent|ready|interested|question|stop|start|reset|menu|sounds good|sounds great|yes please|go ahead|book it|set it up|do it|im down|im in|lets do it|perfect|absolutely|definitely|for sure|right|correct|cancel|never mind|too much|expensive|not now|done|sent|paid|.)$/i
+  if (needName && body.trim().length > 1 && body.trim().length < 40 && !isAddress && !/\d{3}/.test(body) && !NOT_A_NAME.test(body.trim()) && !inlineMaterial && !isFollowUp && !isYes && !isNo && !isCancel && !isStatus && !isPaymentConfirm && !inlineAccess && !inlineDate) {
     const trimmed = body.trim()
     const words = trimmed.split(/\s+/)
-    const hasCapital = /^[A-Z]/.test(trimmed)
-    const isLikelyName = (words.length >= 2 && words[0].length >= 2) || (hasCapital && words[0].length >= 2 && !/^(I|A|The|My|We|It|Is|At|In|On|To|So|Or|Do|Go|No|Hi|Oh|Ok)$/.test(words[0]))
+    // Accept lowercase single names (most people text lowercase)
+    // But filter out common non-name words
+    const COMMON_WORDS = /^(the|a|an|is|it|at|in|on|to|so|or|do|go|and|but|for|not|just|also|too|very|all|any|some|my|our|this|that|its|get|got|can|will|has|had|was|are|been|have|from|with|they|them|what|when|how|who|which|where|here|there|then|than|more|much|many|most|other|only|still|even|well|back|over|such|after|into|made|like|long|out|way|day|each|new|now|old|see|let|say|may|own|why|try)$/i
+    const isLikelyName = words.length <= 3 && words[0].length >= 2 && !COMMON_WORDS.test(words[0]) && !/\b(dirt|fill|sand|topsoil|gravel|delivery|truck|dump|yard|slab|pool|concrete|driveway|garden|level|grade|material|project|quote|price)\b/i.test(trimmed)
     if (isLikelyName) {
       updates.customer_name = trimmed
     }
   }
 
-  if (isAddress && needAddress) {
+  // Address extraction — require actual street address, not just a zip code
+  const isBareZip = /^\d{5}(-\d{4})?$/.test(body.trim())
+  if (isAddress && needAddress && !isBareZip) {
     const geo = await geocode(body)
     if (geo) {
       updates.delivery_address = body.trim()
@@ -673,7 +694,25 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       instruction = `Ask how many cubic yards of ${fmtMaterial(merged.material_type)} they need. If they're not sure, you can help calculate from dimensions (length x width x depth in feet)`
     }
   } else if (!mHas("access_type")) {
-    instruction = "Ask if their property can fit big rigs and 18 wheelers, or just standard dump trucks. This affects what size truck we send"
+    // Check if customer just answered yes/no to the access question
+    if (isYes || /\b(sure|yep|yeah|of course|definitely|absolutely|they can|it can|room|plenty|wide|open|no problem|no issue)\b/i.test(lower)) {
+      updates.access_type = "dump_truck_and_18wheeler"
+      // Skip ahead — don't re-ask, move to date
+      if (!mHas("delivery_date")) {
+        instruction = "They have room for big trucks. Now ask about their timeline, do they need it by a specific date or are they flexible"
+      } else {
+        instruction = "" // All info collected, will hit quote logic below
+      }
+    } else if (isNo || /\b(no|nope|nah|cant|can.?t|wont fit|too tight|too narrow|small)\b/i.test(lower)) {
+      updates.access_type = "dump_truck_only"
+      if (!mHas("delivery_date")) {
+        instruction = "Got it, dump trucks only. Now ask about their timeline, do they need it by a specific date or are they flexible"
+      } else {
+        instruction = ""
+      }
+    } else {
+      instruction = "Ask if their property can fit big rigs and 18 wheelers, or just standard dump trucks. This affects what size truck we send"
+    }
   } else if (!mHas("delivery_date")) {
     instruction = "Ask about their timeline. Do they need it by a specific date or are they flexible on delivery"
   } else {
@@ -735,8 +774,13 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         const prior = conv.dimensions_raw.match(/(\d+\.?\d*)/g)
         if (prior && prior.length >= 2) {
           let depth = parseFloat(nums[0])
-          // If they said inches (4, 6, 8 etc), convert to feet
-          if (/inch|in\b|"/i.test(body) || depth <= 12) depth = depth / 12
+          // Convert to feet: explicit "inches" or "in" → divide by 12
+          // Explicit "feet" or "ft" → use as-is
+          // No unit: if <= 12 assume inches (nobody does a 6-foot-deep slab), if > 12 assume inches too
+          const saidFeet = /\b(feet|ft|foot)\b/i.test(body)
+          const saidInches = /\b(inch|inches|in)\b|"/i.test(body)
+          if (saidFeet) { /* already in feet */ }
+          else if (saidInches || depth <= 12) depth = depth / 12
           const yards = cubicYards(parseFloat(prior[0]), parseFloat(prior[1]), depth)
           updates.yards_needed = yards
           updates.dimensions_raw = `${prior[0]} x ${prior[1]} x ${nums[0]}`

@@ -1349,6 +1349,31 @@ async function handleDelivery(
       ? `DumpSite: ${profile.first_name} entrego ${loads} carga${loads>1?"s":""}. Todo bien con la entrega? Necesitas mas cargas? Responde YES o NO`
       : `DumpSite: Did all go well with the delivery of ${loads} load${loads>1?"s":""}? Do you need anymore loads? Reply YES or NO`
     await sendSMS(cp, msg)
+
+    // Trigger customer payment collection — if this order came from FillDirtNearMe SMS,
+    // transition the customer conversation to AWAITING_PAYMENT so Sarah follows up
+    try {
+      const { data: custConv } = await sb.from("customer_conversations")
+        .select("phone, state, total_price_cents")
+        .eq("phone", cp)
+        .in("state", ["ORDER_PLACED"])
+        .maybeSingle()
+      if (custConv) {
+        await sb.rpc("upsert_customer_conversation", {
+          p_phone: cp, p_state: "AWAITING_PAYMENT",
+        })
+        // Sarah sends payment collection message via the customer number
+        const custFrom = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || ""
+        if (custFrom) {
+          const payMsg = `Hey your delivery just went through, ${loads} load${loads>1?"s":""}. For payment we accept Venmo, Zelle, or we can send an online invoice (3.5% card fee). Which works best for you`
+          try {
+            const client = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+            await client.messages.create({ body: payMsg, from: custFrom, to: `+1${cp}` })
+            await sb.from("customer_sms_logs").insert({ phone: cp, body: payMsg, direction: "outbound", message_sid: `pay_trigger_${Date.now()}` })
+          } catch (e: any) { console.error("[customer pay trigger]", e?.message) }
+        }
+      }
+    } catch (e) { console.error("[customer pay transition]", e) }
   }
 
   const savedPay = await getPaymentInfo(phone)

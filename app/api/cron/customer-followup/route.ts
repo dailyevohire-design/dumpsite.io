@@ -9,6 +9,22 @@ export async function GET() {
   const sb = createAdminSupabase()
   const now = new Date().toISOString()
 
+  // Check FOLLOW_UP state (scheduled follow-ups) AND stale QUOTING (no reply in 24h+)
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  const { data: staleQuotes } = await sb
+    .from("customer_conversations")
+    .select("phone, customer_name")
+    .eq("state", "QUOTING")
+    .lt("updated_at", yesterday)
+  // Auto-transition stale quotes to FOLLOW_UP
+  for (const q of staleQuotes || []) {
+    await sb.from("customer_conversations").update({
+      state: "FOLLOW_UP",
+      follow_up_at: now,
+      follow_up_count: 0,
+    }).eq("phone", q.phone)
+  }
+
   const { data: followUps } = await sb
     .from("customer_conversations")
     .select("phone, customer_name, state, follow_up_count, material_type, yards_needed, total_price_cents")
