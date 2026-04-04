@@ -219,12 +219,12 @@ WHAT YOU KNOW ABOUT DIRT:
 - Rain can delay delivery — we won't deliver if the truck will get stuck.
 - All our material is screened and clean. No debris, no trash, no contaminants.
 
-PAYMENT RULES (NON-NEGOTIABLE):
-- We accept Zelle and Venmo ONLY.
-- NO cash. NO check. Reason: Our drivers are independently insured contractors. For insurance and liability purposes we cannot accept cash or check at time of delivery.
-- When explaining this, be matter-of-fact and professional. Don't make it sound weird.
-- Zelle: support@filldirtnearme.net
-- Venmo: @FillDirtNearMe
+PAYMENT RULES:
+- Payment is collected AFTER delivery, not before.
+- We accept Venmo, Zelle, or online invoice (credit/debit card with a 3.5% processing fee).
+- NO cash. NO check. Reason: Our drivers are independently insured contractors. For insurance and liability purposes we cannot accept cash or check.
+- When discussing payment methods during quoting, just mention the options. Do NOT share actual Venmo handle or Zelle email yet. That comes after delivery.
+- After delivery is confirmed, we follow up to collect payment with actual account details.
 
 WHEN CUSTOMER ASKS FOR ORDER STATUS:
 - If they have an active order: "Your delivery is scheduled, you'll get a text as soon as your driver is heading your way"
@@ -458,25 +458,48 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
-  // ── PAYMENT FLOW ──
+  // ── POST-DELIVERY PAYMENT COLLECTION ──
   if (state === "AWAITING_PAYMENT") {
     if (isPaymentConfirm) {
       updates.payment_status = "confirming"
-      updates.state = "ORDER_PLACED"
-      const orderId = await createDispatchOrder({ ...conv, ...updates }, phone)
-      if (orderId) {
-        updates.dispatch_order_id = orderId
-        const yards = conv.yards_needed || MIN_YARDS
-        await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)} | ${conv.payment_method}`, sid)
-        if (yards >= LARGE_ORDER) await notifyAdmin(`⚠️ LARGE ORDER ${yards}yds — ${conv.customer_name} ${conv.delivery_city}`, sid)
-      }
-      const s = await callSarah(body, conv, history, `Payment confirmed! Tell ${(conv.customer_name||"").split(/\s+/)[0]||"them"} their delivery is confirmed for ${conv.delivery_date || "soon"}. They'll get a text when their driver is on the way. Thank them for choosing Fill Dirt Near Me`)
+      updates.state = "DELIVERED"
+      const s = await callSarah(body, conv, history, `Payment confirmed. Thank them and let them know we appreciate their business. If they ever need more material, just text us`)
+      reply = validate(s.response, lastOut)
+      await notifyAdmin(`PAYMENT CONFIRMED: ${conv.customer_name} | ${fmt$(conv.total_price_cents||0)} | ${conv.payment_method}`, sid)
+      await saveConv(phone, { ...conv, ...updates })
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+    if (/zelle/i.test(lower)) {
+      updates.payment_method = "zelle"
+      const total = fmt$(conv.total_price_cents || 0)
+      const s = await callSarah(body, conv, history, `They chose Zelle. Tell them to send ${total} to support@filldirtnearme.net via Zelle. Once sent, text you back`)
       reply = validate(s.response, lastOut)
       await saveConv(phone, { ...conv, ...updates })
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
-    // Not a payment confirmation — answer their question, remind about payment
-    const s = await callSarah(body, conv, history, `Customer hasn't confirmed payment yet. Answer whatever they asked, then gently remind them to send the ${fmt$(conv.total_price_cents||0)} via ${conv.payment_method || "Zelle or Venmo"} when ready`)
+    if (/venmo/i.test(lower)) {
+      updates.payment_method = "venmo"
+      const total = fmt$(conv.total_price_cents || 0)
+      const s = await callSarah(body, conv, history, `They chose Venmo. Tell them to send ${total} to @FillDirtNearMe on Venmo. Once sent, text you back`)
+      reply = validate(s.response, lastOut)
+      await saveConv(phone, { ...conv, ...updates })
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+    if (/invoice|card|credit|debit|online/i.test(lower)) {
+      updates.payment_method = "invoice"
+      const s = await callSarah(body, conv, history, `They want to pay by card. Let them know we'll send an online invoice to their email. There is a 3.5% processing fee for card payments. Ask for their email if we dont have it`)
+      reply = validate(s.response, lastOut)
+      await saveConv(phone, { ...conv, ...updates })
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+    if (/cash|check|cheque/i.test(lower)) {
+      const s = await callSarah(body, conv, history, "They want cash or check. Explain we cant accept those, our drivers are independently insured contractors so for liability reasons we can only do Venmo, Zelle, or online invoice (card with 3.5% fee). Ask which works")
+      reply = validate(s.response, lastOut)
+      await saveConv(phone, { ...conv, ...updates })
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+    // General question while waiting for payment
+    const s = await callSarah(body, conv, history, `Delivery is complete, waiting on payment of ${fmt$(conv.total_price_cents||0)}. Answer their question, then remind them we accept Venmo, Zelle, or online invoice (card with 3.5% fee). Which works for them`)
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates })
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -493,15 +516,17 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // ── QUOTING — we gave a price, waiting for yes/no ──
   if (state === "QUOTING") {
     if (isYes) {
-      if (needEmail) {
-        updates.state = "ASKING_EMAIL"
-        const s = await callSarah(body, conv, history, "Customer said yes to the quote! Ask for their email so you can send a receipt")
-        reply = validate(s.response, lastOut)
-      } else if (needPayment) {
-        updates.state = "ASKING_PAYMENT"
-        const s = await callSarah(body, conv, history, "Customer confirmed the order. Now explain payment: you accept Zelle and Venmo only. Your drivers are independently insured so you cant accept cash or check at delivery. Ask which works for them")
-        reply = validate(s.response, lastOut)
+      // Customer accepted the quote — create order immediately, payment comes after delivery
+      updates.state = "ORDER_PLACED"
+      const orderId = await createDispatchOrder({ ...conv, ...updates }, phone)
+      if (orderId) {
+        updates.dispatch_order_id = orderId
+        const yards = conv.yards_needed || MIN_YARDS
+        await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
+        if (yards >= LARGE_ORDER) await notifyAdmin(`LARGE ORDER ${yards}yds — ${conv.customer_name} ${conv.delivery_city}`, sid)
       }
+      const s = await callSarah(body, conv, history, `Customer said yes. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
+      reply = validate(s.response, lastOut)
     } else if (isNo) {
       updates.state = "FOLLOW_UP"
       updates.follow_up_at = new Date(Date.now() + 48*60*60*1000).toISOString()
@@ -523,41 +548,17 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
-  // ── EMAIL COLLECTION ──
+  // ── EMAIL COLLECTION (for invoice payments post-delivery) ──
   if (state === "ASKING_EMAIL") {
     const email = inlineEmail || extractEmail(body)
     if (email) {
       updates.customer_email = email
-      updates.state = "ASKING_PAYMENT"
-      const s = await callSarah(body, conv, history, "Got their email. Now explain payment: Zelle and Venmo only. Drivers are independently insured so cash and check cant be accepted at delivery. Ask which works for them. Be matter-of-fact, not apologetic")
-      reply = validate(s.response, lastOut)
-    } else {
-      const s = await callSarah(body, conv, history, "Need their email for the receipt. They didn't give a valid email. Ask again naturally")
-      reply = validate(s.response, lastOut)
-    }
-    await saveConv(phone, { ...conv, ...updates })
-    await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
-  }
-
-  // ── PAYMENT METHOD ──
-  if (state === "ASKING_PAYMENT") {
-    if (/zelle/i.test(lower)) {
-      updates.payment_method = "zelle"
       updates.state = "AWAITING_PAYMENT"
-      const total = fmt$(conv.total_price_cents || 0)
-      const s = await callSarah(body, conv, history, `They chose Zelle. Tell them to send ${total} to support@filldirtnearme.net via Zelle. Once they send it, text you back and you'll get them confirmed`)
+      const s = await callSarah(body, conv, history, "Got their email. Let them know we'll send the invoice shortly. Thank them")
       reply = validate(s.response, lastOut)
-    } else if (/venmo/i.test(lower)) {
-      updates.payment_method = "venmo"
-      updates.state = "AWAITING_PAYMENT"
-      const total = fmt$(conv.total_price_cents || 0)
-      const s = await callSarah(body, conv, history, `They chose Venmo. Tell them to send ${total} to @FillDirtNearMe on Venmo. Once they send it, text you back and you'll get them confirmed`)
-      reply = validate(s.response, lastOut)
-    } else if (/cash|check|cheque/i.test(lower)) {
-      const s = await callSarah(body, conv, history, "They want to pay cash or check. Explain that unfortunately you can only accept Zelle or Venmo. Your drivers are independently insured contractors and for insurance and liability reasons cash and check cant be accepted at delivery. Ask which works, Zelle or Venmo")
-      reply = validate(s.response, lastOut)
+      await notifyAdmin(`INVOICE NEEDED: ${conv.customer_name} | ${email} | ${fmt$(conv.total_price_cents||0)}`, sid)
     } else {
-      const s = await callSarah(body, conv, history, "Need them to choose Zelle or Venmo. Answer whatever they asked, then ask which payment method works for them")
+      const s = await callSarah(body, conv, history, "Need their email to send the invoice. They didn't give a valid email. Ask again naturally")
       reply = validate(s.response, lastOut)
     }
     await saveConv(phone, { ...conv, ...updates })
