@@ -339,18 +339,19 @@ export async function getDualQuote(
   const firstName = (customerName || "").split(/\s+/)[0] || ""
   const matName = fmtMaterial(materialType)
   const billable = standard.billableYards
+  const cityLabel = deliveryCity || "your location"
 
   let formatted = ""
   let formattedEs = ""
 
   if (priority && priority.perYardCents > standard.perYardCents) {
     // Different prices — show both options
-    formatted = `${firstName} ${billable} yards of ${matName} to ${deliveryCity}\n\nStandard delivery: ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yard) 3-5 business days\nPriority delivery: ${fmt$(priority.totalCents)} (${fmt$(priority.perYardCents)}/yard) guaranteed by ${priority.guaranteedDate}\n\nWhich works better for you`
+    formatted = `${firstName} ${billable} yards of ${matName} to ${cityLabel}\n\nStandard delivery: ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yard) 3-5 business days\nPriority delivery: ${fmt$(priority.totalCents)} (${fmt$(priority.perYardCents)}/yard) guaranteed by ${priority.guaranteedDate}\n\nWhich works better for you`
 
     formattedEs = `${firstName} ${billable} yardas de ${matName} a ${deliveryCity}\n\nEntrega estandar: ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yarda) 3-5 dias habiles\nEntrega prioritaria: ${fmt$(priority.totalCents)} (${fmt$(priority.perYardCents)}/yarda) garantizada para ${priority.guaranteedDate}\n\nCual te funciona mejor`
   } else {
     // Prices are close or same — just show one price
-    formatted = `${firstName} ${billable} yards of ${matName} to ${deliveryCity} comes to ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yard). Delivery within 3-5 business days, we can also lock in a specific date if you need it. Want me to get that set up`
+    formatted = `${firstName} ${billable} yards of ${matName} to ${cityLabel} comes to ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yard). Delivery within 3-5 business days, we can also lock in a specific date if you need it. Want me to get that set up`
 
     formattedEs = `${firstName} ${billable} yardas de ${matName} a ${deliveryCity} sale en ${fmt$(standard.totalCents)} (${fmt$(standard.perYardCents)}/yarda). Entrega en 3-5 dias habiles, tambien podemos garantizar fecha especifica si lo necesitas. Quieres que lo programe`
   }

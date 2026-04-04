@@ -290,6 +290,8 @@ async function callSarah(
     return JSON.parse(cleaned)
   } catch (e) {
     console.error("[Sarah brain]", e)
+    // Notify admin on Sonnet failure so they can manually respond
+    try { await createAdminSupabase().from("customer_sms_logs").insert({ phone: "system", body: `SARAH BRAIN FAILED: ${(e as any)?.message || "unknown error"}`, direction: "outbound", message_sid: `err_${Date.now()}` }) } catch {}
     return { response: "Give me one sec, let me check on that" }
   }
 }
@@ -496,8 +498,17 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     if (/invoice|card|credit|debit|online/i.test(lower)) {
       updates.payment_method = "invoice"
-      const s = await callSarah(body, conv, history, `They want to pay by card. Let them know we'll send an online invoice to their email. There is a 3.5% processing fee for card payments. Ask for their email if we dont have it`)
-      reply = validate(s.response, lastOut)
+      if (has(conv.customer_email)) {
+        // Already have email — send invoice
+        const s = await callSarah(body, conv, history, `They chose card. Let them know we'll send the invoice to ${conv.customer_email}. There's a 3.5% processing fee for card payments. Once they pay, text you back`)
+        reply = validate(s.response, lastOut)
+        await notifyAdmin(`INVOICE NEEDED: ${conv.customer_name} | ${conv.customer_email} | ${fmt$(conv.total_price_cents||0)}`, sid)
+      } else {
+        // Need email first
+        updates.state = "ASKING_EMAIL"
+        const s = await callSarah(body, conv, history, `They want to pay by card. There's a 3.5% processing fee. Ask for their email so you can send the invoice`)
+        reply = validate(s.response, lastOut)
+      }
       await saveConv(phone, { ...conv, ...updates })
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
@@ -523,9 +534,17 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
-  // ── ACTIVE ORDER ──
-  if (state === "ORDER_PLACED" || state === "DELIVERED") {
-    const s = await callSarah(body, conv, history, "Customer has a confirmed order. Answer their question helpfully. If they ask about status say delivery is being scheduled and they'll get a text when driver is on the way. If they want to cancel, say you'll have someone reach out")
+  // ── ACTIVE ORDER — waiting for delivery ──
+  if (state === "ORDER_PLACED") {
+    const s = await callSarah(body, conv, history, "Customer has a confirmed order waiting for delivery. Answer their question helpfully. If they ask about status say their delivery is being scheduled and they'll get a text when their driver is heading their way. If they want to cancel, say you'll have someone reach out")
+    reply = validate(s.response, lastOut)
+    await saveConv(phone, { ...conv, ...updates })
+    await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+  }
+
+  // ── DELIVERED — delivery done, payment confirmed ──
+  if (state === "DELIVERED") {
+    const s = await callSarah(body, conv, history, "This customer's delivery has been completed and payment was received. Answer their question. If they need more material, help them start a new order. If they have an issue with the delivery, say you'll have someone from the team reach out")
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates })
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -701,14 +720,14 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       if (!mHas("delivery_date")) {
         instruction = "They have room for big trucks. Now ask about their timeline, do they need it by a specific date or are they flexible"
       } else {
-        instruction = "" // All info collected, will hit quote logic below
+        instruction = "__GENERATE_QUOTE__"
       }
     } else if (isNo || /\b(no|nope|nah|cant|can.?t|wont fit|too tight|too narrow|small)\b/i.test(lower)) {
       updates.access_type = "dump_truck_only"
       if (!mHas("delivery_date")) {
         instruction = "Got it, dump trucks only. Now ask about their timeline, do they need it by a specific date or are they flexible"
       } else {
-        instruction = ""
+        instruction = "__GENERATE_QUOTE__"
       }
     } else {
       instruction = "Ask if their property can fit big rigs and 18 wheelers, or just standard dump trucks. This affects what size truck we send"
@@ -747,6 +766,36 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         instruction = `Give ${firstName} their quote: ${quote.billable} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||"their location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
       } else {
         instruction = "Their delivery address is outside your service area (more than 60 miles from your yards in Dallas, Fort Worth or Denver). Let them know and ask if there's another address"
+        updates.state = "COLLECTING"
+      }
+    }
+  }
+
+  // ── GENERATE QUOTE if all info just became complete ──
+  if (instruction === "__GENERATE_QUOTE__") {
+    const qMerged = { ...conv, ...updates }
+    const dualQuote = (qMerged.delivery_lat && qMerged.delivery_lng)
+      ? await getDualQuote(
+          qMerged.customer_name || "", qMerged.delivery_lat, qMerged.delivery_lng,
+          qMerged.delivery_city || "", qMerged.material_type || "fill_dirt",
+          qMerged.yards_needed || MIN_YARDS, qMerged.access_type || "dump_truck_only",
+          qMerged.delivery_date || undefined,
+        ) : null
+    if (dualQuote) {
+      updates.price_per_yard_cents = dualQuote.standard.perYardCents
+      updates.total_price_cents = dualQuote.standard.totalCents
+      updates.zone = dualQuote.standard.zone
+      updates.state = "QUOTING"
+      instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
+    } else {
+      const quote = calcQuote((qMerged.distance_miles || 0), qMerged.material_type || "fill_dirt", qMerged.yards_needed || MIN_YARDS)
+      if (quote) {
+        updates.price_per_yard_cents = quote.perYardCents
+        updates.total_price_cents = quote.totalCents
+        updates.state = "QUOTING"
+        instruction = `Give ${(qMerged.customer_name||"").split(/\s+/)[0]} their quote: ${quote.billable} yards of ${fmtMaterial(qMerged.material_type||"")} to ${qMerged.delivery_city||"your location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
+      } else {
+        instruction = "Their delivery address is outside our service area. Let them know and ask if there's another address"
         updates.state = "COLLECTING"
       }
     }
