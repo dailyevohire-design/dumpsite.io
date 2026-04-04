@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { createAdminSupabase } from "../supabase"
+import { getDualQuote } from "./customer-pricing.service"
 import twilio from "twilio"
 
 const anthropic = new Anthropic()
@@ -364,6 +365,31 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const inlineMaterial = extractMaterialFromPurpose(body)
   const isAddress = looksLikeAddress(body)
   const isFollowUp = looksLikeFollowUp(lower)
+
+  // ── ACCESS TYPE EXTRACTION ──
+  const inlineAccess = (() => {
+    if (/\b(18.?wheel|big rig|semi|tractor|wide open|plenty of room|lots of room|big truck|any size|all good|both)\b/i.test(lower)) return "dump_truck_and_18wheeler"
+    if (/\b(just dump|dump truck only|no.*(18|semi|big)|tight|narrow|small street|residential|driveway only|only dump)\b/i.test(lower)) return "dump_truck_only"
+    return null
+  })()
+
+  // ── DELIVERY DATE EXTRACTION ──
+  const inlineDate = (() => {
+    if (/\b(today|hoy)\b/i.test(lower)) return "Today"
+    if (/\b(tomorrow|manana|mañana)\b/i.test(lower)) return "Tomorrow"
+    if (/\b(asap|as soon as|right away|urgent|lo antes|cuanto antes)\b/i.test(lower)) return "ASAP"
+    if (/\b(this week)\b/i.test(lower)) return "This week"
+    if (/\b(next week)\b/i.test(lower)) return "Next week"
+    if (/\b(flexible|whenever|no rush|no hurry|not urgent|when.?ever)\b/i.test(lower)) return "Flexible"
+    // Try to match a date like "April 5" or "4/5" or "monday"
+    const dateMatch = body.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i)
+    if (dateMatch) return dateMatch[0]
+    const numDate = body.match(/\b(\d{1,2})[\/\-](\d{1,2})\b/)
+    if (numDate) return `${numDate[1]}/${numDate[2]}`
+    const monthDate = body.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+(\d{1,2})\b/i)
+    if (monthDate) return `${monthDate[1]} ${monthDate[2]}`
+    return null
+  })()
   const isYes = /^(yes|yeah|yep|sure|ok|okay|lets do it|sounds good|perfect|go ahead|book it|schedule|please|absolutely|definitely|si|dale|do it|im down|im in|ready|set it up)$/i.test(lower)
   const isNo = /^(no|nah|nope|too much|expensive|pass|never mind|cancel|not now|not interested)$/i.test(lower)
   const isCancel = /cancel|refund|money back/i.test(lower)
@@ -597,6 +623,14 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     updates.material_purpose = body.trim()
   }
 
+  if (inlineAccess && needAccess) {
+    updates.access_type = inlineAccess
+  }
+
+  if (inlineDate && needDate) {
+    updates.delivery_date = inlineDate
+  }
+
   if (inlineEmail) {
     updates.customer_email = inlineEmail
   }
@@ -638,21 +672,43 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       instruction = `Ask how many cubic yards of ${fmtMaterial(merged.material_type)} they need. If they're not sure, you can help calculate from dimensions (length x width x depth in feet)`
     }
   } else if (!mHas("access_type")) {
-    instruction = "Ask if their property has access for dump trucks and 18 wheelers, or just dump trucks. This matters for what size truck you send"
+    instruction = "Ask if their property can fit big rigs and 18 wheelers, or just standard dump trucks. This affects what size truck we send"
   } else if (!mHas("delivery_date")) {
-    instruction = "Ask about their timeline. Do they need it by a specific date or are they flexible with delivery? Knowing this helps with scheduling"
+    instruction = "Ask about their timeline. Do they need it by a specific date or are they flexible on delivery"
   } else {
-    // ALL INFO COLLECTED — generate quote
-    const quote = calcQuote(merged.distance_miles || 0, merged.material_type || "fill_dirt", merged.yards_needed || MIN_YARDS)
-    if (quote) {
-      updates.price_per_yard_cents = quote.perYardCents
-      updates.total_price_cents = quote.totalCents
+    // ALL INFO COLLECTED — get dual quote (standard + priority from quarries)
+    const dualQuote = (merged.delivery_lat && merged.delivery_lng)
+      ? await getDualQuote(
+          merged.customer_name || "",
+          merged.delivery_lat, merged.delivery_lng,
+          merged.delivery_city || "",
+          merged.material_type || "fill_dirt",
+          merged.yards_needed || MIN_YARDS,
+          merged.access_type || "dump_truck_only",
+          merged.delivery_date || undefined,
+        )
+      : null
+
+    if (dualQuote) {
+      updates.price_per_yard_cents = dualQuote.standard.perYardCents
+      updates.total_price_cents = dualQuote.standard.totalCents
+      updates.zone = dualQuote.standard.zone
       updates.state = "QUOTING"
-      const firstName = (merged.customer_name || "").split(/\s+/)[0]
-      instruction = `All info collected! Give ${firstName} their quote: ${quote.billable} yards of ${fmtMaterial(merged.material_type||"")} delivered to ${merged.delivery_city||"their location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard). Ask if they'd like to get that scheduled. Sound excited to help them`
+      // Sarah presents the formatted dual quote exactly as the pricing engine wrote it
+      instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
     } else {
-      instruction = "Unfortunately their delivery address is outside your service area (more than 60 miles from your yards in Dallas, Fort Worth or Denver). Let them know and ask if there's another address"
-      updates.state = "COLLECTING"
+      // Fallback: use inline zone pricing if getDualQuote fails
+      const quote = calcQuote(merged.distance_miles || 0, merged.material_type || "fill_dirt", merged.yards_needed || MIN_YARDS)
+      if (quote) {
+        updates.price_per_yard_cents = quote.perYardCents
+        updates.total_price_cents = quote.totalCents
+        updates.state = "QUOTING"
+        const firstName = (merged.customer_name || "").split(/\s+/)[0]
+        instruction = `Give ${firstName} their quote: ${quote.billable} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||"their location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
+      } else {
+        instruction = "Their delivery address is outside your service area (more than 60 miles from your yards in Dallas, Fort Worth or Denver). Let them know and ask if there's another address"
+        updates.state = "COLLECTING"
+      }
     }
   }
 
