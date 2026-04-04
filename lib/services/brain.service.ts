@@ -261,6 +261,7 @@ async function sendSMS(toPhone: string, body: string) {
   } catch (e: any) { console.error("[sendSMS]", e?.message) }
 }
 async function sendAdminAlert(msg: string) {
+  if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Driver admin: ${msg.slice(0, 80)}`); return }
   await sendSMS(ADMIN_PHONE, msg)
   if (ADMIN_PHONE_2) { try { await sendSMS(ADMIN_PHONE_2, msg) } catch {} }
 }

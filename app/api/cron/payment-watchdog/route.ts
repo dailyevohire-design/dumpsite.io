@@ -9,6 +9,7 @@ const ADMIN = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
 async function alertAdmin(msg: string) {
+  if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Payment alert: ${msg.slice(0, 80)}`); return }
   try { await tw.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN}` }) } catch (e) { console.error("[pw-alert]", e) }
   if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[pw-alert admin2]", e) } }
 }

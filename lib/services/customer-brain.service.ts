@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk"
 import { createAdminSupabase } from "../supabase"
 import { getDualQuote } from "./customer-pricing.service"
 import { createDispatchOrder as systemDispatch } from "./dispatch.service"
+import { createCustomerPaymentCheckout, checkPaymentStatus } from "./payment.service"
 import twilio from "twilio"
 
 const anthropic = new Anthropic()
@@ -154,6 +155,11 @@ async function saveConv(phone: string, u: Record<string, any>): Promise<void> {
   })
 }
 
+async function savePriorityFields(phone: string, fields: Record<string, any>): Promise<void> {
+  const sb = createAdminSupabase()
+  await sb.from("customer_conversations").update(fields).eq("phone", phone)
+}
+
 async function isDupe(sid: string): Promise<boolean> {
   const sb = createAdminSupabase()
   const { data } = await sb.rpc("check_customer_message", { p_sid: sid })
@@ -177,6 +183,7 @@ async function sendSMS(to: string, body: string, sid: string) {
 }
 
 async function notifyAdmin(msg: string, sid: string) {
+  if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Admin: ${msg.slice(0, 80)}`); return }
   try { await sendSMS(ADMIN_PHONE, msg, `adm_${sid}`) } catch {}
   if (ADMIN_PHONE_2) { try { await sendSMS(ADMIN_PHONE_2, msg, `adm2_${sid}`) } catch {} }
 }
@@ -376,6 +383,7 @@ async function callSarah(
       QUOTING: "Let me pull up those numbers, one sec",
       ASKING_DIMENSIONS: "What are the dimensions you're working with, length width and depth in feet",
       AWAITING_PAYMENT: "Just following up on payment, Venmo Zelle or invoice works for us",
+      AWAITING_PRIORITY_PAYMENT: "Just checking in on that payment link, let me know if you need it resent",
       ORDER_PLACED: "Your order is in, you'll get a text when your driver is heading your way",
       CLOSED: "Hey how can I help",
     }
@@ -612,6 +620,70 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
+  // ── AWAITING PRIORITY PAYMENT — Stripe link sent, waiting for payment ──
+  if (state === "AWAITING_PRIORITY_PAYMENT") {
+    if (isPaymentConfirm) {
+      // Customer says they paid — verify with Stripe
+      if (conv.stripe_session_id) {
+        const { paid, paymentIntentId } = await checkPaymentStatus(conv.stripe_session_id)
+        if (paid) {
+          updates.state = "ORDER_PLACED"
+          updates.payment_status = "paid"
+          updates.payment_method = "stripe"
+          await savePriorityFields(phone, { stripe_payment_intent_id: paymentIntentId || null })
+          const orderId = await createDispatchOrder({ ...conv, ...updates, total_price_cents: conv.priority_total_cents }, phone)
+          if (orderId) {
+            updates.dispatch_order_id = orderId
+            await notifyAdmin(`PRIORITY PAID: ${conv.customer_name} | ${fmt$(conv.priority_total_cents||0)} | ${conv.yards_needed}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | Guaranteed ${conv.priority_guaranteed_date}`, sid)
+          }
+          const s = await callSarah(body, conv, history, `Payment confirmed. Tell them their priority delivery is locked in for ${conv.priority_guaranteed_date}. They'll get a text when their driver is heading their way`)
+          reply = validate(s.response, lastOut)
+        } else {
+          const s = await callSarah(body, conv, history, `Customer says they paid but we haven't received it yet. Ask them to double check that the payment went through on their end. If they're having trouble, they can text back and you'll help sort it out`)
+          reply = validate(s.response, lastOut)
+        }
+      } else {
+        const s = await callSarah(body, conv, history, "Customer says they paid but we can't verify right now. Let them know you'll have someone check on it and get back to them shortly")
+        reply = validate(s.response, lastOut)
+        await notifyAdmin(`Customer ${conv.customer_name} (${phone}) says they paid for priority order but no stripe_session_id — check manually`, sid)
+      }
+    } else if (/link|url|pay|how|where/i.test(lower)) {
+      // Customer asking about payment link — resend it
+      if (conv.stripe_session_id) {
+        // Can't retrieve URL from session — create a new one
+        const yards = conv.yards_needed || MIN_YARDS
+        const material = fmtMaterial(conv.material_type || "fill_dirt")
+        const checkout = await createCustomerPaymentCheckout({
+          phone,
+          customerName: conv.customer_name || "Customer",
+          amountCents: conv.priority_total_cents || 0,
+          description: `${yards} yards ${material} - guaranteed ${conv.priority_guaranteed_date}`,
+          guaranteedDate: conv.priority_guaranteed_date || "",
+        })
+        if (checkout.success && checkout.url) {
+          updates.stripe_session_id = checkout.sessionId
+          await savePriorityFields(phone, { stripe_session_id: checkout.sessionId })
+          const s = await callSarah(body, conv, history, `Customer needs the payment link again. Here it is: ${checkout.url} — work it into the message naturally`)
+          reply = validate(s.response, lastOut)
+        } else {
+          const s = await callSarah(body, conv, history, "Having trouble generating the payment link. Tell them you'll have someone from the team reach out to help")
+          reply = validate(s.response, lastOut)
+          await notifyAdmin(`STRIPE LINK RESEND FAILED for ${conv.customer_name} (${phone}) — needs manual handling`, sid)
+        }
+      } else {
+        const s = await callSarah(body, conv, history, "Tell them you'll send the payment link again shortly. Something on your end")
+        reply = validate(s.response, lastOut)
+        await notifyAdmin(`Customer ${conv.customer_name} (${phone}) needs priority payment link but no session stored — manual handling needed`, sid)
+      }
+    } else {
+      // General question while waiting for payment
+      const s = await callSarah(body, conv, history, `Customer has a priority order pending payment of ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")} guaranteed by ${conv.priority_guaranteed_date}. Answer their question, then remind them to complete payment to lock in their delivery date`)
+      reply = validate(s.response, lastOut)
+    }
+    await saveConv(phone, { ...conv, ...updates })
+    await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+  }
+
   // ── CLOSED — customer cancelled or completed. Let them restart. ──
   if (state === "CLOSED") {
     const s = await callSarah(body, conv, history, "This customer had a previous order that's now closed. If they want to place a new order, help them get started fresh. Ask what they need")
@@ -639,18 +711,68 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // ── QUOTING — we gave a price, waiting for yes/no ──
   if (state === "QUOTING") {
-    if (isYes) {
-      // Customer accepted the quote — create order immediately, payment comes after delivery
-      updates.state = "ORDER_PLACED"
-      const orderId = await createDispatchOrder({ ...conv, ...updates }, phone)
-      if (orderId) {
-        updates.dispatch_order_id = orderId
+    // Detect if customer picked priority or standard
+    const isPriority = /priority|option 2|guaranteed|lock.?in|specific date|quarry/i.test(lower)
+    const isStandard = /standard|option 1|regular|3.?5\s*(day|business)|flexible|cheaper|first/i.test(lower)
+    const hasPriorityQuote = has(conv.priority_total_cents)
+
+    if (isYes || isPriority || isStandard) {
+      // Customer wants to move forward — determine which option
+      const wantsPriority = isPriority && !isStandard
+      const wantsStandard = isStandard && !isPriority
+      const ambiguousYes = isYes && !isPriority && !isStandard && hasPriorityQuote
+
+      if (ambiguousYes) {
+        // Dual quote was shown but they just said "yes" — need to clarify
+        const s = await callSarah(body, conv, history, `Customer said yes but we gave them two options. Ask which one they want: standard delivery at ${fmt$(conv.total_price_cents||0)} (3-5 business days) or priority at ${fmt$(conv.priority_total_cents)} (guaranteed by ${conv.priority_guaranteed_date}). Keep it casual, just ask which works better`)
+        reply = validate(s.response, lastOut)
+      } else if (wantsPriority && hasPriorityQuote) {
+        // PRIORITY — charge upfront via Stripe before dispatching
+        updates.order_type = "priority"
+        updates.total_price_cents = conv.priority_total_cents
         const yards = conv.yards_needed || MIN_YARDS
-        await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
-        if (yards >= LARGE_ORDER) await notifyAdmin(`LARGE ORDER ${yards}yds — ${conv.customer_name} ${conv.delivery_city}`, sid)
+        const material = fmtMaterial(conv.material_type || "fill_dirt")
+        const description = `${yards} yards ${material} - guaranteed ${conv.priority_guaranteed_date}`
+
+        const checkout = await createCustomerPaymentCheckout({
+          phone,
+          customerName: conv.customer_name || "Customer",
+          amountCents: conv.priority_total_cents,
+          description,
+          guaranteedDate: conv.priority_guaranteed_date || "",
+        })
+
+        if (checkout.success && checkout.url) {
+          updates.state = "AWAITING_PRIORITY_PAYMENT"
+          updates.stripe_session_id = checkout.sessionId
+          await savePriorityFields(phone, {
+            order_type: "priority",
+            stripe_session_id: checkout.sessionId,
+          })
+          const s = await callSarah(body, conv, history, `Customer chose priority. Tell them to lock in their guaranteed delivery for ${conv.priority_guaranteed_date}, just complete payment at this link: ${checkout.url} — once that goes through you'll get their driver scheduled right away. Keep it natural, dont say "click here" just work the link into the message`)
+          reply = validate(s.response, lastOut)
+          await notifyAdmin(`PRIORITY ORDER PENDING PAYMENT: ${conv.customer_name} | ${fmt$(conv.priority_total_cents)} | ${yards}yds ${material} | ${conv.delivery_city} | Guaranteed ${conv.priority_guaranteed_date}`, sid)
+        } else {
+          // Stripe failed — fall back to manual handling
+          const s = await callSarah(body, conv, history, "Tell the customer you're having a small issue getting the payment link set up. You'll have someone from the team text them shortly to get it sorted out")
+          reply = validate(s.response, lastOut)
+          await notifyAdmin(`STRIPE CHECKOUT FAILED for ${conv.customer_name} (${phone}) — priority order ${fmt$(conv.priority_total_cents)} needs manual handling. Error: ${checkout.error}`, sid)
+        }
+      } else {
+        // STANDARD — existing flow, pay after delivery
+        updates.state = "ORDER_PLACED"
+        updates.order_type = "standard"
+        await savePriorityFields(phone, { order_type: "standard" })
+        const orderId = await createDispatchOrder({ ...conv, ...updates }, phone)
+        if (orderId) {
+          updates.dispatch_order_id = orderId
+          const yards = conv.yards_needed || MIN_YARDS
+          await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
+          if (yards >= LARGE_ORDER) await notifyAdmin(`LARGE ORDER ${yards}yds — ${conv.customer_name} ${conv.delivery_city}`, sid)
+        }
+        const s = await callSarah(body, conv, history, `Customer chose standard delivery. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
+        reply = validate(s.response, lastOut)
       }
-      const s = await callSarah(body, conv, history, `Customer said yes. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
-      reply = validate(s.response, lastOut)
     } else if (isNo) {
       updates.state = "FOLLOW_UP"
       updates.follow_up_at = new Date(Date.now() + 48*60*60*1000).toISOString()
@@ -840,6 +962,12 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = dualQuote.standard.totalCents
       updates.zone = dualQuote.standard.zone
       updates.state = "QUOTING"
+      // Store priority quote data so we know the price if they pick it
+      if (dualQuote.priority) {
+        updates._priority_total_cents = dualQuote.priority.totalCents
+        updates._priority_guaranteed_date = dualQuote.priority.guaranteedDate
+        updates._priority_quarry_name = dualQuote.priority.quarryName
+      }
       // Sarah presents the formatted dual quote exactly as the pricing engine wrote it
       instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
     } else {
@@ -873,6 +1001,11 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = dualQuote.standard.totalCents
       updates.zone = dualQuote.standard.zone
       updates.state = "QUOTING"
+      if (dualQuote.priority) {
+        updates._priority_total_cents = dualQuote.priority.totalCents
+        updates._priority_guaranteed_date = dualQuote.priority.guaranteedDate
+        updates._priority_quarry_name = dualQuote.priority.quarryName
+      }
       instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
     } else {
       const quote = calcQuote((qMerged.distance_miles || 0), qMerged.material_type || "fill_dirt", qMerged.yards_needed || MIN_YARDS)
@@ -952,6 +1085,14 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const s = await callSarah(body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them")
   reply = validate(s.response, lastOut)
   await saveConv(phone, { ...conv, ...updates })
+  // Persist priority quote data to new columns (outside the RPC)
+  if (updates._priority_total_cents) {
+    await savePriorityFields(phone, {
+      priority_total_cents: updates._priority_total_cents,
+      priority_guaranteed_date: updates._priority_guaranteed_date || null,
+      priority_quarry_name: updates._priority_quarry_name || null,
+    })
+  }
   await logMsg(phone, reply, "outbound", `out_${sid}`)
   return reply
 

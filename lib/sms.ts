@@ -53,6 +53,17 @@ function getTwilioConfig() {
 }
 
 async function sendSMS(to: string, body: string, messageType: string, relatedId?: string, fromOverride?: string) {
+  // Global kill switch — pauses ALL admin SMS notifications
+  if (process.env.PAUSE_ADMIN_SMS === 'true') {
+    const adminPhone = process.env.ADMIN_PHONE?.replace(/\D/g, '') || ''
+    const adminPhone2 = process.env.ADMIN_PHONE_2?.replace(/\D/g, '') || ''
+    const toDigits = to.replace(/\D/g, '').replace(/^1/, '')
+    if (toDigits === adminPhone || (adminPhone2 && toDigits === adminPhone2)) {
+      console.log(`[SMS PAUSED] Blocked admin SMS: ${messageType}`)
+      return { success: true, sid: 'paused' }
+    }
+  }
+
   // FIX: Wrap getTwilioConfig in try/catch — never crash the calling route
   let config: ReturnType<typeof getTwilioConfig>
   try {

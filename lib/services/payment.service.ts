@@ -197,3 +197,63 @@ export async function handleSubscriptionEvent(event: Stripe.Event): Promise<{ su
 
   return { success: true }
 }
+
+/**
+ * Create a Stripe Checkout session for one-time priority order payment.
+ * Customer pays upfront before we dispatch — quarry material must be paid same-day.
+ */
+export async function createCustomerPaymentCheckout(opts: {
+  phone: string
+  customerName: string
+  amountCents: number
+  description: string
+  guaranteedDate: string
+}): Promise<{ success: boolean; url?: string; sessionId?: string; error?: string }> {
+  try {
+    const stripe = getStripe()
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: 'Priority Dirt Delivery',
+            description: opts.description,
+          },
+          unit_amount: opts.amountCents,
+        },
+        quantity: 1,
+      }],
+      metadata: {
+        phone: opts.phone,
+        customerName: opts.customerName,
+        orderType: 'priority',
+        guaranteedDate: opts.guaranteedDate,
+      },
+      success_url: `${appUrl}/payment-success`,
+      cancel_url: `${appUrl}/payment-success?cancelled=true`,
+    })
+
+    return { success: true, url: session.url || undefined, sessionId: session.id }
+  } catch (error: any) {
+    console.error('Stripe customer checkout error:', error.message)
+    return { success: false, error: 'Payment system unavailable. Please try again.' }
+  }
+}
+
+/**
+ * Check if a Stripe Checkout session has been paid.
+ */
+export async function checkPaymentStatus(sessionId: string): Promise<{ paid: boolean; paymentIntentId?: string }> {
+  try {
+    const stripe = getStripe()
+    const session = await stripe.checkout.sessions.retrieve(sessionId)
+    const paid = session.payment_status === 'paid'
+    return { paid, paymentIntentId: paid ? (session.payment_intent as string) || undefined : undefined }
+  } catch (error: any) {
+    console.error('Stripe session check error:', error.message)
+    return { paid: false }
+  }
+}

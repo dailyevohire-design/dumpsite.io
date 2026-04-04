@@ -8,11 +8,17 @@ const ADMIN = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
 async function alertAdmin(msg: string) {
+  if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Stale alert: ${msg.slice(0, 80)}`); return }
   try { await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN}` }) } catch (e) { console.error("[alert]", e) }
   if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[alert admin2]", e) } }
 }
 
 export async function GET() {
+  // Kill switch — set PAUSE_STALE_ALERTS=true in Vercel env to silence all alerts
+  if (process.env.PAUSE_STALE_ALERTS === "true") {
+    return NextResponse.json({ paused: true, alerts: 0 })
+  }
+
   const sb = createAdminSupabase()
   const alerts: string[] = []
 

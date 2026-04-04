@@ -71,6 +71,10 @@ export async function GET() {
     (stuckCustConvs || 0) > 0 ? `⚠ ${stuckCustConvs} stuck customer convos` : "",
   ].filter(Boolean).join("\n")
 
+  if (process.env.PAUSE_ADMIN_SMS === "true") {
+    console.log(`[SMS PAUSED] Daily summary: ${msg.slice(0, 80)}`)
+    return NextResponse.json({ sent: false, paused: true, summary: msg })
+  }
   try {
     await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN.replace(/\D/g, "")}` })
   } catch (e) { console.error("[daily-summary]", e) }
