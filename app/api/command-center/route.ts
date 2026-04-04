@@ -1,0 +1,108 @@
+import { NextResponse } from "next/server"
+import { createAdminSupabase } from "@/lib/supabase"
+
+export async function GET() {
+  const sb = createAdminSupabase()
+  const now = Date.now()
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+  const since = todayStart.toISOString()
+  const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000).toISOString()
+  const fourHoursAgo = new Date(now - 4 * 60 * 60 * 1000).toISOString()
+  const weekAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString()
+
+  const [
+    { data: ordersToday },
+    { data: ordersWeek },
+    { data: activeDriverConvs },
+    { data: activeCustConvs },
+    { data: staleOrders },
+    { data: unpaidCustomers },
+    { data: pendingDriverPay },
+    { data: stuckDrivers },
+    { data: stuckCustomers },
+    { data: noShows },
+    { data: recentSms },
+    { data: recentCustSms },
+    { data: driverCount },
+  ] = await Promise.all([
+    // Orders today
+    sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents, cities(name), created_at").gte("created_at", since),
+    // Orders this week
+    sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents").gte("created_at", weekAgo),
+    // Active driver conversations
+    sb.from("conversations").select("phone, state, extracted_city, active_order_id, updated_at")
+      .in("state", ["ACTIVE", "OTW_PENDING", "PHOTO_PENDING", "APPROVAL_PENDING", "JOB_PRESENTED", "ASKING_TRUCK", "ASKING_ADDRESS"])
+      .order("updated_at", { ascending: false }).limit(20),
+    // Active customer conversations
+    sb.from("customer_conversations").select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents, updated_at")
+      .in("state", ["COLLECTING", "QUOTING", "ASKING_DIMENSIONS", "ORDER_PLACED", "AWAITING_PAYMENT"])
+      .order("updated_at", { ascending: false }).limit(20),
+    // Stale orders (dispatching 4h+)
+    sb.from("dispatch_orders").select("id, client_name, yards_needed, driver_pay_cents, cities(name), created_at")
+      .eq("status", "dispatching").lt("created_at", fourHoursAgo),
+    // Unpaid customer deliveries
+    sb.from("customer_conversations").select("phone, customer_name, total_price_cents, updated_at")
+      .eq("state", "AWAITING_PAYMENT"),
+    // Pending driver payments
+    sb.from("driver_payments").select("id, amount_cents, created_at, status").eq("status", "pending"),
+    // Stuck driver convos (2h+ no update)
+    sb.from("conversations").select("phone, state, updated_at")
+      .in("state", ["ACTIVE", "OTW_PENDING", "PHOTO_PENDING", "APPROVAL_PENDING"]).lt("updated_at", twoHoursAgo),
+    // Stuck customer convos (2h+ no update)
+    sb.from("customer_conversations").select("phone, customer_name, state, updated_at")
+      .in("state", ["COLLECTING", "QUOTING", "ASKING_DIMENSIONS", "AWAITING_PAYMENT"]).lt("updated_at", twoHoursAgo),
+    // Driver no-shows (OTW 3h+)
+    sb.from("conversations").select("phone, active_order_id, updated_at")
+      .eq("state", "OTW_PENDING").lt("updated_at", new Date(now - 3 * 60 * 60 * 1000).toISOString()),
+    // Recent driver SMS
+    sb.from("sms_logs").select("phone, body, direction, created_at").order("created_at", { ascending: false }).limit(30),
+    // Recent customer SMS
+    sb.from("customer_sms_logs").select("phone, body, direction, created_at").order("created_at", { ascending: false }).limit(30),
+    // Total active drivers
+    sb.from("driver_profiles").select("id", { count: "exact", head: true }).eq("status", "active"),
+  ])
+
+  // Calculate metrics
+  const completed = ordersToday?.filter(o => o.status === "completed") || []
+  const todayRevenue = completed.reduce((s, o) => s + ((o.price_quoted_cents || 0) / 100), 0)
+  const todayDriverPay = completed.reduce((s, o) => s + ((o.driver_pay_cents || 0) / 100), 0)
+  const todayYards = completed.reduce((s, o) => s + (o.yards_needed || 0), 0)
+  const todayMargin = todayRevenue - todayDriverPay
+
+  const weekCompleted = ordersWeek?.filter(o => o.status === "completed") || []
+  const weekRevenue = weekCompleted.reduce((s, o) => s + ((o.price_quoted_cents || 0) / 100), 0)
+  const weekYards = weekCompleted.reduce((s, o) => s + (o.yards_needed || 0), 0)
+
+  const pendingPayTotal = (pendingDriverPay || []).reduce((s, p) => s + p.amount_cents / 100, 0)
+  const unpaidCustTotal = (unpaidCustomers || []).reduce((s, c) => s + ((c.total_price_cents || 0) / 100), 0)
+
+  return NextResponse.json({
+    timestamp: new Date().toISOString(),
+    revenue: {
+      today: { orders: ordersToday?.length || 0, completed: completed.length, yards: todayYards, revenue: Math.round(todayRevenue), driverPay: Math.round(todayDriverPay), margin: Math.round(todayMargin) },
+      week: { orders: ordersWeek?.length || 0, completed: weekCompleted.length, yards: weekYards, revenue: Math.round(weekRevenue) },
+    },
+    alerts: {
+      staleOrders: staleOrders?.length || 0,
+      unpaidCustomers: unpaidCustomers?.length || 0,
+      unpaidCustomerTotal: Math.round(unpaidCustTotal),
+      stuckDriverConvs: stuckDrivers?.length || 0,
+      stuckCustomerConvs: stuckCustomers?.length || 0,
+      driverNoShows: noShows?.length || 0,
+      pendingDriverPayments: pendingDriverPay?.length || 0,
+      pendingDriverPayTotal: Math.round(pendingPayTotal),
+    },
+    activeConversations: {
+      drivers: activeDriverConvs || [],
+      customers: activeCustConvs || [],
+    },
+    staleOrders: staleOrders || [],
+    unpaidCustomers: unpaidCustomers || [],
+    stuckDrivers: stuckDrivers || [],
+    stuckCustomers: stuckCustomers || [],
+    noShows: noShows || [],
+    recentSms: recentSms || [],
+    recentCustSms: recentCustSms || [],
+    driverCount: driverCount || 0,
+  })
+}

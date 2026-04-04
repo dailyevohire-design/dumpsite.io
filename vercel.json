@@ -11,6 +11,18 @@
     {
       "path": "/api/cron/customer-followup",
       "schedule": "0 */4 * * *"
+    },
+    {
+      "path": "/api/cron/daily-summary",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/cron/payment-watchdog",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/stale-orders",
+      "schedule": "0 */2 * * *"
     }
   ]
 }
