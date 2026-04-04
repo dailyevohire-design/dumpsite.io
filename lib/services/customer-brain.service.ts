@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { createAdminSupabase } from "../supabase"
 import { getDualQuote } from "./customer-pricing.service"
+import { createDispatchOrder as systemDispatch } from "./dispatch.service"
 import twilio from "twilio"
 
 const anthropic = new Anthropic()
@@ -163,15 +164,58 @@ async function notifyAdmin(msg: string, sid: string) {
 async function createDispatchOrder(conv: any, phone: string): Promise<string | null> {
   try {
     const sb = createAdminSupabase()
-    const { data } = await sb.from("dispatch_orders").insert({
-      client_phone: phone, client_name: conv.customer_name || "Customer",
-      client_address: conv.delivery_address, yards_needed: conv.yards_needed || MIN_YARDS,
-      price_quoted_cents: conv.total_price_cents,
-      driver_pay_cents: Math.round((conv.price_per_yard_cents || 2200) * 0.5 * (conv.yards_needed || MIN_YARDS)),
-      status: "open",
+
+    // Resolve city_id from delivery_city — this ensures correct region dispatch
+    // DFW orders → DFW drivers, Denver orders → Denver drivers
+    let cityId: string | null = null
+    if (conv.delivery_city) {
+      const { data: city } = await sb
+        .from("cities")
+        .select("id")
+        .ilike("name", `%${conv.delivery_city.trim()}%`)
+        .eq("is_active", true)
+        .maybeSingle()
+      cityId = city?.id || null
+    }
+
+    if (!cityId) {
+      // City not in system — notify admin for manual handling but still create order
+      console.error(`[customer dispatch] City not found: ${conv.delivery_city}`)
+      await notifyAdmin(`Customer order needs manual city assignment — "${conv.delivery_city}" not in cities table. Customer: ${conv.customer_name} (${phone}) ${conv.yards_needed}yds to ${conv.delivery_address}`, `city_miss_${Date.now()}`)
+      // Fallback: insert directly so order isn't lost
+      const { data } = await sb.from("dispatch_orders").insert({
+        client_phone: phone, client_name: conv.customer_name || "Customer",
+        client_address: conv.delivery_address, yards_needed: conv.yards_needed || MIN_YARDS,
+        price_quoted_cents: conv.total_price_cents, driver_pay_cents: 4000,
+        status: "dispatching", source: "web_form",
+        delivery_latitude: conv.delivery_lat || null, delivery_longitude: conv.delivery_lng || null,
+        notes: `${fmtMaterial(conv.material_type || "fill_dirt")} | ${conv.access_type || "dump truck"} access | ${conv.delivery_date || "Flexible"} | Source: FillDirtNearMe SMS | NEEDS MANUAL CITY ASSIGNMENT`,
+      }).select("id").single()
+      return data?.id || null
+    }
+
+    // Use the REAL dispatch service — handles driver pay rates, SMS notifications,
+    // tier-based dispatch, and ensures drivers are only notified in their own city
+    const truckType = conv.access_type === "dump_truck_and_18wheeler" ? "end_dump" : "tandem_axle"
+    const result = await systemDispatch({
+      clientName: conv.customer_name || "Customer",
+      clientPhone: phone,
+      clientAddress: conv.delivery_address,
+      cityId,
+      yardsNeeded: conv.yards_needed || MIN_YARDS,
+      priceQuotedCents: conv.total_price_cents || 0,
+      truckTypeNeeded: truckType,
       notes: `${fmtMaterial(conv.material_type || "fill_dirt")} | ${conv.access_type || "dump truck"} access | ${conv.delivery_date || "Flexible"} | Source: FillDirtNearMe SMS`,
-    }).select("id").single()
-    return data?.id || null
+      urgency: "standard",
+      source: "web_form",
+    })
+
+    if (result.success && result.dispatchId) {
+      console.log(`[customer dispatch] Order ${result.dispatchId} — ${result.driversNotified} drivers notified in ${result.cityName}`)
+      return result.dispatchId
+    }
+    console.error("[customer dispatch] Failed:", result.error)
+    return null
   } catch (e) { console.error("[dispatch]", e); return null }
 }
 
