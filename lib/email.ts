@@ -156,6 +156,78 @@ export async function sendLoadSubmissionEmail(data: {
   }
 }
 
+export async function sendMembershipLeadEmail(data: {
+  fullName: string
+  companyName?: string
+  phone: string
+  email: string
+  plan: string
+  monthlyYards?: string
+  leadId?: string
+  submittedAt: string
+}): Promise<{ success: boolean; emailId?: string; error?: string }> {
+  try {
+    const resend = getResend()
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
+    const adminLink = data.leadId
+      ? `${appUrl}/admin?tab=membership-leads&id=${data.leadId}`
+      : `${appUrl}/admin`
+
+    const planLabel: Record<string, string> = {
+      pickup: 'Pickup — $99/mo',
+      tandem: 'Tandem — $299/mo',
+      fleet: 'Fleet — $599/mo',
+    }
+
+    const subject = `\u{1F4B0} New Membership Lead - ${planLabel[data.plan] || data.plan} - ${data.fullName}`
+
+    const html = `
+      <div style="font-family:system-ui,sans-serif;max-width:600px;margin:0 auto;background:#111;color:#eee;border-radius:12px;overflow:hidden">
+        <div style="background:#F5A623;padding:18px 24px">
+          <h1 style="margin:0;font-size:20px;color:#111">New Membership Signup</h1>
+        </div>
+        <div style="padding:24px">
+          <div style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:20px;text-align:center">
+            <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Plan Selected</div>
+            <div style="font-size:22px;font-weight:800;color:#F5A623">${esc(planLabel[data.plan] || data.plan)}</div>
+          </div>
+          <table style="width:100%;border-collapse:collapse">
+            <tr><td style="padding:8px 0;color:#888;width:140px">Name</td><td style="padding:8px 0;font-weight:700">${esc(data.fullName)}</td></tr>
+            ${data.companyName ? `<tr><td style="padding:8px 0;color:#888">Company</td><td style="padding:8px 0">${esc(data.companyName)}</td></tr>` : ''}
+            <tr><td style="padding:8px 0;color:#888">Phone</td><td style="padding:8px 0">${esc(data.phone)}</td></tr>
+            <tr><td style="padding:8px 0;color:#888">Email</td><td style="padding:8px 0">${esc(data.email)}</td></tr>
+            ${data.monthlyYards ? `<tr><td style="padding:8px 0;color:#888">Monthly Yards</td><td style="padding:8px 0;font-weight:700">${esc(data.monthlyYards)}</td></tr>` : ''}
+            <tr><td style="padding:8px 0;color:#888">Submitted</td><td style="padding:8px 0">${esc(data.submittedAt)}</td></tr>
+          </table>
+          <div style="margin-top:24px">
+            <a href="${adminLink}" style="display:inline-block;background:#F5A623;color:#111;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:800;font-size:14px">View in Admin</a>
+          </div>
+        </div>
+        <div style="padding:16px 24px;border-top:1px solid #272B33;font-size:12px;color:#606670">
+          DumpSite.io — Automated notification
+        </div>
+      </div>
+    `
+
+    const { data: result, error } = await resend.emails.send({
+      from: FROM,
+      to: NOTIFY_TO,
+      subject,
+      html,
+    })
+
+    if (error) {
+      console.error('Resend email error (membership lead):', error)
+      return { success: false, error: error.message }
+    }
+
+    return { success: true, emailId: result?.id }
+  } catch (err: any) {
+    console.error('Membership lead email failed:', err.message)
+    return { success: false, error: err.message }
+  }
+}
+
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }

@@ -361,7 +361,7 @@ footer{background:var(--e950);border-top:1px solid rgba(255,255,255,.04);padding
 
 /* ===== RESPONSIVE ===== */
 @media(max-width:900px){
-  .hc{grid-template-columns:1fr;gap:28px;padding-top:100px;padding-bottom:60px}
+  .hc{grid-template-columns:1fr;gap:28px;padding-top:76px;padding-bottom:60px}
   .hero{min-height:auto}
   .hero-orb-1{width:400px;height:400px;background:rgba(201,139,10,.14);top:-5%;right:-15%;filter:blur(80px)}
   .hero-orb-2{width:350px;height:350px;background:rgba(83,73,62,.18);bottom:-10%;left:-15%;filter:blur(70px)}
@@ -387,7 +387,7 @@ footer{background:var(--e950);border-top:1px solid rgba(255,255,255,.04);padding
   .ft-bt{flex-direction:column;gap:4px}
 }
 @media(max-width:600px){
-  .hc{padding-top:88px;gap:24px}
+  .hc{padding-top:68px;gap:24px}
   .hc h1{font-size:clamp(26px,7.5vw,36px);margin-bottom:14px}
   .h-sub{font-size:14px;line-height:1.65;margin-bottom:16px}
   .hero-orb-1{background:rgba(201,139,10,.18);filter:blur(60px)}
@@ -881,7 +881,7 @@ export default function HomePage() {
         <li>Access to DFW &amp; Denver sites</li>
         <li>Standard response time</li>
       </ul>
-      <a href="#cta" className="pr-btn pr-btn-o">Get Started →</a>
+      <a href="/signup/membership?plan=pickup" className="pr-btn pr-btn-o">Get Started →</a>
     </div>
 
     {/* TANDEM */}
@@ -900,7 +900,7 @@ export default function HomePage() {
         <li>Monthly savings report</li>
         <li>Savings guarantee — money back + 1 month free</li>
       </ul>
-      <a href="#cta" className="pr-btn pr-btn-a">Get Started →</a>
+      <a href="/signup/membership?plan=tandem" className="pr-btn pr-btn-a">Get Started →</a>
     </div>
 
     {/* FLEET */}
@@ -920,7 +920,7 @@ export default function HomePage() {
         <li>Savings guarantee — money back + 1 month free</li>
         <li>Priority access to all new markets</li>
       </ul>
-      <a href="#cta" className="pr-btn pr-btn-o">Get Started →</a>
+      <a href="/signup/membership?plan=fleet" className="pr-btn pr-btn-o">Get Started →</a>
     </div>
   </div>
 
