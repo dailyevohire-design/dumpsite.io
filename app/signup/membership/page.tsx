@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 
 const PLANS = [
@@ -12,6 +12,14 @@ const PLANS = [
 const YARD_OPTIONS = ['0–50', '50–300', '300–1,000', '1,000–5,000', '5,000+']
 
 export default function MembershipSignupPage() {
+  return (
+    <Suspense fallback={<div style={styles.page}><div style={styles.card}><p style={{ color: '#968877', textAlign: 'center' }}>Loading...</p></div></div>}>
+      <MembershipForm />
+    </Suspense>
+  )
+}
+
+function MembershipForm() {
   const searchParams = useSearchParams()
   const paramPlan = searchParams.get('plan') || ''
   const isPaymentSuccess = searchParams.get('success') === 'true'
