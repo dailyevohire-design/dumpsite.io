@@ -1086,7 +1086,7 @@ export default function HomePage() {
   <p className="fu">Your first dump site is free. Reach out now — your dispatcher will match you with an approved site today. No card, no commitment.</p>
   <div className="fc-ph fu">
     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-    <a href="tel:+14697174225" className="fc-n">(469) 717-4225</a>
+    <a href="sms:+14697174225?body=Hey, I need a dump site." className="fc-n">(469) 717-4225</a>
   </div>
   <div className="fc-or fu"><span style={{display:'inline-flex',alignItems:'center',gap:'6px'}}><span style={{width:'7px',height:'7px',borderRadius:'50%',background:'var(--g500)',animation:'bk 2s infinite'}}></span>your dispatcher is online now — avg. response under 60 seconds</span></div>
   <a href="#membership" className="fc-btn fu">See Membership Plans →</a>
