@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-04-02T22:43:41.429Z
-> Commit: 503a119 refactor: customer brain v2 — Sonnet writes every response, code handles extraction/state/pricing
+> Auto-generated 2026-04-04T20:24:33.904Z
+> Commit: 2405928 fix: customer SMS schema migration + security hardening
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
@@ -10,7 +10,7 @@
 - GitHub: dailyevohire-design/dumpsite.io
 
 ## Live Stats
-- Open orders: 79
+- Open orders: 0
 - Active drivers: 134
 - Active reservations: 0
 - Material photos: 11

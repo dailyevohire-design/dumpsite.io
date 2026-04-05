@@ -43,7 +43,7 @@ function nearestYard(lat: number, lng: number) {
 }
 
 function calcQuote(miles: number, material: string, yards: number) {
-  const z = ZONES.find(z => miles >= z.min && miles < z.max)
+  const z = ZONES.find(z => miles >= z.min && miles <= z.max)
   if (!z) return null
   const perYard = z.base + (SURCHARGE[material] || 0)
   const billable = Math.max(yards, MIN_YARDS)
@@ -111,6 +111,12 @@ function extractEmail(text: string): string | null {
 
 function extractMaterialFromPurpose(purpose: string): { key: string; name: string } | null {
   const p = purpose.toLowerCase()
+  // Check explicit material names FIRST (customer confirming a recommendation)
+  if (/\bstructural\s*fill\b/i.test(p)) return { key: "structural_fill", name: "structural fill" }
+  if (/\btopsoil\b|\bscreened\s*topsoil\b/i.test(p)) return { key: "screened_topsoil", name: "screened topsoil" }
+  if (/\bfill\s*dirt\b/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
+  if (/\bsand\b/i.test(p) && !/thousand|grand/i.test(p)) return { key: "sand", name: "sand" }
+  // Then check purpose keywords
   if (/pool|foundation|slab|footing|driveway|road|parking|pad|concrete|patio|sidewalk|compac/i.test(p)) return { key: "structural_fill", name: "structural fill" }
   if (/garden|flower|plant|landscap|sod|grass|lawn|raised bed|planter|grow|organic|mulch/i.test(p)) return { key: "screened_topsoil", name: "screened topsoil" }
   if (/sandbox|play.*area|play.*ground|septic|volleyball/i.test(p)) return { key: "sand", name: "sand" }
@@ -123,7 +129,12 @@ function looksLikeAddress(text: string): boolean {
 }
 
 function looksLikeFollowUp(text: string): boolean {
-  return /get back|think about|later|not sure yet|maybe|let me check|call you|hold off|not ready|give me a|need to talk|ask my|husband|wife|boss/i.test(text.toLowerCase())
+  const t = text.toLowerCase()
+  // Don't match "not sure how many" or "not sure what I need" — those are help requests, not delays
+  if (/not sure (how|what|which|about the)/i.test(t)) return false
+  // Don't match "get back to my house/property" — they're giving info
+  if (/get back to (my|the|our)/i.test(t)) return false
+  return /\b(think about it|get back to you|later|maybe later|let me think|call you back|hold off|not ready yet|give me a (day|few|minute|bit|week)|need to (talk|ask|check with)|ask my (husband|wife|boss|partner))\b/i.test(t)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -182,10 +193,20 @@ async function sendSMS(to: string, body: string, sid: string) {
   await logMsg(normalizePhone(to), body, "outbound", msg.sid || `out_${sid}`)
 }
 
+const ADMIN_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
+
 async function notifyAdmin(msg: string, sid: string) {
   if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Admin: ${msg.slice(0, 80)}`); return }
-  try { await sendSMS(ADMIN_PHONE, msg, `adm_${sid}`) } catch {}
-  if (ADMIN_PHONE_2) { try { await sendSMS(ADMIN_PHONE_2, msg, `adm2_${sid}`) } catch {} }
+  // Use driver number for admin alerts so replies don't hit customer webhook
+  try {
+    await twilioClient.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_PHONE}` })
+    await logMsg(ADMIN_PHONE, msg, "outbound", `adm_${sid}`)
+  } catch {}
+  if (ADMIN_PHONE_2) {
+    try {
+      await twilioClient.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_PHONE_2}` })
+    } catch {}
+  }
 }
 
 async function createDispatchOrder(conv: any, phone: string): Promise<string | null> {
@@ -684,12 +705,43 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
-  // ── CLOSED — customer cancelled or completed. Let them restart. ──
+  // ── CLOSED — customer cancelled or completed. Let them restart fresh. ──
   if (state === "CLOSED") {
     const s = await callSarah(body, conv, history, "This customer had a previous order that's now closed. If they want to place a new order, help them get started fresh. Ask what they need")
+    // Clear old order data so they can start over — keep name and phone only
     updates.state = "COLLECTING"
+    updates.delivery_address = ""
+    updates.delivery_city = ""
+    updates.delivery_lat = 0
+    updates.delivery_lng = 0
+    updates.material_purpose = ""
+    updates.material_type = ""
+    updates.yards_needed = 0
+    updates.dimensions_raw = ""
+    updates.access_type = ""
+    updates.delivery_date = ""
+    updates.zone = ""
+    updates.distance_miles = 0
+    updates.price_per_yard_cents = 0
+    updates.total_price_cents = 0
+    updates.payment_method = ""
+    updates.payment_status = "pending"
+    updates.dispatch_order_id = ""
+    updates.follow_up_at = ""
+    updates.follow_up_count = 0
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    // Direct update to force-clear fields (COALESCE won't clear nulls)
+    await createAdminSupabase().from("customer_conversations").update({
+      state: "COLLECTING", delivery_address: null, delivery_city: null,
+      delivery_lat: null, delivery_lng: null, material_purpose: null,
+      material_type: null, yards_needed: null, dimensions_raw: null,
+      access_type: null, delivery_date: null, zone: null, distance_miles: null,
+      price_per_yard_cents: null, total_price_cents: null, payment_method: null,
+      payment_status: "pending", dispatch_order_id: null, follow_up_at: null,
+      follow_up_count: 0, order_type: null, priority_total_cents: null,
+      priority_guaranteed_date: null, priority_quarry_name: null,
+      stripe_session_id: null, stripe_payment_intent_id: null,
+    }).eq("phone", phone)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -843,8 +895,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   }
 
   // Address extraction — require actual street address, not just a zip code
+  // Allow re-entry if existing address is out of zone (zone is null/empty)
   const isBareZip = /^\d{5}(-\d{4})?$/.test(body.trim())
-  if (isAddress && needAddress && !isBareZip) {
+  const addressOutOfZone = has(conv.delivery_address) && !has(conv.zone)
+  if (isAddress && (needAddress || addressOutOfZone) && !isBareZip) {
     const geo = await geocode(body)
     if (geo) {
       updates.delivery_address = body.trim()
@@ -1023,7 +1077,12 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // Special state: waiting for dimensions
   if (state === "ASKING_DIMENSIONS" || updates.state === "ASKING_DIMENSIONS") {
-    if (inlineDims) {
+    // If customer gives explicit yards (e.g. "15 yards"), accept it and skip dimensions
+    if (inlineYards && /yard|yd|cy/i.test(body)) {
+      updates.yards_needed = inlineYards
+      updates.state = "COLLECTING"
+      instruction = `Got it, ${inlineYards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+    } else if (inlineDims) {
       const yards = cubicYards(inlineDims.l, inlineDims.w, inlineDims.d)
       updates.yards_needed = yards
       updates.dimensions_raw = body.trim()
@@ -1071,8 +1130,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
   }
 
-  // Handle "let me get back to you" at any collection stage
-  if (isFollowUp && state !== "FOLLOW_UP") {
+  // Handle "let me get back to you" — only during QUOTING or late COLLECTING (not while gathering info)
+  if (isFollowUp && (state === "QUOTING" || (state === "COLLECTING" && hasQuote))) {
     updates.state = "FOLLOW_UP"
     updates.follow_up_at = new Date(Date.now() + 24*60*60*1000).toISOString()
     updates.follow_up_count = 0
