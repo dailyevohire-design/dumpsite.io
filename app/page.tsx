@@ -532,7 +532,7 @@ export default function HomePage() {
 <div className="hc">
   <div>
     <h1>Burning time<br />finding dump sites.<br />Burning money<br />at the landfill.<br /><em>We fix that.</em></h1>
-    <p className="h-sub">DumpSite gives contractors, excavators, and developers their own dedicated dirt dispatcher — with access to free and low-cost dump sites across Texas and Colorado. Stop calling around. Stop overpaying. Stop losing sleep.</p>
+    <p className="h-sub">DumpSite gives contractors, excavators, and developers their own dedicated dirt dispatcher — with access to free dump sites across Texas and Colorado. Stop calling around. Stop overpaying. Stop losing sleep.</p>
 
     <div className="auth-bar">
       <div className="ab-item">
