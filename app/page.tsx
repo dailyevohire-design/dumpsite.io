@@ -516,7 +516,6 @@ export default function HomePage() {
     <li><a href="/drivers" className="nk-driver">I'm a Driver</a></li>
     <li><a href="#membership" className="nk-cta">See Plans</a></li>
   </ul>
-  <button className="nm" aria-label="Menu"><span></span><span></span><span></span></button>
 </div>
 </nav>
 
