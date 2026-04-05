@@ -105,46 +105,82 @@ export async function POST(req: Request) {
       console.error('[membership-signup] Email call crashed')
     }
 
-    // Stripe checkout (optional — only if price IDs configured)
-    let checkoutUrl: string | null = null
-    const MEMBERSHIP_PRICES: Record<string, string> = {
-      pickup: process.env.STRIPE_PRICE_MEMBERSHIP_PICKUP || '',
-      tandem: process.env.STRIPE_PRICE_MEMBERSHIP_TANDEM || '',
-      fleet: process.env.STRIPE_PRICE_MEMBERSHIP_FLEET || '',
+    // Create Stripe Checkout session for subscription payment
+    const PLAN_PRICES: Record<string, number> = { pickup: 9900, tandem: 29900, fleet: 59900 }
+    const PLAN_NAMES: Record<string, string> = {
+      pickup: 'DumpSite Pickup Membership',
+      tandem: 'DumpSite Tandem Membership',
+      fleet: 'DumpSite Fleet Membership',
+    }
+    const PLAN_DESCRIPTIONS: Record<string, string> = {
+      pickup: 'Dedicated dispatcher, up to 50 yards/mo at free dump sites, full load tracking',
+      tandem: 'Dedicated dispatcher, up to 300 yards/mo, priority access, savings guarantee',
+      fleet: 'Dedicated dispatcher, unlimited yards/mo, guaranteed availability, fleet tracking',
     }
 
-    const priceId = MEMBERSHIP_PRICES[plan]
-    if (priceId && process.env.STRIPE_SECRET_KEY) {
-      try {
-        const Stripe = (await import('stripe')).default
-        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2026-02-25.clover' })
-        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
+    if (!process.env.STRIPE_SECRET_KEY) {
+      console.error('[membership-signup] STRIPE_SECRET_KEY not configured')
+      return NextResponse.json({ success: false, error: 'Payment system is temporarily unavailable. Please call (469) 717-4225.' }, { status: 503 })
+    }
 
-        const session = await stripe.checkout.sessions.create({
-          mode: 'subscription',
-          line_items: [{ price: priceId, quantity: 1 }],
-          success_url: `${appUrl}/signup/membership?success=true&plan=${plan}`,
-          cancel_url: `${appUrl}/signup/membership?plan=${plan}`,
-          customer_email: email,
-          metadata: {
-            leadId: record?.id || '',
-            plan,
-            fullName,
-            phone,
-            companyName: companyName || '',
-          },
-        })
+    let checkoutUrl: string | null = null
+    try {
+      const Stripe = (await import('stripe')).default
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2026-02-25.clover' })
+      const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://dumpsite.io'
 
-        checkoutUrl = session.url || null
+      // Use pre-created price IDs if available, otherwise inline price_data
+      const presetPriceId = {
+        pickup: process.env.STRIPE_PRICE_MEMBERSHIP_PICKUP || '',
+        tandem: process.env.STRIPE_PRICE_MEMBERSHIP_TANDEM || '',
+        fleet: process.env.STRIPE_PRICE_MEMBERSHIP_FLEET || '',
+      }[plan]
 
-        if (checkoutUrl && record?.id) {
-          await supabase.from('membership_leads')
-            .update({ stripe_checkout_url: checkoutUrl })
-            .eq('id', record.id)
-        }
-      } catch (stripeErr: any) {
-        console.error('[membership-signup] Stripe checkout failed:', stripeErr.message)
+      const lineItems = presetPriceId
+        ? [{ price: presetPriceId, quantity: 1 }]
+        : [{
+            price_data: {
+              currency: 'usd',
+              recurring: { interval: 'month' as const },
+              product_data: {
+                name: PLAN_NAMES[plan],
+                description: PLAN_DESCRIPTIONS[plan],
+              },
+              unit_amount: PLAN_PRICES[plan],
+            },
+            quantity: 1,
+          }]
+
+      const session = await stripe.checkout.sessions.create({
+        mode: 'subscription',
+        line_items: lineItems,
+        success_url: `${appUrl}/signup/membership?success=true&plan=${plan}`,
+        cancel_url: `${appUrl}/signup/membership?plan=${plan}`,
+        customer_email: email,
+        metadata: {
+          leadId: record?.id || '',
+          plan,
+          fullName,
+          phone,
+          companyName: companyName || '',
+          source: 'membership_signup',
+        },
+      })
+
+      checkoutUrl = session.url || null
+
+      if (checkoutUrl && record?.id) {
+        await supabase.from('membership_leads')
+          .update({ stripe_checkout_url: checkoutUrl })
+          .eq('id', record.id)
       }
+    } catch (stripeErr: any) {
+      console.error('[membership-signup] Stripe checkout failed:', stripeErr.message)
+      return NextResponse.json({ success: false, error: 'Payment system error. Please try again or call (469) 717-4225.' }, { status: 500 })
+    }
+
+    if (!checkoutUrl) {
+      return NextResponse.json({ success: false, error: 'Could not create checkout session. Please try again.' }, { status: 500 })
     }
 
     return NextResponse.json({ success: true, data: { checkoutUrl } })

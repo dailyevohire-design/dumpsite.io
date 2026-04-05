@@ -137,7 +137,6 @@ function MembershipForm() {
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [success, setSuccess] = useState(false)
 
   useEffect(() => {
     if (paramPlan in PLANS) setForm(f => ({ ...f, plan: paramPlan }))
@@ -174,8 +173,11 @@ function MembershipForm() {
       })
       const data = await res.json()
       if (!data.success) return setError(data.error || 'Something went wrong.')
-      if (data.data?.checkoutUrl) { window.location.href = data.data.checkoutUrl; return }
-      setSuccess(true)
+      if (data.data?.checkoutUrl) {
+        window.location.href = data.data.checkoutUrl
+      } else {
+        setError('Could not start checkout. Please try again or call (469) 717-4225.')
+      }
     } catch {
       setError('Network error. Please try again.')
     } finally {
@@ -185,19 +187,16 @@ function MembershipForm() {
 
   const plan = PLANS[form.plan]
 
-  // Success states
-  if (isPaymentSuccess || success) {
+  // Payment confirmed — returned from Stripe
+  if (isPaymentSuccess) {
+    const confirmedPlan = PLANS[paramPlan]
     return (
       <div className="ms-page">
         <div className="ms-success">
           <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#68c06c" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-          <h1>{isPaymentSuccess ? 'Payment Confirmed' : "You're in."}</h1>
-          <p>
-            {isPaymentSuccess
-              ? 'Welcome to DumpSite. Your membership is active and your dispatcher is being assigned. Expect a text within the hour.'
-              : <>Your dispatcher will reach out within 1 business day at <strong style={{color:'#e4a41d'}}>{form.phone || 'your number'}</strong> to get you set up{plan ? ` on the ${plan.name} plan` : ''}. No payment due until your first dump site is matched.</>
-            }
-          </p>
+          <h1>You're in. Payment confirmed.</h1>
+          {confirmedPlan && <p style={{fontFamily:"'JetBrains Mono',monospace",fontSize:'18px',fontWeight:700,color:'#e4a41d',marginBottom:'8px'}}>{confirmedPlan.name} — ${confirmedPlan.price}/mo</p>}
+          <p>Welcome to DumpSite. Your membership is active and your dedicated dispatcher is being assigned. Expect a text within the hour to get your first dump site matched.</p>
           <a href="/">&larr; Back to DumpSite.io</a>
         </div>
       </div>
@@ -260,7 +259,7 @@ function MembershipForm() {
         {/* RIGHT — Form */}
         <div className="ms-right">
           <h2 className="ms-form-title">Get started</h2>
-          <p className="ms-form-sub">Fill this out and your dispatcher will reach out to finalize setup. No payment due upfront.</p>
+          <p className="ms-form-sub">Fill this out and you'll be taken to secure checkout. Your dispatcher gets assigned the moment payment confirms.</p>
 
           <form onSubmit={handleSubmit}>
             <div className="ms-row">
@@ -305,11 +304,11 @@ function MembershipForm() {
             {error && <div className="ms-error">{error}</div>}
 
             <button type="submit" className="ms-btn" disabled={loading}>
-              {loading ? 'Submitting...' : plan ? `Start ${plan.name} Plan →` : 'Get Started →'}
+              {loading ? 'Redirecting to checkout...' : plan ? `Continue to Payment — $${plan.price}/mo →` : 'Continue to Payment →'}
             </button>
 
             <p className="ms-fine">
-              No payment collected until your first site is matched. Questions? Call <a href="tel:+14697174225">(469) 717-4225</a>
+              Secure payment via Stripe. Cancel anytime, no contracts. Questions? Call <a href="tel:+14697174225">(469) 717-4225</a>
             </p>
           </form>
         </div>
