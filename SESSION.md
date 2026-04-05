@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-04-04T20:24:33.904Z
-> Commit: 2405928 fix: customer SMS schema migration + security hardening
+> Auto-generated 2026-04-05T13:40:12.475Z
+> Commit: ce99776 redesign: contractor-focused homepage v5 — topo lines, time calculator, membership tiers, FAQ, sticky CTA
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
