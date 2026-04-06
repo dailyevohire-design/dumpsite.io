@@ -1112,9 +1112,19 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         firstMsgParts.push(`address: ${body.trim()}`)
       }
     }
-    // Check if they included a name-like phrase (e.g. "I'm Mike" or "this is José")
-    const nameMatch = body.match(/(?:i'm|im|i am|this is|my name is|name's|names|me llamo|soy)\s+([\p{L}][\p{L}]+(?:\s+[\p{L}][\p{L}]+)?)/iu)
-    if (nameMatch) { updates.customer_name = nameMatch[1].trim(); firstMsgParts.push(`name: ${nameMatch[1].trim()}`) }
+    // Check if they included a name-like phrase
+    // Patterns: "I'm Mike", "this is José", "John from fb", "Its John", "John here", "Hey John here"
+    const nameMatch = body.match(/(?:i'm|im|i am|this is|it's|its|my name is|name's|names|me llamo|soy|hey)\s+([\p{L}][\p{L}]+(?:\s+[\p{L}][\p{L}]+)?)/iu)
+      || body.match(/^([\p{L}][\p{L}]+)\s+(?:from|here|checking|looking|interested|wanting|needing|inquiring|texting|calling)\b/iu)
+    if (nameMatch) {
+      const extractedName = nameMatch[1].trim()
+      // Make sure extracted name isn't a common non-name word
+      const NAME_BLOCKLIST = /^(hey|hi|hello|good|this|that|just|still|also|really|very|much|some|more|been|your|have|need|want|fill|dirt|sand|topsoil|clean|cheap|free|best|nice|great)$/i
+      if (!NAME_BLOCKLIST.test(extractedName)) {
+        updates.customer_name = extractedName
+        firstMsgParts.push(`name: ${extractedName}`)
+      }
+    }
 
     const merged = { ...conv, ...updates }
     const mHas = (k: string) => { const v = (merged as any)[k]; return v !== null && v !== undefined && v !== "" }
