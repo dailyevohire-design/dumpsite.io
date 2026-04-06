@@ -44,9 +44,9 @@ async function alertAdmin(msg: string) {
   }
 }
 
-async function sendViaTwilioAPI(to: string, body: string): Promise<boolean> {
+async function sendViaTwilioAPI(to: string, body: string, agentFrom?: string): Promise<boolean> {
   const { sid, key, secret } = getTwilioAuth()
-  const from = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
+  const from = agentFrom || process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
   const digits = to.replace(/\D/g, "")
   const toE164 = digits.length === 10 ? `+1${digits}` : digits.length === 11 && digits.startsWith("1") ? `+${digits}` : `+1${digits}`
 
@@ -90,6 +90,7 @@ export async function POST(req: NextRequest) {
   }
 
   const from = formData.get("From") || ""
+  const to = formData.get("To") || ""
   const body = formData.get("Body") || ""
   const messageSid = formData.get("MessageSid") || ""
   const numMedia = parseInt(formData.get("NumMedia") || "0")
@@ -112,7 +113,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const reply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl })
+    const reply = await handleCustomerSMS({ from, to, body: body.trim(), messageSid, numMedia, mediaUrl })
     if (!reply) return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })
 
     const phone = from.replace(/\D/g, "").replace(/^1/, "")
@@ -133,12 +134,14 @@ export async function POST(req: NextRequest) {
     after(async () => {
       try {
         await new Promise(r => setTimeout(r, delay))
-        const sent = await sendViaTwilioAPI(phone, reply)
+        // Reply FROM the same Twilio number the customer texted (agent routing)
+        const replyFrom = to || undefined
+        const sent = await sendViaTwilioAPI(phone, reply, replyFrom)
         if (!sent) {
           // Retry once after 3 seconds
           console.error(`[customer SMS] FIRST SEND FAILED to ${phone}, retrying in 3s...`)
           await new Promise(r => setTimeout(r, 3000))
-          const retrySent = await sendViaTwilioAPI(phone, reply)
+          const retrySent = await sendViaTwilioAPI(phone, reply, replyFrom)
           if (!retrySent) {
             // Both attempts failed — alert admin immediately
             console.error(`[customer SMS] BOTH SENDS FAILED to ${phone}`)

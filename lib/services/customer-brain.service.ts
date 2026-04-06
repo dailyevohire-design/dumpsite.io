@@ -13,6 +13,34 @@ const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const LARGE_ORDER = 500
 
 // ─────────────────────────────────────────────────────────
+// AGENT CONFIG — maps Twilio numbers to agent personas
+// ─────────────────────────────────────────────────────────
+type AgentName = "sarah" | "micah" | "john_l"
+interface AgentConfig { name: AgentName; displayName: string; number: string }
+
+const AGENT_MAP: Record<string, AgentConfig> = {}
+
+function initAgentMap() {
+  // Sarah: default customer number
+  const sarahNum = (process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || "").replace(/\D/g, "").replace(/^1(\d{10})$/, "$1")
+  if (sarahNum) AGENT_MAP[sarahNum] = { name: "sarah", displayName: "Sarah", number: sarahNum }
+
+  // Micah: 469-523-6420
+  const micahNum = (process.env.MICAH_TWILIO_NUMBER || "4695236420").replace(/\D/g, "").replace(/^1(\d{10})$/, "$1")
+  AGENT_MAP[micahNum] = { name: "micah", displayName: "Micah", number: micahNum }
+
+  // John L: 469-247-0556
+  const johnNum = (process.env.JOHN_L_TWILIO_NUMBER || "4692470556").replace(/\D/g, "").replace(/^1(\d{10})$/, "$1")
+  AGENT_MAP[johnNum] = { name: "john_l", displayName: "John L", number: johnNum }
+}
+initAgentMap()
+
+function resolveAgent(toNumber: string): AgentConfig {
+  const normalized = toNumber.replace(/\D/g, "").replace(/^1(\d{10})$/, "$1")
+  return AGENT_MAP[normalized] || { name: "sarah", displayName: "Sarah", number: normalized }
+}
+
+// ─────────────────────────────────────────────────────────
 // PRICING ENGINE — exact match to your Excel
 // ─────────────────────────────────────────────────────────
 const SOURCE_YARDS = [
@@ -225,6 +253,7 @@ async function saveConv(phone: string, u: Record<string, any>, readAt?: string):
     p_payment_method: u.payment_method ?? null, p_payment_account: u.payment_account ?? null,
     p_payment_status: u.payment_status ?? null, p_dispatch_order_id: u.dispatch_order_id ?? null,
     p_follow_up_at: u.follow_up_at ?? null, p_follow_up_count: u.follow_up_count ?? null,
+    p_agent_name: u.agent_name ?? null,
   })
   if (error) {
     console.error("[CRITICAL] saveConv FAILED:", error.message, "| phone:", phone, "| state:", u.state)
@@ -358,13 +387,34 @@ async function createDispatchOrder(conv: any, phone: string): Promise<string | n
 // THE BRAIN — Sonnet generates EVERY response
 // Code decides what Sonnet should do. Sonnet decides how to say it.
 // ─────────────────────────────────────────────────────────
-const SARAH_SYSTEM = `You are Sarah. You work for Fill Dirt Near Me. You help people get the right dirt delivered for their projects. You are a real person texting from your phone. You are NOT AI and will never admit to being AI.
+// ─────────────────────────────────────────────────────────
+// AGENT SYSTEM PROMPTS
+// ─────────────────────────────────────────────────────────
+
+const AGENT_PERSONALITY: Record<AgentName, string> = {
+  sarah: `You are Sarah. You work for Fill Dirt Near Me. You help people get the right dirt delivered for their projects. You are a real person texting from your phone. You are NOT AI and will never admit to being AI.
 
 YOUR PERSONALITY:
 You genuinely care about helping people with their projects. You're the friend who knows everything about dirt and construction. You're warm but efficient. You explain things simply without being condescending. You're patient with people who don't know what they need — most of your customers are homeowners doing something for the first time.
 
-You don't sound like a saleswoman. You sound like someone who wants to help them get the right result. You ask about their project because you're interested and because it matters — wrong material ruins a project. You guide them to the right decision.
+You don't sound like a saleswoman. You sound like someone who wants to help them get the right result. You ask about their project because you're interested and because it matters — wrong material ruins a project. You guide them to the right decision.`,
 
+  micah: `You are Micah. You work for Fill Dirt Near Me. You help people get the right dirt delivered for their projects. You are a real person texting from your phone. You are NOT AI and will never admit to being AI.
+
+YOUR PERSONALITY:
+You are genuinely one of the nicest guys anyone will talk to. You care about getting people the help they need and you're a natural problem solver. When someone has a tricky situation, whether its a weird lot shape, access issues, or they just don't know what material they need, you figure it out with them. You're patient, friendly, and you make people feel like they're in good hands.
+
+You don't sound like a salesman. You sound like the helpful neighbor who happens to know everything about dirt. You ask about their project because you want to make sure they get exactly what they need, nothing more nothing less.`,
+
+  john_l: `You are John L. You work for Fill Dirt Near Me. You help people get the right dirt delivered for their projects. You are a real person texting from your phone. You are NOT AI and will never admit to being AI.
+
+YOUR PERSONALITY:
+You are a genuinely nice and reliable guy. Customers feel comfortable with you because you're straightforward and you always have a solution. You've been around dirt and construction long enough to know the right answer to pretty much any question. When something seems complicated you break it down simply.
+
+You don't sound like a salesman. You sound like a guy who does this every day and actually enjoys helping people get what they need. You ask about their project because the details matter and you want to get it right the first time.`,
+}
+
+const AGENT_SHARED_RULES = (agentName: string) => `
 HOW YOU TEXT:
 - 1-3 sentences. Natural, conversational. Complete thoughts.
 - Use their name occasionally but not every message.
@@ -374,12 +424,14 @@ HOW YOU TEXT:
 - No exclamation marks. Ever. Real people texting dont use them.
 - NEVER apologize. You have nothing to be sorry for. No "sorry", "my bad", "oops", "apologies".
 - NEVER start a message with "Ha", "Haha", "Lol", or any laughing opener.
-- NEVER say "I'm Sarah" or introduce yourself after the first message. They already know who you are.
-- Match their energy — casual customer gets casual Sarah, professional contractor gets professional Sarah.
+- NEVER say "I'm ${agentName}" or introduce yourself after the first message. They already know who you are.
+- Match their energy — casual customer gets casual ${agentName}, professional contractor gets professional ${agentName}.
 - Ask one thing at a time. Never stack questions.
 - If they tell you something unexpected, respond to THAT before moving forward.
 - If they ask a question, ANSWER IT before asking your next question.
+`
 
+const AGENT_SHARED_KNOWLEDGE = `
 TRUCK ACCESS — CRITICAL:
 - A standard dump truck (tandem, triaxle, quad axle, super dump) can get ANYWHERE a regular vehicle can go. These are your standard delivery trucks.
 - An 18-wheeler (end dump, semi) is much bigger and needs a wider road and room to turn around. NOT every property can fit one.
@@ -439,10 +491,22 @@ SELF-CHECK BEFORE RESPONDING:
 OUTPUT FORMAT: JSON only, no markdown
 {"response":"your text to the customer","extractedData":{}}`
 
-async function callSarah(
+function getAgentSystem(agent: AgentName): string {
+  return AGENT_PERSONALITY[agent] + AGENT_SHARED_RULES(
+    agent === "sarah" ? "Sarah" : agent === "micah" ? "Micah" : "John L"
+  ) + AGENT_SHARED_KNOWLEDGE
+}
+
+// Legacy alias for any code referencing SARAH_SYSTEM directly
+const SARAH_SYSTEM = getAgentSystem("sarah")
+
+async function callAgent(
+  agentName: AgentName,
+  displayName: string,
   body: string, conv: any, history: { role: "user"|"assistant"; content: string }[],
   instruction: string,
 ): Promise<{ response: string; extractedData?: any }> {
+  const systemPrompt = getAgentSystem(agentName)
   try {
     // Build context — tells Sonnet exactly what we know and what to do
     const has = (v: any) => v !== null && v !== undefined && v !== ""
@@ -467,14 +531,14 @@ async function callSarah(
       "",
       `Customer said: ${body}`,
       "",
-      "Respond as Sarah. JSON only.",
+      `Respond as ${displayName}. JSON only.`,
     ].join("\n")
 
-    const attemptSarah = async () => {
+    const attemptCall = async () => {
       const resp = await anthropic.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 250,
-        system: SARAH_SYSTEM,
+        system: systemPrompt,
         messages: [...history.slice(-16), { role: "user" as const, content: ctx }],
       })
       const raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""
@@ -483,18 +547,18 @@ async function callSarah(
     }
 
     try {
-      return await attemptSarah()
+      return await attemptCall()
     } catch (firstErr) {
-      console.error("[Sarah brain] attempt 1 failed, retrying in 2s:", firstErr)
+      console.error(`[${displayName} brain] attempt 1 failed, retrying in 2s:`, firstErr)
       await new Promise(r => setTimeout(r, 2000))
-      return await attemptSarah()
+      return await attemptCall()
     }
   } catch (e) {
-    console.error("[Sarah brain] both attempts failed:", e)
+    console.error(`[${displayName} brain] both attempts failed:`, e)
     // Notify admin via sms_logs AND SMS
     const sb = createAdminSupabase()
-    try { await sb.from("customer_sms_logs").insert({ phone: "system", body: `SARAH BRAIN DOWN: ${(e as any)?.message || "unknown error"}. Conv state: ${conv?.state || "unknown"}`, direction: "error", message_sid: `err_${Date.now()}` }) } catch {}
-    try { await notifyAdmin(`SONNET DOWN: Sarah brain failed twice. Customer state: ${conv?.state || "unknown"}. Error: ${(e as any)?.message || "unknown"}`, `sonnet_down_${Date.now()}`) } catch {}
+    try { await sb.from("customer_sms_logs").insert({ phone: "system", body: `${displayName.toUpperCase()} BRAIN DOWN: ${(e as any)?.message || "unknown error"}. Conv state: ${conv?.state || "unknown"}`, direction: "error", message_sid: `err_${Date.now()}` }) } catch {}
+    try { await notifyAdmin(`SONNET DOWN: ${displayName} brain failed twice. Customer state: ${conv?.state || "unknown"}. Error: ${(e as any)?.message || "unknown"}`, `sonnet_down_${Date.now()}`) } catch {}
     // Context-aware fallback based on conversation state
     const state = conv?.state || "NEW"
     const fallbacks: Record<string, string> = {
@@ -514,10 +578,10 @@ async function callSarah(
 // ─────────────────────────────────────────────────────────
 // VALIDATOR
 // ─────────────────────────────────────────────────────────
-function validate(r: string, lastOutbound: string): string {
+function validate(r: string, lastOutbound: string, displayName: string = "Sarah"): string {
   // Block AI admissions
   for (const p of ["i am an ai","i'm an ai","language model","claude","anthropic","i am a bot","i'm a bot","as an ai","artificial intelligence"]) {
-    if (r.toLowerCase().includes(p)) return "This is Sarah with Fill Dirt Near Me, how can I help"
+    if (r.toLowerCase().includes(p)) return `This is ${displayName} with Fill Dirt Near Me, how can I help`
   }
   // Strip em dashes, en dashes — replace with comma or nothing
   r = r.replace(/\s*[—–]\s*/g, ", ").replace(/,\s*,/g, ",").trim()
@@ -549,11 +613,14 @@ function validate(r: string, lastOutbound: string): string {
 // ─────────────────────────────────────────────────────────
 // MAIN HANDLER
 // ─────────────────────────────────────────────────────────
-export async function handleCustomerSMS(sms: { from: string; body: string; messageSid: string; numMedia: number; mediaUrl?: string }): Promise<string> {
+export async function handleCustomerSMS(sms: { from: string; to?: string; body: string; messageSid: string; numMedia: number; mediaUrl?: string }): Promise<string> {
   const phone = normalizePhone(sms.from)
   let body = (sms.body || "").trim()
   let lower = body.toLowerCase().trim()
   const sid = sms.messageSid
+
+  // Resolve which agent should handle this conversation based on the Twilio number texted
+  const agent = sms.to ? resolveAgent(sms.to) : { name: "sarah" as AgentName, displayName: "Sarah", number: "" }
 
   try {
 
@@ -561,8 +628,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   await logMsg(phone, body || (sms.numMedia > 0 ? "[photo]" : "[empty]"), "inbound", sid)
 
   // ── RAPID-FIRE CONCATENATION ──
-  // If customer sent multiple messages in quick succession WITHOUT Sarah replying,
-  // concatenate them into one message so Sarah sees the full context.
+  // If customer sent multiple messages in quick succession without the agent replying,
+  // concatenate them into one message so the agent sees the full context.
   // The FIRST message in a burst gets delayed (5s webhook delay). Later messages
   // in the burst are the ones that arrive here while the first is still pending.
   // Strategy: if this is a later message in a burst, skip it — but STORE the body
@@ -617,8 +684,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (sms.numMedia > 0 && !body) {
     const { conv: photoConv } = await getConv(phone)
     if (photoConv.opted_out) return ""
-    const s = await callSarah("[Customer sent a photo]", photoConv, await getHistory(phone), "Customer sent a photo. Acknowledge it naturally, like 'thanks for the pic' or 'got the photo'. Then continue with whatever question you need to ask next based on what info is still missing")
-    const r = validate(s.response, "")
+    const s = await callAgent(agent.name, agent.displayName, "[Customer sent a photo]", photoConv, await getHistory(phone), "Customer sent a photo. Acknowledge it naturally, like 'thanks for the pic' or 'got the photo'. Then continue with whatever question you need to ask next based on what info is still missing")
+    const r = validate(s.response, "", agent.displayName)
     await logMsg(phone, r, "outbound", `photo_${sid}`)
     return r
   }
@@ -639,7 +706,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const state = conv.state || "NEW"
   const history = await getHistory(phone)
   const lastOut = history.filter(h => h.role === "assistant").slice(-1)[0]?.content || ""
-  const updates: Record<string, any> = {}
+  const updates: Record<string, any> = { agent_name: agent.name }
   let reply = ""
 
   // ═══════════════════════════════════════════════════════
@@ -712,8 +779,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (isCancel) {
     await notifyAdmin(`Customer ${conv.customer_name || phone} requesting cancellation | State: ${state} | Order: ${conv.dispatch_order_id || "none"}`, sid)
     updates.state = "CLOSED"
-    const s = await callSarah(body, conv, history, "Customer wants to cancel. Say you'll have someone from the team reach out to help with that. Be empathetic but dont push")
-    reply = validate(s.response, lastOut)
+    const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Customer wants to cancel. Say you'll have someone from the team reach out to help with that. Be empathetic but dont push")
+    reply = validate(s.response, lastOut, agent.displayName)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
@@ -741,16 +808,16 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     } else {
       statusInstruction = "Their order is confirmed and we're working on scheduling. They'll get a text when their driver is heading their way"
     }
-    const s = await callSarah(body, conv, history, statusInstruction)
-    reply = validate(s.response, lastOut)
+    const s = await callAgent(agent.name, agent.displayName,body, conv, history, statusInstruction)
+    reply = validate(s.response, lastOut, agent.displayName)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
   // Status request but no order
   if (isStatus && !hasOrder) {
-    const s = await callSarah(body, conv, history, "Customer asking about an order but they don't have one yet. We're not currently hauling in their area but as soon as we are they'll be the first to know. If they want to place an order, help them get started")
-    reply = validate(s.response, lastOut)
+    const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Customer asking about an order but they don't have one yet. We're not currently hauling in their area but as soon as we are they'll be the first to know. If they want to place an order, help them get started")
+    reply = validate(s.response, lastOut, agent.displayName)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
@@ -761,9 +828,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const instruction = hasQuote
       ? `${firstName} is back after saying they'd think about it. Their quote was ${fmt$(conv.total_price_cents)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")} to ${conv.delivery_city}. Welcome them back warmly and ask if they're ready to move forward`
       : `${firstName} is back. Welcome them warmly and pick up where you left off. Figure out what they still need`
-    const s = await callSarah(body, conv, history, instruction)
+    const s = await callAgent(agent.name, agent.displayName,body, conv, history, instruction)
     updates.state = hasQuote ? "QUOTING" : needAddress ? "COLLECTING" : "COLLECTING"
-    reply = validate(s.response, lastOut)
+    reply = validate(s.response, lastOut, agent.displayName)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
@@ -773,8 +840,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     if (isPaymentConfirm) {
       updates.payment_status = "confirming"
       updates.state = "DELIVERED"
-      const s = await callSarah(body, conv, history, `Payment confirmed. Thank them and let them know we appreciate their business. If they ever need more material, just text us`)
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Payment confirmed. Thank them and let them know we appreciate their business. If they ever need more material, just text us`)
+      reply = validate(s.response, lastOut, agent.displayName)
       await notifyAdmin(`PAYMENT CONFIRMED: ${conv.customer_name} | ${fmt$(conv.total_price_cents||0)} | ${conv.payment_method}`, sid)
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -782,16 +849,16 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     if (/zelle/i.test(lower)) {
       updates.payment_method = "zelle"
       const total = fmt$(conv.total_price_cents || 0)
-      const s = await callSarah(body, conv, history, `They chose Zelle. Tell them to send ${total} to support@filldirtnearme.net via Zelle. Once sent, text you back`)
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, `They chose Zelle. Tell them to send ${total} to support@filldirtnearme.net via Zelle. Once sent, text you back`)
+      reply = validate(s.response, lastOut, agent.displayName)
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/venmo/i.test(lower)) {
       updates.payment_method = "venmo"
       const total = fmt$(conv.total_price_cents || 0)
-      const s = await callSarah(body, conv, history, `They chose Venmo. Tell them to send ${total} to @FillDirtNearMe on Venmo. Once sent, text you back`)
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, `They chose Venmo. Tell them to send ${total} to @FillDirtNearMe on Venmo. Once sent, text you back`)
+      reply = validate(s.response, lastOut, agent.displayName)
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
@@ -799,27 +866,27 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.payment_method = "invoice"
       if (has(conv.customer_email)) {
         // Already have email — send invoice
-        const s = await callSarah(body, conv, history, `They chose card. Let them know we'll send the invoice to ${conv.customer_email}. There's a 3.5% processing fee for card payments. Once they pay, text you back`)
-        reply = validate(s.response, lastOut)
+        const s = await callAgent(agent.name, agent.displayName,body, conv, history, `They chose card. Let them know we'll send the invoice to ${conv.customer_email}. There's a 3.5% processing fee for card payments. Once they pay, text you back`)
+        reply = validate(s.response, lastOut, agent.displayName)
         await notifyAdmin(`INVOICE NEEDED: ${conv.customer_name} | ${conv.customer_email} | ${fmt$(conv.total_price_cents||0)}`, sid)
       } else {
         // Need email first
         updates.state = "ASKING_EMAIL"
-        const s = await callSarah(body, conv, history, `They want to pay by card. There's a 3.5% processing fee. Ask for their email so you can send the invoice`)
-        reply = validate(s.response, lastOut)
+        const s = await callAgent(agent.name, agent.displayName,body, conv, history, `They want to pay by card. There's a 3.5% processing fee. Ask for their email so you can send the invoice`)
+        reply = validate(s.response, lastOut, agent.displayName)
       }
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/cash|check|cheque/i.test(lower)) {
-      const s = await callSarah(body, conv, history, "They want cash or check. Explain we cant accept those, our drivers are independently insured contractors so for liability reasons we can only do Venmo, Zelle, or online invoice (card with 3.5% fee). Ask which works")
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, "They want cash or check. Explain we cant accept those, our drivers are independently insured contractors so for liability reasons we can only do Venmo, Zelle, or online invoice (card with 3.5% fee). Ask which works")
+      reply = validate(s.response, lastOut, agent.displayName)
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     // General question while waiting for payment
-    const s = await callSarah(body, conv, history, `Delivery is complete, waiting on payment of ${fmt$(conv.total_price_cents||0)}. Answer their question, then remind them we accept Venmo, Zelle, or online invoice (card with 3.5% fee). Which works for them`)
-    reply = validate(s.response, lastOut)
+    const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Delivery is complete, waiting on payment of ${fmt$(conv.total_price_cents||0)}. Answer their question, then remind them we accept Venmo, Zelle, or online invoice (card with 3.5% fee). Which works for them`)
+    reply = validate(s.response, lastOut, agent.displayName)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
@@ -840,15 +907,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
             updates.dispatch_order_id = orderId
             await notifyAdmin(`PRIORITY PAID: ${conv.customer_name} | ${fmt$(conv.priority_total_cents||0)} | ${conv.yards_needed}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | Guaranteed ${conv.priority_guaranteed_date}`, sid)
           }
-          const s = await callSarah(body, conv, history, `Payment confirmed. Tell them their priority delivery is locked in for ${conv.priority_guaranteed_date}. They'll get a text when their driver is heading their way`)
-          reply = validate(s.response, lastOut)
+          const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Payment confirmed. Tell them their priority delivery is locked in for ${conv.priority_guaranteed_date}. They'll get a text when their driver is heading their way`)
+          reply = validate(s.response, lastOut, agent.displayName)
         } else {
-          const s = await callSarah(body, conv, history, `Customer says they paid but we haven't received it yet. Ask them to double check that the payment went through on their end. If they're having trouble, they can text back and you'll help sort it out`)
-          reply = validate(s.response, lastOut)
+          const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Customer says they paid but we haven't received it yet. Ask them to double check that the payment went through on their end. If they're having trouble, they can text back and you'll help sort it out`)
+          reply = validate(s.response, lastOut, agent.displayName)
         }
       } else {
-        const s = await callSarah(body, conv, history, "Customer says they paid but we can't verify right now. Let them know you'll have someone check on it and get back to them shortly")
-        reply = validate(s.response, lastOut)
+        const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Customer says they paid but we can't verify right now. Let them know you'll have someone check on it and get back to them shortly")
+        reply = validate(s.response, lastOut, agent.displayName)
         await notifyAdmin(`Customer ${conv.customer_name} (${phone}) says they paid for priority order but no stripe_session_id — check manually`, sid)
       }
     } else if (/link|url|pay|how|where/i.test(lower)) {
@@ -867,22 +934,22 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         if (checkout.success && checkout.url) {
           updates.stripe_session_id = checkout.sessionId
           await savePriorityFields(phone, { stripe_session_id: checkout.sessionId })
-          const s = await callSarah(body, conv, history, `Customer needs the payment link again. Here it is: ${checkout.url} — work it into the message naturally`)
-          reply = validate(s.response, lastOut)
+          const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Customer needs the payment link again. Here it is: ${checkout.url} — work it into the message naturally`)
+          reply = validate(s.response, lastOut, agent.displayName)
         } else {
-          const s = await callSarah(body, conv, history, "Having trouble generating the payment link. Tell them you'll have someone from the team reach out to help")
-          reply = validate(s.response, lastOut)
+          const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Having trouble generating the payment link. Tell them you'll have someone from the team reach out to help")
+          reply = validate(s.response, lastOut, agent.displayName)
           await notifyAdmin(`STRIPE LINK RESEND FAILED for ${conv.customer_name} (${phone}) — needs manual handling`, sid)
         }
       } else {
-        const s = await callSarah(body, conv, history, "Tell them you'll send the payment link again shortly. Something on your end")
-        reply = validate(s.response, lastOut)
+        const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Tell them you'll send the payment link again shortly. Something on your end")
+        reply = validate(s.response, lastOut, agent.displayName)
         await notifyAdmin(`Customer ${conv.customer_name} (${phone}) needs priority payment link but no session stored — manual handling needed`, sid)
       }
     } else {
       // General question while waiting for payment
-      const s = await callSarah(body, conv, history, `Customer has a priority order pending payment of ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")} guaranteed by ${conv.priority_guaranteed_date}. Answer their question, then remind them to complete payment to lock in their delivery date`)
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Customer has a priority order pending payment of ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")} guaranteed by ${conv.priority_guaranteed_date}. Answer their question, then remind them to complete payment to lock in their delivery date`)
+      reply = validate(s.response, lastOut, agent.displayName)
     }
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -890,7 +957,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // ── CLOSED — customer cancelled or completed. Let them restart fresh. ──
   if (state === "CLOSED") {
-    const s = await callSarah(body, conv, history, "This customer had a previous order that's now closed. If they want to place a new order, help them get started fresh. Ask what they need")
+    const s = await callAgent(agent.name, agent.displayName,body, conv, history, "This customer had a previous order that's now closed. If they want to place a new order, help them get started fresh. Ask what they need")
     // Clear old order data so they can start over — keep name and phone only
     updates.state = "COLLECTING"
     updates.delivery_address = ""
@@ -912,7 +979,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     updates.dispatch_order_id = ""
     updates.follow_up_at = ""
     updates.follow_up_count = 0
-    reply = validate(s.response, lastOut)
+    reply = validate(s.response, lastOut, agent.displayName)
     // Direct update to force-clear fields (COALESCE won't clear nulls)
     await createAdminSupabase().from("customer_conversations").update({
       state: "COLLECTING", delivery_address: null, delivery_city: null,
@@ -948,8 +1015,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         orderContext = "Be honest, we don't have drivers hauling in their area right now. As soon as we do they'll be the first to know. We appreciate their patience. If their timeline is urgent they can ask about priority delivery"
       }
     }
-    const s = await callSarah(body, conv, history, `${orderContext} Answer their question helpfully. If they want to cancel, say you'll have someone reach out`)
-    reply = validate(s.response, lastOut)
+    const s = await callAgent(agent.name, agent.displayName,body, conv, history, `${orderContext} Answer their question helpfully. If they want to cancel, say you'll have someone reach out`)
+    reply = validate(s.response, lastOut, agent.displayName)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
@@ -960,8 +1027,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const wantsNewOrder = /\b(more|another|new order|need dirt|need fill|need topsoil|need sand|delivery|another load|order again|same thing|same order|reorder)\b/i.test(lower) || inlineMaterial || inlineYards || isAddress
     if (wantsNewOrder) {
       // Start fresh order — clear old data, keep name
-      const s = await callSarah(body, conv, history, `Returning customer wants to place a new order. Welcome them back, acknowledge what they said, and ask what they need. They already know the process so keep it efficient`)
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Returning customer wants to place a new order. Welcome them back, acknowledge what they said, and ask what they need. They already know the process so keep it efficient`)
+      reply = validate(s.response, lastOut, agent.displayName)
       await createAdminSupabase().from("customer_conversations").update({
         state: "COLLECTING", delivery_address: null, delivery_city: null,
         delivery_lat: null, delivery_lng: null, material_purpose: null,
@@ -975,8 +1042,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       }).eq("phone", phone)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
-    const s = await callSarah(body, conv, history, "This customer's delivery has been completed and payment was received. Answer their question. If they need more material, tell them to just let you know and you'll get them set up. If they have an issue with the delivery, say you'll have someone from the team reach out")
-    reply = validate(s.response, lastOut)
+    const s = await callAgent(agent.name, agent.displayName,body, conv, history, "This customer's delivery has been completed and payment was received. Answer their question. If they need more material, tell them to just let you know and you'll get them set up. If they have an issue with the delivery, say you'll have someone from the team reach out")
+    reply = validate(s.response, lastOut, agent.displayName)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
@@ -996,8 +1063,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
       if (ambiguousYes) {
         // Dual quote was shown but they just said "yes" — need to clarify
-        const s = await callSarah(body, conv, history, `Customer said yes but we gave them two options. Ask which one they want: standard delivery at ${fmt$(conv.total_price_cents||0)} (3-5 business days) or priority at ${fmt$(conv.priority_total_cents)} (guaranteed by ${conv.priority_guaranteed_date}). Keep it casual, just ask which works better`)
-        reply = validate(s.response, lastOut)
+        const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Customer said yes but we gave them two options. Ask which one they want: standard delivery at ${fmt$(conv.total_price_cents||0)} (3-5 business days) or priority at ${fmt$(conv.priority_total_cents)} (guaranteed by ${conv.priority_guaranteed_date}). Keep it casual, just ask which works better`)
+        reply = validate(s.response, lastOut, agent.displayName)
       } else if (wantsPriority && hasPriorityQuote) {
         // PRIORITY — charge upfront via Stripe before dispatching
         updates.order_type = "priority"
@@ -1021,13 +1088,13 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
             order_type: "priority",
             stripe_session_id: checkout.sessionId,
           })
-          const s = await callSarah(body, conv, history, `Customer chose priority. Tell them to lock in their guaranteed delivery for ${conv.priority_guaranteed_date}, just complete payment at this link: ${checkout.url} — once that goes through you'll get their driver scheduled right away. Keep it natural, dont say "click here" just work the link into the message`)
-          reply = validate(s.response, lastOut)
+          const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Customer chose priority. Tell them to lock in their guaranteed delivery for ${conv.priority_guaranteed_date}, just complete payment at this link: ${checkout.url} — once that goes through you'll get their driver scheduled right away. Keep it natural, dont say "click here" just work the link into the message`)
+          reply = validate(s.response, lastOut, agent.displayName)
           await notifyAdmin(`PRIORITY ORDER PENDING PAYMENT: ${conv.customer_name} | ${fmt$(conv.priority_total_cents)} | ${yards}yds ${material} | ${conv.delivery_city} | Guaranteed ${conv.priority_guaranteed_date}`, sid)
         } else {
           // Stripe failed — fall back to manual handling
-          const s = await callSarah(body, conv, history, "Tell the customer you're having a small issue getting the payment link set up. You'll have someone from the team text them shortly to get it sorted out")
-          reply = validate(s.response, lastOut)
+          const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Tell the customer you're having a small issue getting the payment link set up. You'll have someone from the team text them shortly to get it sorted out")
+          reply = validate(s.response, lastOut, agent.displayName)
           await notifyAdmin(`STRIPE CHECKOUT FAILED for ${conv.customer_name} (${phone}) — priority order ${fmt$(conv.priority_total_cents)} needs manual handling. Error: ${checkout.error}`, sid)
         }
       } else {
@@ -1041,32 +1108,32 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           const yards = conv.yards_needed || MIN_YARDS
           await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
           if (yards >= LARGE_ORDER) await notifyAdmin(`LARGE ORDER ${yards}yds — ${conv.customer_name} ${conv.delivery_city}`, sid)
-          const s = await callSarah(body, conv, history, `Customer chose standard delivery. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
-          reply = validate(s.response, lastOut)
+          const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Customer chose standard delivery. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
+          reply = validate(s.response, lastOut, agent.displayName)
         } else {
           // Dispatch failed — DO NOT tell customer it's confirmed
           updates.state = "QUOTING" // Stay in QUOTING so they can retry
           await notifyAdmin(`DISPATCH FAILED for ${conv.customer_name} (${phone}) | ${conv.yards_needed}yds to ${conv.delivery_city} | Customer was NOT told order is confirmed. Needs manual dispatch.`, sid)
-          const s = await callSarah(body, conv, history, "Tell the customer you're working on getting their delivery set up. Ask them to give you just a few minutes while you confirm the details on your end")
-          reply = validate(s.response, lastOut)
+          const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Tell the customer you're working on getting their delivery set up. Ask them to give you just a few minutes while you confirm the details on your end")
+          reply = validate(s.response, lastOut, agent.displayName)
         }
       }
     } else if (isNo) {
       updates.state = "FOLLOW_UP"
       updates.follow_up_at = new Date(Date.now() + 48*60*60*1000).toISOString()
       updates.follow_up_count = 0
-      const s = await callSarah(body, conv, history, "Customer said no to the quote. Be understanding, no pressure. Tell them to text back anytime if they change their mind or want to adjust anything")
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Customer said no to the quote. Be understanding, no pressure. Tell them to text back anytime if they change their mind or want to adjust anything")
+      reply = validate(s.response, lastOut, agent.displayName)
     } else if (isFollowUp) {
       updates.state = "FOLLOW_UP"
       updates.follow_up_at = new Date(Date.now() + 24*60*60*1000).toISOString()
       updates.follow_up_count = 0
-      const s = await callSarah(body, conv, history, "Customer wants to think about it. Be totally cool with that. Tell them you'll check back tomorrow and they can text anytime")
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Customer wants to think about it. Be totally cool with that. Tell them you'll check back tomorrow and they can text anytime")
+      reply = validate(s.response, lastOut, agent.displayName)
     } else {
       // Question about the quote, negotiation, etc
-      const s = await callSarah(body, conv, history, `Customer was quoted ${fmt$(conv.total_price_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")}. They said something other than yes/no. Answer their question or concern, then ask if they'd like to move forward`)
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, `Customer was quoted ${fmt$(conv.total_price_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")}. They said something other than yes/no. Answer their question or concern, then ask if they'd like to move forward`)
+      reply = validate(s.response, lastOut, agent.displayName)
     }
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -1078,12 +1145,12 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     if (email) {
       updates.customer_email = email
       updates.state = "AWAITING_PAYMENT"
-      const s = await callSarah(body, conv, history, "Got their email. Let them know we'll send the invoice shortly. Thank them")
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Got their email. Let them know we'll send the invoice shortly. Thank them")
+      reply = validate(s.response, lastOut, agent.displayName)
       await notifyAdmin(`INVOICE NEEDED: ${conv.customer_name} | ${email} | ${fmt$(conv.total_price_cents||0)}`, sid)
     } else {
-      const s = await callSarah(body, conv, history, "Need their email to send the invoice. They didn't give a valid email. Ask again naturally")
-      reply = validate(s.response, lastOut)
+      const s = await callAgent(agent.name, agent.displayName,body, conv, history, "Need their email to send the invoice. They didn't give a valid email. Ask again naturally")
+      reply = validate(s.response, lastOut, agent.displayName)
     }
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -1136,8 +1203,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     } else {
       newInstruction = "New customer just texted. Say hey this is Sarah with Fill Dirt Near Me. Ask what their name is. One short message, nothing else. Do NOT apologize, do NOT use dashes, do NOT use exclamation marks"
     }
-    const s = await callSarah(body, merged, history, newInstruction)
-    reply = validate(s.response, lastOut)
+    const s = await callAgent(agent.name, agent.displayName,body, merged, history, newInstruction)
+    reply = validate(s.response, lastOut, agent.displayName)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
@@ -1470,8 +1537,8 @@ Ask which works better for them. Keep it natural, two short lines for the option
   if (!updates.state && state === "NEW") updates.state = "COLLECTING"
   if (!updates.state && state !== "COLLECTING" && state !== "ASKING_DIMENSIONS" && state !== "QUOTING") updates.state = state
 
-  const s = await callSarah(body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them")
-  reply = validate(s.response, lastOut)
+  const s = await callAgent(agent.name, agent.displayName,body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them")
+  reply = validate(s.response, lastOut, agent.displayName)
   // Persist priority quote data FIRST (before saveConv) to avoid state/data mismatch
   // Check with != null instead of truthiness so $0 quotes still save
   if (updates._priority_total_cents != null) {

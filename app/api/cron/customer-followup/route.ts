@@ -5,6 +5,16 @@ import twilio from "twilio"
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER!
 
+// Agent phone number lookup — must match AGENT_MAP in customer-brain.service.ts
+const AGENT_FROM: Record<string, string> = {
+  sarah: process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || "",
+  micah: process.env.MICAH_TWILIO_NUMBER || "+14695236420",
+  john_l: process.env.JOHN_L_TWILIO_NUMBER || "+14692470556",
+}
+function getAgentFrom(agentName?: string): string {
+  return (agentName && AGENT_FROM[agentName]) || CUSTOMER_FROM
+}
+
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("authorization")
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -32,7 +42,7 @@ export async function GET(request: NextRequest) {
 
   const { data: followUps } = await sb
     .from("customer_conversations")
-    .select("phone, customer_name, state, follow_up_count, material_type, yards_needed, total_price_cents")
+    .select("phone, customer_name, state, follow_up_count, material_type, yards_needed, total_price_cents, agent_name")
     .eq("state", "FOLLOW_UP")
     .lt("follow_up_at", now)
     .lt("follow_up_count", 3)
@@ -56,7 +66,7 @@ export async function GET(request: NextRequest) {
       }
 
       await twilioClient.messages.create({
-        body: msg, from: CUSTOMER_FROM,
+        body: msg, from: getAgentFrom(c.agent_name),
         to: `+1${c.phone}`,
       })
 

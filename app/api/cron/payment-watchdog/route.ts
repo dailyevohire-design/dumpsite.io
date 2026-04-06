@@ -4,6 +4,16 @@ import twilio from "twilio"
 
 const tw = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER || ""
+
+// Agent phone number lookup for multi-agent routing
+const AGENT_FROM: Record<string, string> = {
+  sarah: process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || "",
+  micah: process.env.MICAH_TWILIO_NUMBER || "+14695236420",
+  john_l: process.env.JOHN_L_TWILIO_NUMBER || "+14692470556",
+}
+function getAgentFrom(agentName?: string): string {
+  return (agentName && AGENT_FROM[agentName]) || CUSTOMER_FROM
+}
 const ADMIN_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
 const ADMIN = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
@@ -25,7 +35,7 @@ export async function GET(request: NextRequest) {
 
   // ── UNPAID CUSTOMER DELIVERIES ──
   const { data: unpaid } = await sb.from("customer_conversations")
-    .select("phone, customer_name, total_price_cents, payment_method, updated_at")
+    .select("phone, customer_name, total_price_cents, payment_method, updated_at, agent_name")
     .eq("state", "AWAITING_PAYMENT")
     .neq("opted_out", true)
 
@@ -42,12 +52,13 @@ export async function GET(request: NextRequest) {
     const alreadySentRecently = lastOutHoursAgo < 1 // Don't double-text within 1 hour
 
     try {
+      const agentFrom = getAgentFrom(c.agent_name)
       if (hoursWaiting >= 1 && hoursWaiting < 2 && !alreadySentRecently) {
         // 1 hour — first nudge + notify admin
-        if (CUSTOMER_FROM) {
+        if (agentFrom) {
           await tw.messages.create({
             body: `Hey ${name}, just following up on the ${total} for your delivery. We accept Venmo, Zelle, or online invoice. Which works best for you`,
-            from: CUSTOMER_FROM, to: `+1${c.phone}`,
+            from: agentFrom, to: `+1${c.phone}`,
           })
           await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 1h] First follow-up`, direction: "outbound", message_sid: `pw1h_${Date.now()}` })
         }
@@ -55,20 +66,20 @@ export async function GET(request: NextRequest) {
         actions++
       } else if (hoursWaiting >= 4 && hoursWaiting < 5 && lastOutHoursAgo >= 2) {
         // 4 hours — second nudge
-        if (CUSTOMER_FROM) {
+        if (agentFrom) {
           await tw.messages.create({
             body: `${name}, checking in on the payment for your dirt delivery. ${total} via Venmo, Zelle, or we can send an invoice. Let me know`,
-            from: CUSTOMER_FROM, to: `+1${c.phone}`,
+            from: agentFrom, to: `+1${c.phone}`,
           })
           await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 4h] Second follow-up`, direction: "outbound", message_sid: `pw4h_${Date.now()}` })
         }
         actions++
       } else if (hoursWaiting >= 24 && hoursWaiting < 25 && lastOutHoursAgo >= 4) {
         // 24 hours — final text + admin escalation
-        if (CUSTOMER_FROM) {
+        if (agentFrom) {
           await tw.messages.create({
             body: `${name}, last follow-up on the ${total} delivery payment. Let me know how you'd like to handle it`,
-            from: CUSTOMER_FROM, to: `+1${c.phone}`,
+            from: agentFrom, to: `+1${c.phone}`,
           })
           await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 24h] Final follow-up`, direction: "outbound", message_sid: `pw24h_${Date.now()}` })
         }
