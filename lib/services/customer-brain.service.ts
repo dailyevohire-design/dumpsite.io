@@ -1327,21 +1327,21 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         updates._priority_quarry_name = dualQuote.priority.quarryName
       }
       // Sarah presents the formatted dual quote exactly as the pricing engine wrote it
-      if (isSpecificDate && dualQuote.priority) {
-        // Customer gave specific date — MUST present both options clearly
-        instruction = `Customer needs it by ${merged.delivery_date}. Present BOTH options clearly:
+      if (dualQuote.priority) {
+        // ALWAYS present both options when priority is available
+        const dateContext = isSpecificDate
+          ? `Customer needs it by ${merged.delivery_date}.`
+          : `Customer is flexible on timing but show them both options so they can choose.`
+        instruction = `${dateContext} Present BOTH options clearly:
 
 Option 1 - Standard delivery: ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), 3-5 business days, sometimes sooner if we get a cancellation
 
-Option 2 - Guaranteed by ${merged.delivery_date}: ${fmt$(dualQuote.priority.totalCents)} (${fmt$(dualQuote.priority.perYardCents)}/yard), locked in delivery date, payment upfront to secure the date
+Option 2 - Guaranteed priority delivery: ${fmt$(dualQuote.priority.totalCents)} (${fmt$(dualQuote.priority.perYardCents)}/yard), locked in delivery date${dualQuote.priority.guaranteedDate ? ` by ${dualQuote.priority.guaranteedDate}` : ""}, payment upfront to secure the date
 
 Ask which works better for them. Keep it natural, two short lines for the options then ask which one`
-      } else if (isFlexibleDate || !dualQuote.priority) {
-        // Flexible date or no priority available — just show standard
-        instruction = `Present the standard quote: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} comes to ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
       } else {
-        // Has priority but date wasn't clearly specific — show both but lead with standard
-        instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
+        // No priority available — just show standard
+        instruction = `Present the standard quote: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} comes to ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
       }
     } else {
       // Fallback: use inline zone pricing if getDualQuote fails
