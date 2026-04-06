@@ -3,6 +3,10 @@ import { after } from "next/server"
 import { handleCustomerSMS } from "@/lib/services/customer-brain.service"
 import { createAdminSupabase } from "@/lib/supabase"
 import crypto from "crypto"
+import twilio from "twilio"
+
+const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
+const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
 function validateTwilioSignature(url: string, params: Record<string, string>, signature: string): boolean {
   const authToken = process.env.TWILIO_AUTH_TOKEN
@@ -23,34 +27,51 @@ function getTwilioAuth(): { sid: string; key: string; secret: string } {
   return { sid: rawSid, key: rawSid, secret: authToken || "" }
 }
 
-async function sendViaTwilioAPI(to: string, body: string) {
+async function alertAdmin(msg: string) {
+  if (process.env.PAUSE_ADMIN_SMS === "true") return
+  const adminFrom = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
+  if (!adminFrom) return
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+  try { await client.messages.create({ body: msg, from: adminFrom, to: `+1${ADMIN_PHONE}` }) } catch {}
+  if (ADMIN_PHONE_2) {
+    try { await client.messages.create({ body: msg, from: adminFrom, to: `+1${ADMIN_PHONE_2}` }) } catch {}
+  }
+}
+
+async function sendViaTwilioAPI(to: string, body: string): Promise<boolean> {
   const { sid, key, secret } = getTwilioAuth()
-  // Use CUSTOMER number first, fall back to driver number
   const from = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
   const digits = to.replace(/\D/g, "")
   const toE164 = digits.length === 10 ? `+1${digits}` : digits.length === 11 && digits.startsWith("1") ? `+${digits}` : `+1${digits}`
 
   console.log(`[customer SMS] sending to ${toE164} from ${from}`)
 
-  const resp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
-    method: "POST",
-    headers: {
-      "Authorization": "Basic " + Buffer.from(`${key}:${secret}`).toString("base64"),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({ To: toE164, From: from, Body: body }).toString(),
-  })
-  const data = await resp.json()
-  if (data.error_code) {
-    console.error("[customer SMS] Twilio error:", data.message, data.error_code)
-    try {
-      await createAdminSupabase().from("customer_sms_logs").insert({
-        phone: digits, body: `TWILIO SEND FAILED: ${data.error_code} ${data.message || ""} — attempted body: ${body.slice(0, 200)}`,
-        direction: "error", message_sid: `twilio_err_${Date.now()}`,
-      })
-    } catch {}
+  try {
+    const resp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+      method: "POST",
+      headers: {
+        "Authorization": "Basic " + Buffer.from(`${key}:${secret}`).toString("base64"),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ To: toE164, From: from, Body: body }).toString(),
+    })
+    const data = await resp.json()
+    if (data.error_code) {
+      console.error("[customer SMS] Twilio error:", data.message, data.error_code)
+      try {
+        await createAdminSupabase().from("customer_sms_logs").insert({
+          phone: digits, body: `TWILIO SEND FAILED: ${data.error_code} ${data.message || ""} — attempted body: ${body.slice(0, 200)}`,
+          direction: "error", message_sid: `twilio_err_${Date.now()}`,
+        })
+      } catch {}
+      return false
+    }
+    console.log("[customer SMS] sent OK SID:", data.sid)
+    return true
+  } catch (err) {
+    console.error("[customer SMS] fetch to Twilio threw:", err)
+    return false
   }
-  else console.log("[customer SMS] sent OK SID:", data.sid)
 }
 
 export async function POST(req: NextRequest) {
@@ -87,13 +108,31 @@ export async function POST(req: NextRequest) {
     const reply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl })
     if (!reply) return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })
 
-    // Human-like delay
+    // Human-like delay, then send with retry + admin alert on failure
     const phone = from.replace(/\D/g, "").replace(/^1/, "")
     const delay = 5000
 
     after(async () => {
       await new Promise(r => setTimeout(r, delay))
-      await sendViaTwilioAPI(phone, reply)
+      const sent = await sendViaTwilioAPI(phone, reply)
+      if (!sent) {
+        // Retry once after 3 seconds
+        console.error(`[customer SMS] FIRST SEND FAILED to ${phone}, retrying in 3s...`)
+        await new Promise(r => setTimeout(r, 3000))
+        const retrySent = await sendViaTwilioAPI(phone, reply)
+        if (!retrySent) {
+          // Both attempts failed — alert admin immediately
+          console.error(`[customer SMS] BOTH SENDS FAILED to ${phone}`)
+          await alertAdmin(`SMS SEND FAILED TWICE to ${phone}. Customer got NO reply. Their message: "${body.slice(0, 100)}". Our reply was: "${reply.slice(0, 100)}"`)
+          // Log the failure so stale-orders cron can also catch it
+          try {
+            await createAdminSupabase().from("customer_sms_logs").insert({
+              phone, body: `SEND FAILED TWICE — reply lost: ${reply.slice(0, 200)}`,
+              direction: "error", message_sid: `send_fail_${messageSid}`,
+            })
+          } catch {}
+        }
+      }
     })
 
     return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })

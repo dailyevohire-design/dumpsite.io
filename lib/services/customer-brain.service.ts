@@ -43,7 +43,7 @@ function nearestYard(lat: number, lng: number) {
 }
 
 function calcQuote(miles: number, material: string, yards: number) {
-  const z = ZONES.find(z => miles >= z.min && miles <= z.max)
+  const z = ZONES.find(z => miles >= z.min && (miles < z.max || (z.zone === "C" && miles <= z.max)))
   if (!z) return null
   const perYard = z.base + (SURCHARGE[material] || 0)
   const billable = Math.max(yards, MIN_YARDS)
@@ -51,6 +51,13 @@ function calcQuote(miles: number, material: string, yards: number) {
 }
 
 function cubicYards(l: number, w: number, d: number): number { return Math.ceil((l * w * d) / 27) }
+
+// Convert depth to feet — handles "6 inches", "6 in", "6" (assumes inches if <= 12)
+function depthToFeet(value: number, text: string): number {
+  if (/\b(feet|ft|foot)\b/i.test(text)) return value
+  if (/\b(inch|inches|in)\b|"/i.test(text) || value <= 12) return value / 12
+  return value / 12 // > 12 with no unit still likely inches
+}
 function fmt$(cents: number): string { return "$" + (cents/100).toLocaleString("en-US", { maximumFractionDigits: 0 }) }
 function fmtMaterial(k: string): string { return ({ fill_dirt:"fill dirt", screened_topsoil:"screened topsoil", structural_fill:"structural fill", sand:"sand" })[k] || k.replace(/_/g," ") }
 
@@ -76,7 +83,9 @@ async function geocode(address: string): Promise<{ lat: number; lng: number; cit
   // Fallback: Nominatim (city-level)
   try {
     await new Promise(r => setTimeout(r, 300))
-    const q = encodeURIComponent(address.includes("Texas") || address.includes("TX") ? address : `${address} Texas USA`)
+    // Don't assume Texas — check if address already has a state, otherwise leave as-is
+    const hasState = /\b(Texas|TX|Colorado|CO|Denver)\b/i.test(address)
+    const q = encodeURIComponent(hasState ? address : `${address} USA`)
     const url = `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`
     const r = await fetch(url, { headers: { "User-Agent": "DumpSite.io/1.0" } })
     const data = await r.json()
@@ -93,9 +102,16 @@ async function geocode(address: string): Promise<{ lat: number; lng: number; cit
 // ─────────────────────────────────────────────────────────
 // CODE-BASED EXTRACTION — AI never sets these fields
 // ─────────────────────────────────────────────────────────
-function extractYards(text: string): number | null {
-  const m = text.match(/(\d+)\s*(cubic\s*)?(yards?|yds?|cy)/i) || text.match(/^(\d+)$/)
-  return m ? parseInt(m[1]) : null
+function extractYards(text: string, allowBareNumber: boolean = true): number | null {
+  // First try explicit yards mention
+  const explicit = text.match(/(\d+)\s*(cubic\s*)?(yards?|yds?|cy)/i)
+  if (explicit) return parseInt(explicit[1])
+  // Bare number (e.g. "100") — only when we're expecting yards
+  if (allowBareNumber) {
+    const bare = text.match(/^(\d+)$/)
+    if (bare) return parseInt(bare[1])
+  }
+  return null
 }
 
 function extractDimensions(text: string): { l: number; w: number; d: number } | null {
@@ -144,13 +160,17 @@ function normalizePhone(raw: string): string { return raw.replace(/\D/g, "").rep
 
 async function getConv(phone: string): Promise<any> {
   const sb = createAdminSupabase()
-  const { data } = await sb.from("customer_conversations").select("*").eq("phone", phone).maybeSingle()
+  const { data, error } = await sb.from("customer_conversations").select("*").eq("phone", phone).maybeSingle()
+  if (error) {
+    console.error("[CRITICAL] getConv FAILED:", error.message, "| phone:", phone)
+    await notifyAdmin(`GETCONV FAILED: ${error.message} | Phone: ${phone}. Customer may be treated as NEW incorrectly.`, `getconv_fail_${Date.now()}`)
+  }
   return data || { state: "NEW" }
 }
 
 async function saveConv(phone: string, u: Record<string, any>): Promise<void> {
   const sb = createAdminSupabase()
-  await sb.rpc("upsert_customer_conversation", {
+  const { error } = await sb.rpc("upsert_customer_conversation", {
     p_phone: phone, p_state: u.state ?? null,
     p_customer_name: u.customer_name ?? null, p_customer_email: u.customer_email ?? null,
     p_delivery_address: u.delivery_address ?? null, p_delivery_city: u.delivery_city ?? null,
@@ -164,28 +184,47 @@ async function saveConv(phone: string, u: Record<string, any>): Promise<void> {
     p_payment_status: u.payment_status ?? null, p_dispatch_order_id: u.dispatch_order_id ?? null,
     p_follow_up_at: u.follow_up_at ?? null, p_follow_up_count: u.follow_up_count ?? null,
   })
+  if (error) {
+    console.error("[CRITICAL] saveConv FAILED:", error.message, "| phone:", phone, "| state:", u.state)
+    await notifyAdmin(`SAVECONV FAILED: ${error.message} | Phone: ${phone} | State: ${u.state || "?"}. Customer conversation is NOT being saved.`, `saveconv_fail_${Date.now()}`)
+  }
 }
 
 async function savePriorityFields(phone: string, fields: Record<string, any>): Promise<void> {
   const sb = createAdminSupabase()
-  await sb.from("customer_conversations").update(fields).eq("phone", phone)
+  const { error } = await sb.from("customer_conversations").update(fields).eq("phone", phone)
+  if (error) {
+    console.error("[CRITICAL] savePriorityFields FAILED:", error.message, "| phone:", phone)
+    await notifyAdmin(`SAVE PRIORITY FAILED: ${error.message} | Phone: ${phone}. Priority fields NOT saved.`, `priority_fail_${Date.now()}`)
+  }
 }
 
 async function isDupe(sid: string): Promise<boolean> {
   const sb = createAdminSupabase()
-  const { data } = await sb.rpc("check_customer_message", { p_sid: sid })
+  const { data, error } = await sb.rpc("check_customer_message", { p_sid: sid })
+  if (error) {
+    // CRITICAL: If dedup check fails, DO NOT drop the message. Process it.
+    // Worst case is a duplicate response. That's better than silence.
+    console.error("[CRITICAL] isDupe RPC FAILED:", error.message, "| sid:", sid)
+    return false // NOT a dupe — process the message
+  }
   return !data
 }
 
 async function getHistory(phone: string) {
   const sb = createAdminSupabase()
-  const { data } = await sb.from("customer_sms_logs").select("body, direction").eq("phone", phone).order("created_at", { ascending: false }).limit(24)
+  const { data } = await sb.from("customer_sms_logs").select("body, direction").eq("phone", phone).in("direction", ["inbound", "outbound"]).order("created_at", { ascending: false }).limit(24)
   if (!data) return []
   return data.reverse().map((m: any) => ({ role: (m.direction === "inbound" ? "user" : "assistant") as "user"|"assistant", content: (m.body || "").trim() })).filter(m => m.content.length > 0)
 }
 
 async function logMsg(phone: string, body: string, dir: "inbound"|"outbound", sid: string) {
-  try { await createAdminSupabase().from("customer_sms_logs").insert({ phone, body, direction: dir, message_sid: sid }) } catch {}
+  try {
+    const { error } = await createAdminSupabase().from("customer_sms_logs").insert({ phone, body, direction: dir, message_sid: sid })
+    if (error) console.error("[logMsg] insert failed:", error.message, "| phone:", phone, "| dir:", dir)
+  } catch (e) {
+    console.error("[logMsg] threw:", (e as any)?.message, "| phone:", phone, "| dir:", dir)
+  }
 }
 
 async function sendSMS(to: string, body: string, sid: string) {
@@ -293,6 +332,12 @@ HOW YOU TEXT:
 - If they tell you something unexpected, respond to THAT before moving forward.
 - If they ask a question, ANSWER IT before asking your next question.
 
+TRUCK ACCESS — CRITICAL:
+- A standard dump truck (tandem, triaxle, quad axle, super dump) can get ANYWHERE a regular vehicle can go. These are your standard delivery trucks.
+- An 18-wheeler (end dump, semi) is much bigger and needs a wider road and room to turn around. NOT every property can fit one.
+- When asking about access, you are ONLY asking about 18-wheelers. Never ask "can a dump truck get to your property" because dump trucks go everywhere.
+- The correct question is: "can an 18-wheeler get to your property or should we use standard dump trucks"
+
 WHAT YOU KNOW ABOUT DIRT:
 - Fill Dirt: clean, general purpose. Leveling, grading, filling holes, backfill behind retaining walls, general site prep. Most affordable. $12-18/yard depending on distance.
 - Structural Fill: engineered to compact. Foundations, slabs, driveways, pool fills, anything that needs a solid stable base underneath. Slightly more at $20-26/yard.
@@ -330,12 +375,18 @@ WHEN CUSTOMER ASKS ABOUT TIMING:
 - Explain delivery is typically 1-5 business days depending on area and availability
 - Ask if they need it by a specific date or if they're flexible — this matters for scheduling
 
+CRITICAL RULES — NEVER BREAK:
+- NEVER say "I'll get back to you", "let me check and get back", "I'll follow up", or any promise to proactively text them later. You CANNOT initiate texts. If you say this, the customer waits forever and nobody follows up.
+- NEVER give price ranges or estimates from your general knowledge. Only share exact prices when the system gives you a specific quote to present. If you don't have a quote yet, say "let me get you the exact number" and ask the next question to complete the quote.
+- ALWAYS follow the task instruction. The >>> YOUR TASK <<< section tells you exactly what to say. Do that FIRST, then add personality. Don't ignore the task to talk about something else.
+
 SELF-CHECK BEFORE RESPONDING:
-1. Did I answer their question FIRST before asking mine?
-2. Is my response under 3 sentences?
-3. Does it sound like a real person texting, not a customer service bot?
-4. Am I asking only ONE thing?
-5. If I don't know something, do I say "let me check on that" instead of making it up?
+1. Did I follow the TASK instruction above?
+2. Did I answer their question FIRST before asking mine?
+3. Is my response under 3 sentences?
+4. Does it sound like a real person texting, not a customer service bot?
+5. Am I asking only ONE thing?
+6. Did I avoid promising to "get back to them" or "check on something"?
 
 OUTPUT FORMAT: JSON only, no markdown
 {"response":"your text to the customer","extractedData":{}}`
@@ -434,8 +485,16 @@ function validate(r: string, lastOutbound: string): string {
   r = r.replace(/\.\s*$/, "").trim()
   // Capitalize first letter if needed
   if (r.length > 0) r = r[0].toUpperCase() + r.slice(1)
-  // Dedup — don't send exact same message
-  if (r.toLowerCase() === lastOutbound.toLowerCase() && r.length > 10) r = "Let me know if you have any other questions"
+  // Dedup — don't send exact same message (use varied responses to avoid loops)
+  if (r.toLowerCase() === lastOutbound.toLowerCase() && r.length > 10) {
+    const dedupResponses = [
+      "Let me know if you have any other questions",
+      "Anything else I can help with",
+      "Just text me if you need anything",
+      "Im here if you need me",
+    ]
+    r = dedupResponses[Math.floor(Math.random() * dedupResponses.length)]
+  }
   return r || "Give me one sec"
 }
 
@@ -453,9 +512,38 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (await isDupe(sid)) return ""
   await logMsg(phone, body || (sms.numMedia > 0 ? "[photo]" : "[empty]"), "inbound", sid)
 
-  // Empty body with photo — acknowledge it
+  // ── RAPID-FIRE DEBOUNCE ──
+  // If customer sent multiple messages in quick succession WITHOUT Sarah replying
+  // between them, this is a burst. Skip reply for the later messages — the first
+  // message's delayed reply (5s) will handle the conversation.
+  const sb_debounce = createAdminSupabase()
+  const eightSecAgo = new Date(Date.now() - 8000).toISOString()
+  const { data: recentMsgs } = await sb_debounce
+    .from("customer_sms_logs")
+    .select("direction, created_at")
+    .eq("phone", phone)
+    .in("direction", ["inbound", "outbound"])
+    .gt("created_at", eightSecAgo)
+    .order("created_at", { ascending: false })
+    .limit(5)
+  if (recentMsgs && recentMsgs.length >= 2) {
+    // Count inbound messages that came BEFORE any outbound (Sarah reply) in the window
+    let consecutiveInbound = 0
+    for (const m of recentMsgs) {
+      if (m.direction === "inbound") consecutiveInbound++
+      else break // Hit an outbound — everything before this is a new conversation turn
+    }
+    if (consecutiveInbound >= 2) {
+      console.log(`[customer SMS] Rapid-fire detected for ${phone} (${consecutiveInbound} msgs before reply), skipping`)
+      return ""
+    }
+  }
+
+  // Empty body with photo — acknowledge it (but check opt-out first)
   if (sms.numMedia > 0 && !body) {
-    const s = await callSarah("[Customer sent a photo]", await getConv(phone), await getHistory(phone), "Customer sent a photo. Acknowledge it naturally, like 'thanks for the pic' or 'got the photo'. Then continue with whatever question you need to ask next based on what info is still missing")
+    const photoConv = await getConv(phone)
+    if (photoConv.opted_out) return ""
+    const s = await callSarah("[Customer sent a photo]", photoConv, await getHistory(phone), "Customer sent a photo. Acknowledge it naturally, like 'thanks for the pic' or 'got the photo'. Then continue with whatever question you need to ask next based on what info is still missing")
     const r = validate(s.response, "")
     await logMsg(phone, r, "outbound", `photo_${sid}`)
     return r
@@ -485,7 +573,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // ═══════════════════════════════════════════════════════
 
   // ── INLINE EXTRACTION (code always does this, not AI) ──
-  const inlineYards = extractYards(body)
+  // Only accept bare numbers as yards if we're past material collection (otherwise "100" could be anything)
+  const hasMaterialContext = conv.material_type != null && conv.material_type !== "" || conv.material_purpose != null && conv.material_purpose !== ""
+  const inlineYards = extractYards(body, hasMaterialContext)
   const inlineDims = extractDimensions(body)
   const inlineEmail = extractEmail(body)
   const inlineMaterial = extractMaterialFromPurpose(body)
@@ -494,8 +584,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // ── ACCESS TYPE EXTRACTION ──
   const inlineAccess = (() => {
-    if (/\b(18.?wheel|big rig|semi|tractor|wide open|plenty of room|lots of room|big truck|any size|all good|both)\b/i.test(lower)) return "dump_truck_and_18wheeler"
-    if (/\b(just dump|dump truck only|no.*(18|semi|big)|tight|narrow|small street|residential|driveway only|only dump)\b/i.test(lower)) return "dump_truck_only"
+    if (/\b(18.?wheel|big rig|semi|tractor|wide open|plenty of room|lots of room|big truck|any size|all good|both|end dump|large|biggest)\b/i.test(lower)) return "dump_truck_and_18wheeler"
+    if (/\b(just dump|dump truck only|no.*(18|semi|big)|tight|narrow|small street|residential|driveway only|only dump|regular|standard|normal|tandem|small(er)?(\s+truck)?|basic|just a dump|regular dump|standard dump|regular size|normal size)\b/i.test(lower)) return "dump_truck_only"
     return null
   })()
 
@@ -518,19 +608,23 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   })()
   const isYes = /^(yes|yeah|yep|sure|ok|okay|lets do it|sounds good|perfect|go ahead|book it|schedule|please|absolutely|definitely|si|dale|do it|im down|im in|ready|set it up)$/i.test(lower)
   const isNo = /^(no|nah|nope|too much|expensive|pass|never mind|cancel|not now|not interested|no thanks|no thank you|nah im good|nah i'm good|too expensive|way too much|too high|cant afford|can't afford|out of my budget|too pricey|hard pass|no way)$/i.test(lower)
-  const isCancel = /cancel|refund|money back/i.test(lower)
-  const isStatus = /\b(status|tracking|eta)\b|where.*(my|is my|the).*(order|delivery|driver|truck)|when.*(my|is my|the).*(order|delivery|driver|truck|arriving|coming|getting here)|how long.*(until|till|before|for)/i.test(lower)
-  const isPaymentConfirm = /sent|paid|done|confirmed|just sent|payment sent|transferred|just paid/i.test(lower)
+  // Must be an actual cancellation REQUEST, not a question about cancellation policy
+  const isCancel = /\b(i want to cancel|cancel (my|the|this) (order|delivery)|please cancel|need to cancel|cancel it|refund|money back|want my money)\b/i.test(lower)
+  const isStatus = /\b(status|tracking|eta|update)\b|where.*(my|is my|the).*(order|delivery|driver|truck)|when.*(my|is my|the).*(order|delivery|driver|truck|arriving|coming|getting here)|how long.*(until|till|before|for)|any.*(update|news|word)|what.*(happening|going on).*order|check.*(on|my).*(order|delivery)/i.test(lower)
+  // Must clearly indicate they made a payment, not just casual "done" or "sent" in other context
+  const isPaymentConfirm = /\b(just sent|payment sent|i sent it|i paid|just paid|i transferred|just transferred|sent the payment|sent it|paid it|payment done|its paid|it's paid|sent the money|money sent|sent via|paid via)\b/i.test(lower)
 
   // Determine what info is missing
   const has = (v: any) => v !== null && v !== undefined && v !== ""
-  const needName = !has(conv.customer_name)
-  const needAddress = !has(conv.delivery_address)
+  // Detect correction language — customer wants to change previously given info
+  const isCorrection = /\b(actually|wrong|change it|correction|not that|meant to say|different|instead|I meant|should be|typo|oops|mistake|scratch that|wait no|no wait|let me fix|hold on|my bad)\b/i.test(lower)
+  const needName = !has(conv.customer_name) || (isCorrection && /\b(name|call me|im actually|i'm actually)\b/i.test(lower))
+  const needAddress = !has(conv.delivery_address) || (isCorrection && isAddress)
   const needPurpose = !has(conv.material_purpose)
-  const needMaterial = !has(conv.material_type)
-  const needYards = !has(conv.yards_needed)
+  const needMaterial = !has(conv.material_type) || (isCorrection && inlineMaterial != null)
+  const needYards = !has(conv.yards_needed) || (isCorrection && inlineYards != null)
   const needAccess = !has(conv.access_type)
-  const needDate = !has(conv.delivery_date)
+  const needDate = !has(conv.delivery_date) || (isCorrection && inlineDate != null)
   const needEmail = !has(conv.customer_email)
   const needPayment = !has(conv.payment_method)
   const hasQuote = has(conv.total_price_cents)
@@ -551,13 +645,26 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // Order status — any state with an order
   if (isStatus && hasOrder) {
     const sb = createAdminSupabase()
-    const { data: order } = await sb.from("dispatch_orders").select("status").eq("id", conv.dispatch_order_id).maybeSingle()
+    const { data: order } = await sb.from("dispatch_orders").select("status, drivers_notified, created_at").eq("id", conv.dispatch_order_id).maybeSingle()
     const orderStatus = order?.status || "open"
+    const driversNotified = order?.drivers_notified || 0
+    const isPriority = conv.order_type === "priority"
+    const daysSinceOrder = order?.created_at ? Math.round((Date.now() - new Date(order.created_at).getTime()) / (1000*60*60*24)) : 0
     let statusInstruction = ""
-    if (orderStatus === "open") statusInstruction = "Tell customer their order is confirmed and we're matching them with a driver. They'll get a text when driver is on the way"
-    else if (orderStatus === "active" || orderStatus === "dispatching") statusInstruction = "Tell customer their driver has been assigned and they'll get an update when they're heading out"
-    else if (orderStatus === "completed") statusInstruction = "Tell customer their delivery has been completed. Ask if everything looks good"
-    else statusInstruction = "We're not currently hauling in their area but as soon as we are they'll be the first to know. We appreciate their patience"
+    if (orderStatus === "completed") {
+      statusInstruction = "Tell customer their delivery has been completed. Ask if everything looks good"
+    } else if (orderStatus === "active") {
+      statusInstruction = "Tell customer their driver has been assigned and they'll get a text when they're heading out"
+    } else if (isPriority) {
+      statusInstruction = `Their priority order is confirmed for ${conv.priority_guaranteed_date || "their requested date"}. They'll get a text when their driver is heading their way`
+    } else if (driversNotified > 0 && daysSinceOrder <= 2) {
+      statusInstruction = "Their order is in the system and we've reached out to drivers in their area. They'll get a text as soon as a driver is heading their way. Standard delivery is 3-5 business days"
+    } else if (driversNotified === 0 || daysSinceOrder > 2) {
+      // Honest: no drivers in the area yet
+      statusInstruction = "Be honest with the customer. We don't have drivers hauling in their area right now, but as soon as we do they'll be the first to know. We appreciate their patience and we're actively working on getting coverage out there. If their timeline is urgent, let them know about our priority delivery option which sources material from a local quarry with a guaranteed date"
+    } else {
+      statusInstruction = "Their order is confirmed and we're working on scheduling. They'll get a text when their driver is heading their way"
+    }
     const s = await callSarah(body, conv, history, statusInstruction)
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates })
@@ -747,7 +854,25 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // ── ACTIVE ORDER — waiting for delivery ──
   if (state === "ORDER_PLACED") {
-    const s = await callSarah(body, conv, history, "Customer has a confirmed order waiting for delivery. Answer their question helpfully. If they ask about status say their delivery is being scheduled and they'll get a text when their driver is heading their way. If they want to cancel, say you'll have someone reach out")
+    // Check actual dispatch status so Sarah doesn't lie about driver availability
+    let orderContext = "Customer has a confirmed order."
+    if (has(conv.dispatch_order_id)) {
+      const sb_order = createAdminSupabase()
+      const { data: order } = await sb_order.from("dispatch_orders").select("status, drivers_notified, created_at").eq("id", conv.dispatch_order_id).maybeSingle()
+      const driversNotified = order?.drivers_notified || 0
+      const daysSince = order?.created_at ? Math.round((Date.now() - new Date(order.created_at).getTime()) / (1000*60*60*24)) : 0
+      const isPriority = conv.order_type === "priority"
+      if (order?.status === "active") {
+        orderContext = "Their driver has been assigned. They'll get a text when their driver is heading out"
+      } else if (isPriority) {
+        orderContext = `Their priority delivery is confirmed for ${conv.priority_guaranteed_date || "their requested date"}. They'll get a text when their driver is heading their way`
+      } else if (driversNotified > 0 && daysSince <= 2) {
+        orderContext = "Their order is in and we've reached out to drivers in their area. Standard delivery is 3-5 business days. They'll get a text when a driver is heading their way"
+      } else {
+        orderContext = "Be honest, we don't have drivers hauling in their area right now. As soon as we do they'll be the first to know. We appreciate their patience. If their timeline is urgent they can ask about priority delivery"
+      }
+    }
+    const s = await callSarah(body, conv, history, `${orderContext} Answer their question helpfully. If they want to cancel, say you'll have someone reach out`)
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates })
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -755,7 +880,26 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // ── DELIVERED — delivery done, payment confirmed ──
   if (state === "DELIVERED") {
-    const s = await callSarah(body, conv, history, "This customer's delivery has been completed and payment was received. Answer their question. If they need more material, help them start a new order. If they have an issue with the delivery, say you'll have someone from the team reach out")
+    // Check if they want a new order (any material/project/yard language)
+    const wantsNewOrder = /\b(more|another|new order|need dirt|need fill|need topsoil|need sand|delivery|another load|order again|same thing|same order|reorder)\b/i.test(lower) || inlineMaterial || inlineYards || isAddress
+    if (wantsNewOrder) {
+      // Start fresh order — clear old data, keep name
+      const s = await callSarah(body, conv, history, `Returning customer wants to place a new order. Welcome them back, acknowledge what they said, and ask what they need. They already know the process so keep it efficient`)
+      reply = validate(s.response, lastOut)
+      await createAdminSupabase().from("customer_conversations").update({
+        state: "COLLECTING", delivery_address: null, delivery_city: null,
+        delivery_lat: null, delivery_lng: null, material_purpose: null,
+        material_type: null, yards_needed: null, dimensions_raw: null,
+        access_type: null, delivery_date: null, zone: null, distance_miles: null,
+        price_per_yard_cents: null, total_price_cents: null, payment_method: null,
+        payment_status: "pending", dispatch_order_id: null, follow_up_at: null,
+        follow_up_count: 0, order_type: null, priority_total_cents: null,
+        priority_guaranteed_date: null, priority_quarry_name: null,
+        stripe_session_id: null, stripe_payment_intent_id: null,
+      }).eq("phone", phone)
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+    const s = await callSarah(body, conv, history, "This customer's delivery has been completed and payment was received. Answer their question. If they need more material, tell them to just let you know and you'll get them set up. If they have an issue with the delivery, say you'll have someone from the team reach out")
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates })
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -812,18 +956,24 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         }
       } else {
         // STANDARD — existing flow, pay after delivery
-        updates.state = "ORDER_PLACED"
         updates.order_type = "standard"
         await savePriorityFields(phone, { order_type: "standard" })
         const orderId = await createDispatchOrder({ ...conv, ...updates }, phone)
         if (orderId) {
+          updates.state = "ORDER_PLACED"
           updates.dispatch_order_id = orderId
           const yards = conv.yards_needed || MIN_YARDS
           await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
           if (yards >= LARGE_ORDER) await notifyAdmin(`LARGE ORDER ${yards}yds — ${conv.customer_name} ${conv.delivery_city}`, sid)
+          const s = await callSarah(body, conv, history, `Customer chose standard delivery. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
+          reply = validate(s.response, lastOut)
+        } else {
+          // Dispatch failed — DO NOT tell customer it's confirmed
+          updates.state = "QUOTING" // Stay in QUOTING so they can retry
+          await notifyAdmin(`DISPATCH FAILED for ${conv.customer_name} (${phone}) | ${conv.yards_needed}yds to ${conv.delivery_city} | Customer was NOT told order is confirmed. Needs manual dispatch.`, sid)
+          const s = await callSarah(body, conv, history, "Tell the customer you're getting their delivery set up and someone from the team will text them shortly to confirm the details. Something on your end needs a quick check")
+          reply = validate(s.response, lastOut)
         }
-        const s = await callSarah(body, conv, history, `Customer chose standard delivery. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
-        reply = validate(s.response, lastOut)
       }
     } else if (isNo) {
       updates.state = "FOLLOW_UP"
@@ -870,7 +1020,37 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // ── NEW CUSTOMER ──
   if (state === "NEW") {
     updates.state = "COLLECTING"
-    const s = await callSarah(body, conv, history, "New customer just texted. Say hey this is Sarah with Fill Dirt Near Me. Ask what their name is. One short message, nothing else. Do NOT apologize, do NOT use dashes, do NOT use exclamation marks")
+    // Extract anything useful from their first message before responding
+    // so Sarah doesn't ask for info they already gave
+    const firstMsgParts: string[] = []
+    if (inlineYards) { updates.yards_needed = inlineYards; firstMsgParts.push(`${inlineYards} yards`) }
+    if (inlineMaterial) { updates.material_type = inlineMaterial.key; updates.material_purpose = body.trim(); firstMsgParts.push(inlineMaterial.name) }
+    if (isAddress) {
+      const geo = await geocode(body)
+      if (geo) {
+        updates.delivery_address = body.trim(); updates.delivery_city = geo.city
+        updates.delivery_lat = geo.lat; updates.delivery_lng = geo.lng
+        const nearest = nearestYard(geo.lat, geo.lng)
+        updates.distance_miles = nearest.miles
+        updates.zone = ZONES.find(z => nearest.miles >= z.min && (nearest.miles < z.max || (z.zone === "C" && nearest.miles <= z.max)))?.zone || null
+        firstMsgParts.push(`address: ${body.trim()}`)
+      }
+    }
+    // Check if they included a name-like phrase (e.g. "I'm Mike" or "this is José")
+    const nameMatch = body.match(/(?:i'm|im|i am|this is|my name is|name's|names|me llamo|soy)\s+([\p{L}][\p{L}]+(?:\s+[\p{L}][\p{L}]+)?)/iu)
+    if (nameMatch) { updates.customer_name = nameMatch[1].trim(); firstMsgParts.push(`name: ${nameMatch[1].trim()}`) }
+
+    const merged = { ...conv, ...updates }
+    const mHas = (k: string) => { const v = (merged as any)[k]; return v !== null && v !== undefined && v !== "" }
+    let newInstruction = ""
+    if (firstMsgParts.length > 0) {
+      // They gave us info — acknowledge it and ask for the NEXT missing thing
+      const nextMissing = !mHas("customer_name") ? "ask their name" : !mHas("delivery_address") ? "ask for the delivery address" : !mHas("material_purpose") ? "ask what the dirt is for" : !mHas("yards_needed") ? "ask how many cubic yards" : "ask if big trucks can get to their property"
+      newInstruction = `New customer texted. Say hey this is Sarah with Fill Dirt Near Me. They already told you: ${firstMsgParts.join(", ")}. Acknowledge what they shared, then ${nextMissing}. One short message`
+    } else {
+      newInstruction = "New customer just texted. Say hey this is Sarah with Fill Dirt Near Me. Ask what their name is. One short message, nothing else. Do NOT apologize, do NOT use dashes, do NOT use exclamation marks"
+    }
+    const s = await callSarah(body, merged, history, newInstruction)
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates })
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -887,15 +1067,17 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const words = trimmed.split(/\s+/)
     // Accept lowercase single names (most people text lowercase)
     // But filter out common non-name words
-    const COMMON_WORDS = /^(the|a|an|is|it|at|in|on|to|so|or|do|go|and|but|for|not|just|also|too|very|all|any|some|my|our|this|that|its|get|got|can|will|has|had|was|are|been|have|from|with|they|them|what|when|how|who|which|where|here|there|then|than|more|much|many|most|other|only|still|even|well|back|over|such|after|into|made|like|long|out|way|day|each|new|now|old|see|let|say|may|own|why|try)$/i
-    const isLikelyName = words.length <= 3 && words[0].length >= 2 && !COMMON_WORDS.test(words[0]) && !/\b(dirt|fill|sand|topsoil|gravel|delivery|truck|dump|yard|slab|pool|concrete|driveway|garden|level|grade|material|project|quote|price)\b/i.test(trimmed)
+    // Filter common English words BUT allow real names that overlap (will, art, grace, may, mark, etc.)
+    const COMMON_NON_NAMES = /^(the|a|an|is|it|at|in|on|to|so|or|do|go|and|but|for|not|just|also|too|very|all|any|some|my|our|this|that|its|get|got|can|has|had|was|are|been|have|from|with|they|them|what|when|how|who|which|where|here|there|then|than|more|much|many|most|other|only|still|even|well|back|over|such|after|into|made|like|long|out|way|day|each|new|now|old|see|let|say|own|why|try)$/i
+    const hasLetters = /[a-zA-ZÀ-ÿ]/.test(trimmed) // Must contain at least one letter (blocks emoji-only)
+    const isLikelyName = hasLetters && words.length <= 3 && words[0].length >= 2 && !COMMON_NON_NAMES.test(words[0]) && !/\b(dirt|fill|sand|topsoil|gravel|delivery|truck|dump|yard|slab|pool|concrete|driveway|garden|level|grade|material|project|quote|price)\b/i.test(trimmed)
     if (isLikelyName) {
       updates.customer_name = trimmed
     }
   }
 
   // Address extraction — require actual street address, not just a zip code
-  // Allow re-entry if existing address is out of zone (zone is null/empty)
+  // Allow re-entry if: no address yet, existing address has no zone, or customer is correcting
   const isBareZip = /^\d{5}(-\d{4})?$/.test(body.trim())
   const addressOutOfZone = has(conv.delivery_address) && !has(conv.zone)
   if (isAddress && (needAddress || addressOutOfZone) && !isBareZip) {
@@ -907,8 +1089,17 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.delivery_lng = geo.lng
       const nearest = nearestYard(geo.lat, geo.lng)
       updates.distance_miles = nearest.miles
-      const zone = ZONES.find(z => nearest.miles >= z.min && nearest.miles < z.max)
+      const zone = ZONES.find(z => nearest.miles >= z.min && (nearest.miles < z.max || (z.zone === "C" && nearest.miles <= z.max)))
       updates.zone = zone?.zone || null
+      if (!zone) {
+        // Address geocoded but outside 60 miles — notify admin in case geocode was wrong
+        await notifyAdmin(`Customer ${conv.customer_name || phone} address "${body.trim()}" geocoded to ${geo.lat},${geo.lng} (${geo.city}) — ${nearest.miles}mi from nearest yard, outside all zones. Verify this is correct.`, `zone_miss_${Date.now()}`)
+      }
+    } else {
+      // Geocode completely failed — save the address text so we don't lose it, alert admin
+      updates.delivery_address = body.trim()
+      console.error("[customer geocode] FAILED for:", body.trim())
+      await notifyAdmin(`GEOCODE FAILED for customer ${conv.customer_name || phone} address: "${body.trim()}". Address saved but no coords. May need manual zone assignment.`, `geocode_fail_${Date.now()}`)
     }
   }
 
@@ -917,7 +1108,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   }
 
   if (inlineDims && needYards) {
-    const yards = cubicYards(inlineDims.l, inlineDims.w, inlineDims.d)
+    const d = depthToFeet(inlineDims.d, body)
+    const yards = cubicYards(inlineDims.l, inlineDims.w, d)
     updates.yards_needed = yards
     updates.dimensions_raw = body.trim()
   }
@@ -939,6 +1131,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     updates.customer_email = inlineEmail
   }
 
+  // If a correction changed pricing-relevant fields, invalidate the old quote
+  if (isCorrection && (updates.yards_needed || updates.material_type || updates.delivery_address)) {
+    if (has(conv.total_price_cents)) {
+      updates.total_price_cents = null as any
+      updates.price_per_yard_cents = null as any
+      updates.state = "COLLECTING" // Re-collect to regenerate quote
+    }
+  }
+
   // Merge updates to figure out current state
   const merged = { ...conv, ...updates }
   const mHas = (k: string) => { const v = (merged as any)[k]; return v !== null && v !== undefined && v !== "" }
@@ -954,7 +1155,20 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     instruction = "Ask what they're using the material for. Explain this helps you recommend the right type of dirt for their project. Be genuinely curious about their project"
   } else if (!mHas("material_type")) {
     // Purpose given but material not auto-detected
-    instruction = `Customer said they need dirt for: "${merged.material_purpose}". Based on your knowledge, recommend the right material type (fill dirt, structural fill, screened topsoil, or sand). Explain briefly why that material is right for their project. Then ask how many cubic yards they need, and offer to help calculate if they're not sure`
+    // Check if customer is CONFIRMING a material Sarah already recommended in the last message
+    const isConfirm = isYes || /\b(that works|that sounds|sounds right|sounds good|go with that|that one|the one you said|what you said|recommended|yeah that|sure that|ok that|perfect|exactly)\b/i.test(lower)
+    if (isConfirm && lastOut) {
+      // Extract what material Sarah recommended from her last message
+      const lastMaterial = extractMaterialFromPurpose(lastOut)
+      if (lastMaterial) {
+        updates.material_type = lastMaterial.key
+        instruction = `They confirmed ${lastMaterial.name}. Now ask how many cubic yards they need. If they're not sure, you can help calculate from dimensions`
+      } else {
+        instruction = `Customer said they need dirt for: "${merged.material_purpose}". Based on your knowledge, recommend the right material type (fill dirt, structural fill, screened topsoil, or sand). Explain briefly why that material is right for their project. Then ask how many cubic yards they need, and offer to help calculate if they're not sure`
+      }
+    } else {
+      instruction = `Customer said they need dirt for: "${merged.material_purpose}". Based on your knowledge, recommend the right material type (fill dirt, structural fill, screened topsoil, or sand). Explain briefly why that material is right for their project. Then ask how many cubic yards they need, and offer to help calculate if they're not sure`
+    }
   } else if (!mHas("yards_needed")) {
     // Detect if they gave partial dimensions (e.g. "40 x 40" — 2 numbers, missing depth)
     const hasPartialDims = /\d+\s*[x×]\s*\d+/i.test(body) || /\d+\s*by\s*\d+/i.test(body) || /\d+\s*ft?\s*[x×]\s*\d+/i.test(body)
@@ -964,11 +1178,12 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.state = "ASKING_DIMENSIONS"
       instruction = `Customer gave ${nums[0]} x ${nums[1]} but we need the depth too. Ask how deep/thick they need it in feet or inches. For a slab its usually 4-6 inches. Be helpful`
     } else if (hasPartialDims && nums && nums.length >= 3) {
-      // They gave all 3 — calculate
-      const yards = cubicYards(parseFloat(nums[0]), parseFloat(nums[1]), parseFloat(nums[2]))
+      // They gave all 3 — calculate (convert depth to feet)
+      const d = depthToFeet(parseFloat(nums[2]), body)
+      const yards = cubicYards(parseFloat(nums[0]), parseFloat(nums[1]), d)
       updates.yards_needed = yards
       updates.dimensions_raw = body.trim()
-      instruction = `That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+      instruction = `That comes out to about ${yards} cubic yards. Now ask real quick, can an 18-wheeler get to their property or should we use standard dump trucks`
     } else if (/don.?t know|not sure|no idea|how much|figure|calculate|dimensions|measure/i.test(lower)) {
       instruction = "Customer doesn't know how many yards. Ask them for the dimensions of the area, length width and depth in feet. Tell them you'll calculate it for them"
       updates.state = "ASKING_DIMENSIONS"
@@ -981,24 +1196,27 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.access_type = "dump_truck_and_18wheeler"
       // Skip ahead — don't re-ask, move to date
       if (!mHas("delivery_date")) {
-        instruction = "They have room for big trucks. Now ask about their timeline, do they need it by a specific date or are they flexible"
+        instruction = "Got it, 18-wheelers can get in. Now ask about their timeline, do they need it by a specific date or are they flexible"
       } else {
         instruction = "__GENERATE_QUOTE__"
       }
     } else if (isNo || /\b(no|nope|nah|cant|can.?t|wont fit|too tight|too narrow|small)\b/i.test(lower)) {
       updates.access_type = "dump_truck_only"
       if (!mHas("delivery_date")) {
-        instruction = "Got it, dump trucks only. Now ask about their timeline, do they need it by a specific date or are they flexible"
+        instruction = "Got it, standard dump trucks only, no 18-wheelers. Now ask about their timeline, do they need it by a specific date or are they flexible"
       } else {
         instruction = "__GENERATE_QUOTE__"
       }
     } else {
-      instruction = "Ask if their property can fit big rigs and 18 wheelers, or just standard dump trucks. This affects what size truck we send"
+      instruction = "Ask if an 18-wheeler can access their property or if we should use standard dump trucks. Standard dump trucks, triaxles, and quad axles can get pretty much anywhere. 18-wheelers need a wider road and room to turn around. Just ask real quick can an 18-wheeler get in or should we stick with regular dump trucks"
     }
   } else if (!mHas("delivery_date")) {
-    instruction = "Ask about their timeline. Do they need it by a specific date or are they flexible on delivery"
+    instruction = "Ask about their timeline. Do they need it by a specific date or are they flexible. If they give a specific date we can offer guaranteed delivery for that date at a premium price, or standard 3-5 business day delivery at a lower price"
   } else {
     // ALL INFO COLLECTED — get dual quote (standard + priority from quarries)
+    // Detect if customer gave a SPECIFIC date vs "flexible/whenever"
+    const isFlexibleDate = /flexible|whenever|no rush|no hurry|not urgent|no specific|any.?time|doesn.?t matter|don.?t care/i.test(merged.delivery_date || "")
+    const isSpecificDate = !isFlexibleDate && has(merged.delivery_date)
     const dualQuote = (merged.delivery_lat && merged.delivery_lng)
       ? await getDualQuote(
           merged.customer_name || "",
@@ -1023,7 +1241,22 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         updates._priority_quarry_name = dualQuote.priority.quarryName
       }
       // Sarah presents the formatted dual quote exactly as the pricing engine wrote it
-      instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
+      if (isSpecificDate && dualQuote.priority) {
+        // Customer gave specific date — MUST present both options clearly
+        instruction = `Customer needs it by ${merged.delivery_date}. Present BOTH options clearly:
+
+Option 1 - Standard delivery: ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), 3-5 business days, sometimes sooner if we get a cancellation
+
+Option 2 - Guaranteed by ${merged.delivery_date}: ${fmt$(dualQuote.priority.totalCents)} (${fmt$(dualQuote.priority.perYardCents)}/yard), locked in delivery date, payment upfront to secure the date
+
+Ask which works better for them. Keep it natural, two short lines for the options then ask which one`
+      } else if (isFlexibleDate || !dualQuote.priority) {
+        // Flexible date or no priority available — just show standard
+        instruction = `Present the standard quote: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} comes to ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
+      } else {
+        // Has priority but date wasn't clearly specific — show both but lead with standard
+        instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
+      }
     } else {
       // Fallback: use inline zone pricing if getDualQuote fails
       const quote = calcQuote(merged.distance_miles || 0, merged.material_type || "fill_dirt", merged.yards_needed || MIN_YARDS)
@@ -1033,8 +1266,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         updates.state = "QUOTING"
         const firstName = (merged.customer_name || "").split(/\s+/)[0]
         instruction = `Give ${firstName} their quote: ${quote.billable} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||"their location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
-      } else {
+      } else if (merged.delivery_lat && merged.delivery_lng) {
+        // Had coords but zone calc failed — genuinely outside service area
         instruction = "Their delivery address is outside your service area (more than 60 miles from your yards in Dallas, Fort Worth or Denver). Let them know and ask if there's another address"
+        updates.state = "COLLECTING"
+      } else {
+        // No coords — geocode failed, address was saved but we can't price it
+        // Don't tell them "outside service area" — that's a lie. Escalate.
+        await notifyAdmin(`CANNOT QUOTE: ${conv.customer_name || phone} at "${merged.delivery_address}" — no coordinates. Geocode failed. Needs manual quote.`, `no_coords_${Date.now()}`)
+        instruction = "Tell the customer you're having a little trouble pulling up the exact pricing for their address. Someone from the team will text them with a quote shortly"
         updates.state = "COLLECTING"
       }
     }
@@ -1068,8 +1308,12 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         updates.total_price_cents = quote.totalCents
         updates.state = "QUOTING"
         instruction = `Give ${(qMerged.customer_name||"").split(/\s+/)[0]} their quote: ${quote.billable} yards of ${fmtMaterial(qMerged.material_type||"")} to ${qMerged.delivery_city||"your location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
-      } else {
+      } else if (qMerged.delivery_lat && qMerged.delivery_lng) {
         instruction = "Their delivery address is outside our service area. Let them know and ask if there's another address"
+        updates.state = "COLLECTING"
+      } else {
+        await notifyAdmin(`CANNOT QUOTE: ${qMerged.customer_name || phone} at "${qMerged.delivery_address}" — no coordinates. Needs manual quote.`, `no_coords2_${Date.now()}`)
+        instruction = "Tell the customer you're having a little trouble pulling up the exact pricing for their address. Someone from the team will text them with a quote shortly"
         updates.state = "COLLECTING"
       }
     }
@@ -1081,39 +1325,34 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     if (inlineYards && /yard|yd|cy/i.test(body)) {
       updates.yards_needed = inlineYards
       updates.state = "COLLECTING"
-      instruction = `Got it, ${inlineYards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+      instruction = `Got it, ${inlineYards} cubic yards. Now ask real quick, can an 18-wheeler get to their property or should we use standard dump trucks`
     } else if (inlineDims) {
-      const yards = cubicYards(inlineDims.l, inlineDims.w, inlineDims.d)
+      const d = depthToFeet(inlineDims.d, body)
+      const yards = cubicYards(inlineDims.l, inlineDims.w, d)
       updates.yards_needed = yards
       updates.dimensions_raw = body.trim()
       updates.state = "COLLECTING"
-      instruction = `That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+      instruction = `That comes out to about ${yards} cubic yards. Now ask real quick, can an 18-wheeler get to their property or should we use standard dump trucks`
     } else {
       // Check for partial dimensions or depth-only answers
       const nums = body.match(/(\d+\.?\d*)/g)
       if (nums && nums.length >= 3) {
-        const yards = cubicYards(parseFloat(nums[0]), parseFloat(nums[1]), parseFloat(nums[2]))
+        const d = depthToFeet(parseFloat(nums[2]), body)
+        const yards = cubicYards(parseFloat(nums[0]), parseFloat(nums[1]), d)
         updates.yards_needed = yards
         updates.dimensions_raw = body.trim()
         updates.state = "COLLECTING"
-        instruction = `That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+        instruction = `That comes out to about ${yards} cubic yards. Now ask real quick, can an 18-wheeler get to their property or should we use standard dump trucks`
       } else if (nums && nums.length === 1 && conv.dimensions_raw) {
         // They gave depth after we asked — combine with stored L x W
         const prior = conv.dimensions_raw.match(/(\d+\.?\d*)/g)
         if (prior && prior.length >= 2) {
-          let depth = parseFloat(nums[0])
-          // Convert to feet: explicit "inches" or "in" → divide by 12
-          // Explicit "feet" or "ft" → use as-is
-          // No unit: if <= 12 assume inches (nobody does a 6-foot-deep slab), if > 12 assume inches too
-          const saidFeet = /\b(feet|ft|foot)\b/i.test(body)
-          const saidInches = /\b(inch|inches|in)\b|"/i.test(body)
-          if (saidFeet) { /* already in feet */ }
-          else if (saidInches || depth <= 12) depth = depth / 12
+          const depth = depthToFeet(parseFloat(nums[0]), body)
           const yards = cubicYards(parseFloat(prior[0]), parseFloat(prior[1]), depth)
           updates.yards_needed = yards
           updates.dimensions_raw = `${prior[0]} x ${prior[1]} x ${nums[0]}`
           updates.state = "COLLECTING"
-          instruction = `That comes out to about ${yards} cubic yards. Now ask if their property has access for dump trucks and 18 wheelers, or just dump trucks`
+          instruction = `That comes out to about ${yards} cubic yards. Now ask real quick, can an 18-wheeler get to their property or should we use standard dump trucks`
         } else {
           instruction = "Need the depth in feet or inches. For reference, 4-6 inches is typical for a slab, 2-4 inches for leveling"
         }
@@ -1124,8 +1363,12 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       } else if (nums && nums.length === 1) {
         // Single number — could be depth if we already have L x W
         instruction = "Need all three measurements, length width and depth in feet. Something like 40 x 40 x 6 inches"
+      } else if (/don.?t know|no idea|not sure|no clue|can.?t measure|estimate|just guess|rough|ballpark/i.test(lower)) {
+        // Customer can't provide dimensions — offer common estimates and escape back to COLLECTING
+        updates.state = "COLLECTING"
+        instruction = "Customer can't give exact dimensions. Help them estimate: a typical backyard leveling is 10-30 yards, a driveway base is 10-20 yards, a pool fill is 150-300 yards. Ask roughly how big the area is and suggest a number. If they pick one, go with it"
       } else {
-        instruction = "Ask for the dimensions, length width and depth in feet. You'll calculate the cubic yards for them"
+        instruction = "Ask for the dimensions, length width and depth in feet. You'll calculate the cubic yards for them. If they're not sure, they can just give a rough estimate of the area size"
       }
     }
   }

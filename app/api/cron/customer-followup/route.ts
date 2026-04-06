@@ -20,6 +20,7 @@ export async function GET(request: NextRequest) {
     .select("phone, customer_name")
     .eq("state", "QUOTING")
     .lt("updated_at", yesterday)
+    .neq("opted_out", true)
   // Auto-transition stale quotes to FOLLOW_UP
   for (const q of staleQuotes || []) {
     await sb.from("customer_conversations").update({
@@ -35,6 +36,7 @@ export async function GET(request: NextRequest) {
     .eq("state", "FOLLOW_UP")
     .lt("follow_up_at", now)
     .lt("follow_up_count", 3)
+    .neq("opted_out", true)
 
   if (!followUps?.length) return NextResponse.json({ checked: 0 })
 

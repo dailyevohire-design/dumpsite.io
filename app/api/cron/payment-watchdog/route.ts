@@ -27,6 +27,7 @@ export async function GET(request: NextRequest) {
   const { data: unpaid } = await sb.from("customer_conversations")
     .select("phone, customer_name, total_price_cents, payment_method, updated_at")
     .eq("state", "AWAITING_PAYMENT")
+    .neq("opted_out", true)
 
   for (const c of unpaid || []) {
     const hoursWaiting = (now - new Date(c.updated_at).getTime()) / (1000 * 60 * 60)
