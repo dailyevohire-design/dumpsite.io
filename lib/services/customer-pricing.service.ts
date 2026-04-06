@@ -121,7 +121,7 @@ export function calcStandardQuote(
   }
 
   // Get zone
-  const zone = ZONES.find(z => nearestMiles >= z.min && nearestMiles < z.max)
+  const zone = ZONES.find(z => nearestMiles >= z.min && (nearestMiles < z.max || (z.zone === "C" && nearestMiles <= z.max)))
   if (!zone) return null // Outside service area
 
   const surcharge = SURCHARGE_CENTS[materialType] || 0

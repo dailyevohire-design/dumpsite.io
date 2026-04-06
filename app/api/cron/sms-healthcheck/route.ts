@@ -138,6 +138,42 @@ export async function GET(req: NextRequest) {
     failures.push(`WEBHOOK ROUTE THREW: ${(e as any)?.message}`)
   }
 
+  // ── CHECK 7: Recover unsent messages (pending_send older than 30 seconds) ──
+  let recovered = 0
+  try {
+    const thirtySecAgo = new Date(Date.now() - 30000).toISOString()
+    const { data: pending } = await sb
+      .from("customer_sms_logs")
+      .select("phone, body, message_sid, created_at")
+      .eq("direction", "pending_send")
+      .lt("created_at", thirtySecAgo)
+      .limit(10)
+    if (pending && pending.length > 0) {
+      const customerFrom = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
+      const client = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+      for (const msg of pending) {
+        try {
+          const toE164 = `+1${msg.phone}`
+          await client.messages.create({ body: msg.body, from: customerFrom, to: toE164 })
+          // Mark as recovered — delete the pending marker
+          await sb.from("customer_sms_logs").delete().eq("message_sid", msg.message_sid)
+          // Log the actual send
+          await sb.from("customer_sms_logs").insert({
+            phone: msg.phone, body: msg.body, direction: "outbound",
+            message_sid: `recovered_${msg.message_sid}`,
+          })
+          recovered++
+          console.log(`[HEALTHCHECK] Recovered unsent message to ${msg.phone}`)
+        } catch (sendErr) {
+          console.error(`[HEALTHCHECK] Recovery send FAILED for ${msg.phone}:`, sendErr)
+          failures.push(`RECOVERY SEND FAILED: ${msg.phone}`)
+        }
+      }
+    }
+  } catch (e) {
+    failures.push(`RECOVERY CHECK THREW: ${(e as any)?.message}`)
+  }
+
   // ── REPORT ──
   if (failures.length > 0) {
     const msg = `SMS SYSTEM HEALTHCHECK FAILED:\n${failures.map((f, i) => `${i + 1}. ${f}`).join("\n")}\n\nCustomer SMS may not be working. Check immediately.`
@@ -168,6 +204,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ status: "FAILED", failures }, { status: 500 })
   }
 
-  console.log("[HEALTHCHECK] All 6 checks passed")
-  return NextResponse.json({ status: "OK", checks: 6, timestamp: new Date().toISOString() })
+  console.log(`[HEALTHCHECK] All checks passed${recovered > 0 ? `, recovered ${recovered} unsent messages` : ""}`)
+  return NextResponse.json({ status: "OK", checks: 7, recovered, timestamp: new Date().toISOString() })
 }

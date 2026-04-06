@@ -32,9 +32,15 @@ async function alertAdmin(msg: string) {
   const adminFrom = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
   if (!adminFrom) return
   const client = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
-  try { await client.messages.create({ body: msg, from: adminFrom, to: `+1${ADMIN_PHONE}` }) } catch {}
+  try { await client.messages.create({ body: msg, from: adminFrom, to: `+1${ADMIN_PHONE}` }) } catch (e) {
+    console.error("[alertAdmin] FAILED to alert primary admin:", (e as any)?.message)
+    // Log to DB as last resort so we have a record
+    try { await createAdminSupabase().from("customer_sms_logs").insert({ phone: "system", body: `ADMIN ALERT FAILED: ${msg.slice(0, 300)}`, direction: "error", message_sid: `alert_fail_${Date.now()}` }) } catch {}
+  }
   if (ADMIN_PHONE_2) {
-    try { await client.messages.create({ body: msg, from: adminFrom, to: `+1${ADMIN_PHONE_2}` }) } catch {}
+    try { await client.messages.create({ body: msg, from: adminFrom, to: `+1${ADMIN_PHONE_2}` }) } catch (e) {
+      console.error("[alertAdmin] FAILED to alert secondary admin:", (e as any)?.message)
+    }
   }
 }
 
@@ -95,7 +101,8 @@ export async function POST(req: NextRequest) {
 
   // Validate Twilio signature in production
   const twilioSignature = req.headers.get("x-twilio-signature") || ""
-  const webhookUrl = `${process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"}/api/sms/customer-webhook`
+  // Use the configured webhook URL (must match what Twilio has configured, NOT the request URL which may differ behind proxies)
+  const webhookUrl = process.env.TWILIO_CUSTOMER_WEBHOOK_URL || `${process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"}/api/sms/customer-webhook`
   const params: Record<string, string> = {}
   formData.forEach((value, key) => { params[key] = value })
 
@@ -108,36 +115,65 @@ export async function POST(req: NextRequest) {
     const reply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl })
     if (!reply) return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })
 
-    // Human-like delay, then send with retry + admin alert on failure
     const phone = from.replace(/\D/g, "").replace(/^1/, "")
+
+    // Mark the reply as PENDING in DB before entering after() — this is the crash recovery marker.
+    // If after() dies, the healthcheck/recovery cron can find unsent replies by looking for
+    // "pending_send" direction entries with no matching "outbound" entry.
+    const pendingSid = `pending_${messageSid}`
+    try {
+      await createAdminSupabase().from("customer_sms_logs").insert({
+        phone, body: reply, direction: "pending_send", message_sid: pendingSid,
+      })
+    } catch {}
+
+    // Human-like delay, then send with retry + admin alert on failure
     const delay = 5000
 
     after(async () => {
-      await new Promise(r => setTimeout(r, delay))
-      const sent = await sendViaTwilioAPI(phone, reply)
-      if (!sent) {
-        // Retry once after 3 seconds
-        console.error(`[customer SMS] FIRST SEND FAILED to ${phone}, retrying in 3s...`)
-        await new Promise(r => setTimeout(r, 3000))
-        const retrySent = await sendViaTwilioAPI(phone, reply)
-        if (!retrySent) {
-          // Both attempts failed — alert admin immediately
-          console.error(`[customer SMS] BOTH SENDS FAILED to ${phone}`)
-          await alertAdmin(`SMS SEND FAILED TWICE to ${phone}. Customer got NO reply. Their message: "${body.slice(0, 100)}". Our reply was: "${reply.slice(0, 100)}"`)
-          // Log the failure so stale-orders cron can also catch it
-          try {
-            await createAdminSupabase().from("customer_sms_logs").insert({
-              phone, body: `SEND FAILED TWICE — reply lost: ${reply.slice(0, 200)}`,
-              direction: "error", message_sid: `send_fail_${messageSid}`,
-            })
-          } catch {}
+      try {
+        await new Promise(r => setTimeout(r, delay))
+        const sent = await sendViaTwilioAPI(phone, reply)
+        if (!sent) {
+          // Retry once after 3 seconds
+          console.error(`[customer SMS] FIRST SEND FAILED to ${phone}, retrying in 3s...`)
+          await new Promise(r => setTimeout(r, 3000))
+          const retrySent = await sendViaTwilioAPI(phone, reply)
+          if (!retrySent) {
+            // Both attempts failed — alert admin immediately
+            console.error(`[customer SMS] BOTH SENDS FAILED to ${phone}`)
+            await alertAdmin(`SMS SEND FAILED TWICE to ${phone}. Customer got NO reply. Their message: "${body.slice(0, 100)}". Our reply was: "${reply.slice(0, 100)}"`)
+            try {
+              await createAdminSupabase().from("customer_sms_logs").insert({
+                phone, body: `SEND FAILED TWICE — reply lost: ${reply.slice(0, 200)}`,
+                direction: "error", message_sid: `send_fail_${messageSid}`,
+              })
+            } catch {}
+            return // Leave pending_send marker for recovery cron
+          }
         }
+        // Success — remove the pending_send marker
+        try {
+          await createAdminSupabase().from("customer_sms_logs").delete().eq("message_sid", pendingSid)
+        } catch {}
+      } catch (afterErr) {
+        // after() itself crashed — log it, leave pending_send for recovery
+        console.error("[customer SMS] after() CRASHED:", afterErr)
+        try {
+          await createAdminSupabase().from("customer_sms_logs").insert({
+            phone, body: `AFTER CRASHED — reply may be lost: ${reply.slice(0, 200)}`,
+            direction: "error", message_sid: `after_crash_${messageSid}`,
+          })
+        } catch {}
       }
     })
 
     return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })
   } catch (err) {
     console.error("[Customer webhook error]", err)
+    // Log the fallback so conversation history is accurate
+    const fallbackPhone = from.replace(/\D/g, "").replace(/^1/, "")
+    try { await createAdminSupabase().from("customer_sms_logs").insert({ phone: fallbackPhone, body: "Give me just a moment", direction: "outbound", message_sid: `fallback_${messageSid}` }) } catch {}
     // Fallback: return TwiML directly so customer at least gets something
     return new Response(
       '<Response><Message>Give me just a moment</Message></Response>',

@@ -7,7 +7,7 @@ import twilio from "twilio"
 
 const anthropic = new Anthropic()
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
-const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER!
+const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const LARGE_ORDER = 500
@@ -52,11 +52,20 @@ function calcQuote(miles: number, material: string, yards: number) {
 
 function cubicYards(l: number, w: number, d: number): number { return Math.ceil((l * w * d) / 27) }
 
-// Convert depth to feet — handles "6 inches", "6 in", "6" (assumes inches if <= 12)
+// Convert depth to feet — handles explicit units and bare numbers
+// Context: depths > 3ft are extremely rare in dirt delivery (pools are wide, not deep)
+// Common depths: 4in, 6in, 1ft, 2ft, 3ft — bare "6" is ambiguous but likely inches
 function depthToFeet(value: number, text: string): number {
+  // Explicit feet → use as-is
   if (/\b(feet|ft|foot)\b/i.test(text)) return value
-  if (/\b(inch|inches|in)\b|"/i.test(text) || value <= 12) return value / 12
-  return value / 12 // > 12 with no unit still likely inches
+  // Explicit inches → convert
+  if (/\b(inch|inches|in)\b|"/i.test(text)) return value / 12
+  // No unit specified — heuristic:
+  // 1-3 is ambiguous (could be feet or inches) — assume FEET (1-3ft depths are common for leveling/grading)
+  // 4-12 assume inches (4-12 inches is typical slab/leveling depth)
+  // >12 assume inches (nobody does a 13-foot-deep fill)
+  if (value >= 1 && value <= 3) return value // assume feet
+  return value / 12 // assume inches
 }
 function fmt$(cents: number): string { return "$" + (cents/100).toLocaleString("en-US", { maximumFractionDigits: 0 }) }
 function fmtMaterial(k: string): string { return ({ fill_dirt:"fill dirt", screened_topsoil:"screened topsoil", structural_fill:"structural fill", sand:"sand" })[k] || k.replace(/_/g," ") }
@@ -103,18 +112,25 @@ async function geocode(address: string): Promise<{ lat: number; lng: number; cit
 // CODE-BASED EXTRACTION — AI never sets these fields
 // ─────────────────────────────────────────────────────────
 function extractYards(text: string, allowBareNumber: boolean = true): number | null {
-  // First try explicit yards mention
-  const explicit = text.match(/(\d+)\s*(cubic\s*)?(yards?|yds?|cy)/i)
+  // First try explicit yards mention: "20 yards", "100 cy", "50 cubic yards"
+  const explicit = text.match(/(\d+)\s*(cubic\s*)?(yards?|yds?|cy)\b/i)
   if (explicit) return parseInt(explicit[1])
+  // "about/around/roughly/maybe/probably/like N" — common casual patterns
+  const approx = text.match(/\b(?:about|around|roughly|maybe|probably|like|need|want|thinking)\s+(\d+)\b/i)
+  if (approx && allowBareNumber) return parseInt(approx[1])
   // Bare number (e.g. "100") — only when we're expecting yards
   if (allowBareNumber) {
-    const bare = text.match(/^(\d+)$/)
+    const bare = text.match(/^\s*(\d+)\s*$/)
     if (bare) return parseInt(bare[1])
   }
   return null
 }
 
 function extractDimensions(text: string): { l: number; w: number; d: number } | null {
+  // Require dimension-like patterns (x/by separators or unit mentions), not just 3 random numbers
+  // This prevents "100 yards at 123 Main St apt 4" from being treated as dimensions
+  const hasDimSeparator = /\d+\s*[x×]\s*\d+/i.test(text) || /\d+\s*by\s*\d+/i.test(text) || /\d+\s*ft?\s*[x×]\s*\d+/i.test(text)
+  if (!hasDimSeparator) return null
   const nums = text.match(/(\d+\.?\d*)/g)
   if (nums && nums.length >= 3) return { l: parseFloat(nums[0]), w: parseFloat(nums[1]), d: parseFloat(nums[2]) }
   return null
@@ -141,7 +157,16 @@ function extractMaterialFromPurpose(purpose: string): { key: string; name: strin
 }
 
 function looksLikeAddress(text: string): boolean {
-  return /\d+\s+\w+.*(st|ave|blvd|dr|rd|ln|ct|way|pkwy|hwy|street|avenue|drive|road|lane|circle|trail|place|expy)/i.test(text) || /\d{5}/.test(text)
+  // Require street number + street name + street suffix as a WHOLE WORD (not embedded in "driveway", "topsoil", etc.)
+  const streetPattern = /\d+\s+\w+.*\b(st|ave|blvd|dr|rd|ln|ct|pkwy|hwy|street|avenue|drive|road|lane|circle|trail|place|expy|way)\b/i.test(text)
+  // "way" embedded in "driveway" or "freeway" is NOT an address — require "way" at end or followed by comma/space+word
+  if (streetPattern && /\bway\b/i.test(text) && !/\d+\s+\w+.*\bway\b\s*($|,|\d)/i.test(text)) {
+    // Check if "way" is actually part of a street name vs "driveway"
+    if (/driveway|freeway|hallway|pathway|gateway|doorway|runway|subway|highway/i.test(text)) return false
+  }
+  // Exclude common false positives: messages about yards/dirt that happen to contain numbers
+  if (/\b(yards?|yds?|dirt|fill|topsoil|sand|gravel|material|delivery|truck|dump|load)\b/i.test(text) && !streetPattern) return false
+  return streetPattern || /^\d{5}(-\d{4})?$/.test(text.trim())
 }
 
 function looksLikeFollowUp(text: string): boolean {
@@ -158,18 +183,35 @@ function looksLikeFollowUp(text: string): boolean {
 // ─────────────────────────────────────────────────────────
 function normalizePhone(raw: string): string { return raw.replace(/\D/g, "").replace(/^1/, "") }
 
-async function getConv(phone: string): Promise<any> {
+async function getConv(phone: string): Promise<{ conv: any; readAt: string | undefined }> {
   const sb = createAdminSupabase()
   const { data, error } = await sb.from("customer_conversations").select("*").eq("phone", phone).maybeSingle()
   if (error) {
     console.error("[CRITICAL] getConv FAILED:", error.message, "| phone:", phone)
     await notifyAdmin(`GETCONV FAILED: ${error.message} | Phone: ${phone}. Customer may be treated as NEW incorrectly.`, `getconv_fail_${Date.now()}`)
   }
-  return data || { state: "NEW" }
+  return { conv: data || { state: "NEW" }, readAt: data?.updated_at }
 }
 
-async function saveConv(phone: string, u: Record<string, any>): Promise<void> {
+async function saveConv(phone: string, u: Record<string, any>, readAt?: string): Promise<void> {
   const sb = createAdminSupabase()
+
+  // Race condition guard: if the row was modified after we read it, another request
+  // wrote in between. COALESCE handles most cases (null=keep existing), but log a
+  // warning so we can detect conflicting state changes.
+  if (readAt) {
+    const { data: current } = await sb.from("customer_conversations").select("updated_at, state").eq("phone", phone).maybeSingle()
+    if (current && current.updated_at && current.updated_at > readAt) {
+      console.warn(`[RACE] saveConv for ${phone}: row modified since read (read at ${readAt}, now ${current.updated_at}, DB state: ${current.state}, our state: ${u.state || "unchanged"}). COALESCE will merge safely but state may conflict.`)
+      // If the DB already has a more advanced state, don't regress it
+      const STATE_ORDER: Record<string, number> = { NEW: 0, COLLECTING: 1, ASKING_DIMENSIONS: 2, QUOTING: 3, ORDER_PLACED: 4, AWAITING_PAYMENT: 5, AWAITING_PRIORITY_PAYMENT: 5, DELIVERED: 6, CLOSED: 7, FOLLOW_UP: 3 }
+      if (u.state && current.state && (STATE_ORDER[current.state] || 0) > (STATE_ORDER[u.state] || 0)) {
+        console.warn(`[RACE] Preventing state regression: DB has ${current.state}, we wanted ${u.state}. Keeping DB state.`)
+        u.state = null // Don't overwrite — let COALESCE keep the existing state
+      }
+    }
+  }
+
   const { error } = await sb.rpc("upsert_customer_conversation", {
     p_phone: phone, p_state: u.state ?? null,
     p_customer_name: u.customer_name ?? null, p_customer_email: u.customer_email ?? null,
@@ -218,7 +260,7 @@ async function getHistory(phone: string) {
   return data.reverse().map((m: any) => ({ role: (m.direction === "inbound" ? "user" : "assistant") as "user"|"assistant", content: (m.body || "").trim() })).filter(m => m.content.length > 0)
 }
 
-async function logMsg(phone: string, body: string, dir: "inbound"|"outbound", sid: string) {
+async function logMsg(phone: string, body: string, dir: "inbound"|"outbound"|"error", sid: string) {
   try {
     const { error } = await createAdminSupabase().from("customer_sms_logs").insert({ phone, body, direction: dir, message_sid: sid })
     if (error) console.error("[logMsg] insert failed:", error.message, "| phone:", phone, "| dir:", dir)
@@ -240,11 +282,17 @@ async function notifyAdmin(msg: string, sid: string) {
   try {
     await twilioClient.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_PHONE}` })
     await logMsg(ADMIN_PHONE, msg, "outbound", `adm_${sid}`)
-  } catch {}
+  } catch (e) {
+    console.error("[notifyAdmin] FAILED to send to primary:", (e as any)?.message)
+    // DB fallback — at least log it somewhere
+    try { await createAdminSupabase().from("customer_sms_logs").insert({ phone: "system", body: `ADMIN ALERT UNSENT: ${msg.slice(0, 400)}`, direction: "error", message_sid: `admin_fail_${sid}` }) } catch {}
+  }
   if (ADMIN_PHONE_2) {
     try {
       await twilioClient.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_PHONE_2}` })
-    } catch {}
+    } catch (e) {
+      console.error("[notifyAdmin] FAILED to send to secondary:", (e as any)?.message)
+    }
   }
 }
 
@@ -503,8 +551,8 @@ function validate(r: string, lastOutbound: string): string {
 // ─────────────────────────────────────────────────────────
 export async function handleCustomerSMS(sms: { from: string; body: string; messageSid: string; numMedia: number; mediaUrl?: string }): Promise<string> {
   const phone = normalizePhone(sms.from)
-  const body = (sms.body || "").trim()
-  const lower = body.toLowerCase().trim()
+  let body = (sms.body || "").trim()
+  let lower = body.toLowerCase().trim()
   const sid = sms.messageSid
 
   try {
@@ -512,36 +560,62 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (await isDupe(sid)) return ""
   await logMsg(phone, body || (sms.numMedia > 0 ? "[photo]" : "[empty]"), "inbound", sid)
 
-  // ── RAPID-FIRE DEBOUNCE ──
-  // If customer sent multiple messages in quick succession WITHOUT Sarah replying
-  // between them, this is a burst. Skip reply for the later messages — the first
-  // message's delayed reply (5s) will handle the conversation.
+  // ── RAPID-FIRE CONCATENATION ──
+  // If customer sent multiple messages in quick succession WITHOUT Sarah replying,
+  // concatenate them into one message so Sarah sees the full context.
+  // The FIRST message in a burst gets delayed (5s webhook delay). Later messages
+  // in the burst are the ones that arrive here while the first is still pending.
+  // Strategy: if this is a later message in a burst, skip it — but STORE the body
+  // so the first message's handler can fetch and concatenate all burst messages.
   const sb_debounce = createAdminSupabase()
-  const eightSecAgo = new Date(Date.now() - 8000).toISOString()
+  const tenSecAgo = new Date(Date.now() - 10000).toISOString()
   const { data: recentMsgs } = await sb_debounce
     .from("customer_sms_logs")
-    .select("direction, created_at")
+    .select("direction, body, created_at")
     .eq("phone", phone)
     .in("direction", ["inbound", "outbound"])
-    .gt("created_at", eightSecAgo)
+    .gt("created_at", tenSecAgo)
     .order("created_at", { ascending: false })
-    .limit(5)
+    .limit(8)
   if (recentMsgs && recentMsgs.length >= 2) {
-    // Count inbound messages that came BEFORE any outbound (Sarah reply) in the window
     let consecutiveInbound = 0
     for (const m of recentMsgs) {
       if (m.direction === "inbound") consecutiveInbound++
-      else break // Hit an outbound — everything before this is a new conversation turn
+      else break
     }
     if (consecutiveInbound >= 2) {
-      console.log(`[customer SMS] Rapid-fire detected for ${phone} (${consecutiveInbound} msgs before reply), skipping`)
+      // This is a later message in a burst — it's already logged above.
+      // The first message's handler will pick it up via getRecentInbound below.
+      console.log(`[customer SMS] Burst message ${consecutiveInbound} from ${phone}, stored for concatenation`)
       return ""
     }
   }
 
+  // If this is the FIRST message (or no burst), check if there are recent
+  // inbound messages that were part of a burst we need to concatenate
+  let concatenatedBody = body
+  if (recentMsgs) {
+    const burstBodies: string[] = []
+    for (const m of recentMsgs) {
+      if (m.direction === "inbound" && m.body && m.body !== body && m.body !== "[photo]" && m.body !== "[empty]") {
+        burstBodies.push(m.body)
+      } else if (m.direction === "outbound") break
+    }
+    if (burstBodies.length > 0) {
+      // burstBodies is newest-first, reverse to get chronological order
+      // Current body is the newest, burst bodies are older messages
+      concatenatedBody = [...burstBodies.reverse(), body].join(" ")
+      console.log(`[customer SMS] Concatenated ${burstBodies.length + 1} burst messages for ${phone}: "${concatenatedBody.slice(0, 100)}"`)
+    }
+  }
+
+  // Apply concatenated body for all processing below
+  body = concatenatedBody
+  lower = body.toLowerCase().trim()
+
   // Empty body with photo — acknowledge it (but check opt-out first)
   if (sms.numMedia > 0 && !body) {
-    const photoConv = await getConv(phone)
+    const { conv: photoConv } = await getConv(phone)
     if (photoConv.opted_out) return ""
     const s = await callSarah("[Customer sent a photo]", photoConv, await getHistory(phone), "Customer sent a photo. Acknowledge it naturally, like 'thanks for the pic' or 'got the photo'. Then continue with whatever question you need to ask next based on what info is still missing")
     const r = validate(s.response, "")
@@ -560,7 +634,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     await logMsg(phone, r, "outbound", `start_${sid}`); return r
   }
 
-  const conv = await getConv(phone)
+  const { conv, readAt } = await getConv(phone)
   if (conv.opted_out) return ""
   const state = conv.state || "NEW"
   const history = await getHistory(phone)
@@ -606,8 +680,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     if (monthDate) return `${monthDate[1]} ${monthDate[2]}`
     return null
   })()
-  const isYes = /^(yes|yeah|yep|sure|ok|okay|lets do it|sounds good|perfect|go ahead|book it|schedule|please|absolutely|definitely|si|dale|do it|im down|im in|ready|set it up)$/i.test(lower)
-  const isNo = /^(no|nah|nope|too much|expensive|pass|never mind|cancel|not now|not interested|no thanks|no thank you|nah im good|nah i'm good|too expensive|way too much|too high|cant afford|can't afford|out of my budget|too pricey|hard pass|no way)$/i.test(lower)
+  // Flexible yes/no — match at start or as the whole message. Allows trailing words like "yes please do it"
+  const isYes = /^(yes|yeah|yep|sure|ok|okay|si|dale|absolutely|definitely|perfect|ready)\b/i.test(lower) || /\b(lets do it|let's do it|sounds good|go ahead|book it|schedule it|set it up|do it|im down|i'm down|im in|i'm in|lets go|let's go|sure thing|sounds great|sounds perfect|that works|works for me|go for it|lock it in)\b/i.test(lower)
+  const isNo = /^(no|nah|nope|pass|never mind|not now|not interested)\b/i.test(lower) || /\b(too much|too expensive|way too much|too high|cant afford|can't afford|out of my budget|too pricey|hard pass|no way|no thanks|no thank you|nah im good|nah i'm good|not right now|maybe later|ill pass|i'll pass)\b/i.test(lower)
   // Must be an actual cancellation REQUEST, not a question about cancellation policy
   const isCancel = /\b(i want to cancel|cancel (my|the|this) (order|delivery)|please cancel|need to cancel|cancel it|refund|money back|want my money)\b/i.test(lower)
   const isStatus = /\b(status|tracking|eta|update)\b|where.*(my|is my|the).*(order|delivery|driver|truck)|when.*(my|is my|the).*(order|delivery|driver|truck|arriving|coming|getting here)|how long.*(until|till|before|for)|any.*(update|news|word)|what.*(happening|going on).*order|check.*(on|my).*(order|delivery)/i.test(lower)
@@ -617,7 +692,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // Determine what info is missing
   const has = (v: any) => v !== null && v !== undefined && v !== ""
   // Detect correction language — customer wants to change previously given info
-  const isCorrection = /\b(actually|wrong|change it|correction|not that|meant to say|different|instead|I meant|should be|typo|oops|mistake|scratch that|wait no|no wait|let me fix|hold on|my bad)\b/i.test(lower)
+  // "actually" alone is too common in casual speech ("I actually need fill dirt") — require it with correction context
+  const isCorrection = /\b(wrong|change it|correction|not that|meant to say|instead of|I meant|should be|typo|oops|mistake|scratch that|wait no|no wait|let me fix|hold on|my bad)\b/i.test(lower) || (/\bactually\b/i.test(lower) && /\b(it's|its|should|is|was|meant|wrong|not|change|different)\b/i.test(lower))
   const needName = !has(conv.customer_name) || (isCorrection && /\b(name|call me|im actually|i'm actually)\b/i.test(lower))
   const needAddress = !has(conv.delivery_address) || (isCorrection && isAddress)
   const needPurpose = !has(conv.material_purpose)
@@ -638,7 +714,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     updates.state = "CLOSED"
     const s = await callSarah(body, conv, history, "Customer wants to cancel. Say you'll have someone from the team reach out to help with that. Be empathetic but dont push")
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -667,7 +743,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     const s = await callSarah(body, conv, history, statusInstruction)
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -675,7 +751,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (isStatus && !hasOrder) {
     const s = await callSarah(body, conv, history, "Customer asking about an order but they don't have one yet. We're not currently hauling in their area but as soon as we are they'll be the first to know. If they want to place an order, help them get started")
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -688,7 +764,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const s = await callSarah(body, conv, history, instruction)
     updates.state = hasQuote ? "QUOTING" : needAddress ? "COLLECTING" : "COLLECTING"
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -700,7 +776,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const s = await callSarah(body, conv, history, `Payment confirmed. Thank them and let them know we appreciate their business. If they ever need more material, just text us`)
       reply = validate(s.response, lastOut)
       await notifyAdmin(`PAYMENT CONFIRMED: ${conv.customer_name} | ${fmt$(conv.total_price_cents||0)} | ${conv.payment_method}`, sid)
-      await saveConv(phone, { ...conv, ...updates })
+      await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/zelle/i.test(lower)) {
@@ -708,7 +784,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const total = fmt$(conv.total_price_cents || 0)
       const s = await callSarah(body, conv, history, `They chose Zelle. Tell them to send ${total} to support@filldirtnearme.net via Zelle. Once sent, text you back`)
       reply = validate(s.response, lastOut)
-      await saveConv(phone, { ...conv, ...updates })
+      await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/venmo/i.test(lower)) {
@@ -716,7 +792,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const total = fmt$(conv.total_price_cents || 0)
       const s = await callSarah(body, conv, history, `They chose Venmo. Tell them to send ${total} to @FillDirtNearMe on Venmo. Once sent, text you back`)
       reply = validate(s.response, lastOut)
-      await saveConv(phone, { ...conv, ...updates })
+      await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/invoice|card|credit|debit|online/i.test(lower)) {
@@ -732,19 +808,19 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         const s = await callSarah(body, conv, history, `They want to pay by card. There's a 3.5% processing fee. Ask for their email so you can send the invoice`)
         reply = validate(s.response, lastOut)
       }
-      await saveConv(phone, { ...conv, ...updates })
+      await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/cash|check|cheque/i.test(lower)) {
       const s = await callSarah(body, conv, history, "They want cash or check. Explain we cant accept those, our drivers are independently insured contractors so for liability reasons we can only do Venmo, Zelle, or online invoice (card with 3.5% fee). Ask which works")
       reply = validate(s.response, lastOut)
-      await saveConv(phone, { ...conv, ...updates })
+      await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     // General question while waiting for payment
     const s = await callSarah(body, conv, history, `Delivery is complete, waiting on payment of ${fmt$(conv.total_price_cents||0)}. Answer their question, then remind them we accept Venmo, Zelle, or online invoice (card with 3.5% fee). Which works for them`)
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -808,7 +884,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const s = await callSarah(body, conv, history, `Customer has a priority order pending payment of ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")} guaranteed by ${conv.priority_guaranteed_date}. Answer their question, then remind them to complete payment to lock in their delivery date`)
       reply = validate(s.response, lastOut)
     }
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -874,7 +950,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     const s = await callSarah(body, conv, history, `${orderContext} Answer their question helpfully. If they want to cancel, say you'll have someone reach out`)
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -901,7 +977,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     const s = await callSarah(body, conv, history, "This customer's delivery has been completed and payment was received. Answer their question. If they need more material, tell them to just let you know and you'll get them set up. If they have an issue with the delivery, say you'll have someone from the team reach out")
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -971,7 +1047,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           // Dispatch failed — DO NOT tell customer it's confirmed
           updates.state = "QUOTING" // Stay in QUOTING so they can retry
           await notifyAdmin(`DISPATCH FAILED for ${conv.customer_name} (${phone}) | ${conv.yards_needed}yds to ${conv.delivery_city} | Customer was NOT told order is confirmed. Needs manual dispatch.`, sid)
-          const s = await callSarah(body, conv, history, "Tell the customer you're getting their delivery set up and someone from the team will text them shortly to confirm the details. Something on your end needs a quick check")
+          const s = await callSarah(body, conv, history, "Tell the customer you're working on getting their delivery set up. Ask them to give you just a few minutes while you confirm the details on your end")
           reply = validate(s.response, lastOut)
         }
       }
@@ -992,7 +1068,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const s = await callSarah(body, conv, history, `Customer was quoted ${fmt$(conv.total_price_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")}. They said something other than yes/no. Answer their question or concern, then ask if they'd like to move forward`)
       reply = validate(s.response, lastOut)
     }
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -1009,7 +1085,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const s = await callSarah(body, conv, history, "Need their email to send the invoice. They didn't give a valid email. Ask again naturally")
       reply = validate(s.response, lastOut)
     }
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -1052,7 +1128,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     const s = await callSarah(body, merged, history, newInstruction)
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates })
+    await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -1070,7 +1146,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     // Filter common English words BUT allow real names that overlap (will, art, grace, may, mark, etc.)
     const COMMON_NON_NAMES = /^(the|a|an|is|it|at|in|on|to|so|or|do|go|and|but|for|not|just|also|too|very|all|any|some|my|our|this|that|its|get|got|can|has|had|was|are|been|have|from|with|they|them|what|when|how|who|which|where|here|there|then|than|more|much|many|most|other|only|still|even|well|back|over|such|after|into|made|like|long|out|way|day|each|new|now|old|see|let|say|own|why|try)$/i
     const hasLetters = /[a-zA-ZÀ-ÿ]/.test(trimmed) // Must contain at least one letter (blocks emoji-only)
-    const isLikelyName = hasLetters && words.length <= 3 && words[0].length >= 2 && !COMMON_NON_NAMES.test(words[0]) && !/\b(dirt|fill|sand|topsoil|gravel|delivery|truck|dump|yard|slab|pool|concrete|driveway|garden|level|grade|material|project|quote|price)\b/i.test(trimmed)
+    const isLikelyName = hasLetters && words.length <= 3 && words[0].length >= 2 && !COMMON_NON_NAMES.test(words[0]) && !/\b(dirt|fill|sand|topsoil|gravel|delivery|truck|dump|yard|slab|pool|concrete|driveway|garden|level|grade|material|project|quote|price|checking|update|status|estimate|question|interested|waiting|nothing|something|everything|anything|hello|thanks|cool|great|awesome|sweet|nice|fine|good|bad|maybe|probably|already|next|last|first|just|another)\b/i.test(trimmed)
     if (isLikelyName) {
       updates.customer_name = trimmed
     }
@@ -1319,8 +1395,8 @@ Ask which works better for them. Keep it natural, two short lines for the option
     }
   }
 
-  // Special state: waiting for dimensions
-  if (state === "ASKING_DIMENSIONS" || updates.state === "ASKING_DIMENSIONS") {
+  // Special state: waiting for dimensions — only run if we didn't already set an instruction from COLLECTING
+  if ((state === "ASKING_DIMENSIONS" && !instruction) || (updates.state === "ASKING_DIMENSIONS" && !instruction)) {
     // If customer gives explicit yards (e.g. "15 yards"), accept it and skip dimensions
     if (inlineYards && /yard|yd|cy/i.test(body)) {
       updates.yards_needed = inlineYards
@@ -1386,15 +1462,16 @@ Ask which works better for them. Keep it natural, two short lines for the option
 
   const s = await callSarah(body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them")
   reply = validate(s.response, lastOut)
-  await saveConv(phone, { ...conv, ...updates })
-  // Persist priority quote data to new columns (outside the RPC)
-  if (updates._priority_total_cents) {
+  // Persist priority quote data FIRST (before saveConv) to avoid state/data mismatch
+  // Check with != null instead of truthiness so $0 quotes still save
+  if (updates._priority_total_cents != null) {
     await savePriorityFields(phone, {
       priority_total_cents: updates._priority_total_cents,
       priority_guaranteed_date: updates._priority_guaranteed_date || null,
       priority_quarry_name: updates._priority_quarry_name || null,
     })
   }
+  await saveConv(phone, { ...conv, ...updates }, readAt)
   await logMsg(phone, reply, "outbound", `out_${sid}`)
   return reply
 
