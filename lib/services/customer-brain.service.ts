@@ -4,6 +4,7 @@ import { getDualQuote } from "./customer-pricing.service"
 import { createDispatchOrder as systemDispatch } from "./dispatch.service"
 import { createCustomerPaymentCheckout, checkPaymentStatus } from "./payment.service"
 import twilio from "twilio"
+import { extractCustomerName } from "./customer-name"
 
 const anthropic = new Anthropic()
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
@@ -1189,18 +1190,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         firstMsgParts.push(`address: ${body.trim()}`)
       }
     }
-    // Check if they included a name-like phrase
-    // Patterns: "I'm Mike", "this is José", "John from fb", "Its John", "John here", "Hey John here"
-    const nameMatch = body.match(/(?:i'm|im|i am|this is|it's|its|my name is|name's|names|me llamo|soy|hey)\s+([\p{L}][\p{L}]+(?:\s+[\p{L}][\p{L}]+)?)/iu)
-      || body.match(/^([\p{L}][\p{L}]+)\s+(?:from|here|checking|looking|interested|wanting|needing|inquiring|texting|calling)\b/iu)
-    if (nameMatch) {
-      const extractedName = nameMatch[1].trim()
-      // Make sure extracted name isn't a common non-name word
-      const NAME_BLOCKLIST = /^(hey|hi|hello|good|this|that|just|still|also|really|very|much|some|more|been|your|have|need|want|fill|dirt|sand|topsoil|clean|cheap|free|best|nice|great)$/i
-      if (!NAME_BLOCKLIST.test(extractedName)) {
-        updates.customer_name = extractedName
-        firstMsgParts.push(`name: ${extractedName}`)
-      }
+    const extractedName = extractCustomerName(body)
+    if (extractedName) {
+      updates.customer_name = extractedName
+      firstMsgParts.push(`name: ${extractedName}`)
     }
 
     const merged = { ...conv, ...updates }

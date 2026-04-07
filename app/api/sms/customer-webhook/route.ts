@@ -4,6 +4,7 @@ import { handleCustomerSMS } from "@/lib/services/customer-brain.service"
 import { createAdminSupabase } from "@/lib/supabase"
 import crypto from "crypto"
 import twilio from "twilio"
+import { classifyTwilioError, shouldFallBackToDefault, type ClassifiedError } from "@/lib/services/twilio-errors"
 
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
@@ -44,7 +45,12 @@ async function alertAdmin(msg: string) {
   }
 }
 
-async function sendViaTwilioAPI(to: string, body: string, replyFrom?: string): Promise<boolean> {
+type SendResult =
+  | { ok: true; sid: string }
+  | { ok: false; error: ClassifiedError; rawMessage: string }
+  | { ok: false; error: ClassifiedError; rawMessage: string; networkError: true }
+
+async function sendViaTwilioAPI(to: string, body: string, replyFrom?: string): Promise<SendResult> {
   const { sid, key, secret } = getTwilioAuth()
   // Reply from the same number the customer texted (sales agent number), or fall back to default
   const from = replyFrom || process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
@@ -64,20 +70,29 @@ async function sendViaTwilioAPI(to: string, body: string, replyFrom?: string): P
     })
     const data = await resp.json()
     if (data.error_code) {
-      console.error("[customer SMS] Twilio error:", data.message, data.error_code)
+      const classified = classifyTwilioError(data.error_code)
+      console.error(`[customer SMS] Twilio error ${data.error_code} (${classified.class}): ${data.message} — ${classified.hint}`)
       try {
         await createAdminSupabase().from("customer_sms_logs").insert({
-          phone: digits, body: `TWILIO SEND FAILED: ${data.error_code} ${data.message || ""} — attempted body: ${body.slice(0, 200)}`,
-          direction: "error", message_sid: `twilio_err_${Date.now()}`,
+          phone: digits,
+          body: `TWILIO SEND FAILED: code=${data.error_code} class=${classified.class} from=${from} msg="${data.message || ""}" hint="${classified.hint}" — attempted body: ${body.slice(0, 200)}`,
+          direction: "error",
+          message_sid: `twilio_err_${Date.now()}`,
         })
       } catch {}
-      return false
+      return { ok: false, error: classified, rawMessage: data.message || "" }
     }
     console.log("[customer SMS] sent OK SID:", data.sid)
-    return true
+    return { ok: true, sid: data.sid }
   } catch (err) {
     console.error("[customer SMS] fetch to Twilio threw:", err)
-    return false
+    // Network/transport errors are transient by definition
+    return {
+      ok: false,
+      error: { code: 0, class: "transient", hint: `Network error: ${(err as any)?.message || "unknown"}` },
+      rawMessage: String(err),
+      networkError: true,
+    }
   }
 }
 
@@ -152,34 +167,61 @@ export async function POST(req: NextRequest) {
     after(async () => {
       try {
         await new Promise(r => setTimeout(r, delay))
-        const sent = await sendViaTwilioAPI(phone, reply, replyFromNumber)
-        if (!sent) {
-          // Retry once after 3 seconds
-          console.error(`[customer SMS] FIRST SEND FAILED to ${phone}, retrying in 3s...`)
-          await new Promise(r => setTimeout(r, 3000))
-          const retrySent = await sendViaTwilioAPI(phone, reply, replyFromNumber)
-          if (!retrySent && replyFromNumber) {
-            // Agent number failed twice — fall back to default number so customer isn't left hanging
-            console.error(`[customer SMS] Agent number ${replyFromNumber} failed, falling back to default`)
-            const fallbackSent = await sendViaTwilioAPI(phone, reply)
-            if (fallbackSent) {
-              console.log(`[customer SMS] Sent via fallback number to ${phone}`)
-              await alertAdmin(`Agent number ${replyFromNumber} CANNOT SEND SMS. Reply to ${phone} sent from default number. Check Twilio config for this number.`)
-            }
-          }
-          if (!retrySent) {
-            // Both attempts failed — alert admin immediately
-            console.error(`[customer SMS] BOTH SENDS FAILED to ${phone}`)
-            await alertAdmin(`SMS SEND FAILED TWICE to ${phone}. Customer got NO reply. Their message: "${body.slice(0, 100)}". Our reply was: "${reply.slice(0, 100)}"`)
+        let result = await sendViaTwilioAPI(phone, reply, replyFromNumber)
+
+        if (!result.ok) {
+          // PERMANENT errors on the agent number → DO NOT fall back to the
+          // default number. Sending from the wrong number breaks multi-agent
+          // attribution and confuses the customer about which agent they're
+          // talking to. Surface to admin and bail.
+          if (!shouldFallBackToDefault(result.error)) {
+            console.error(`[customer SMS] PERMANENT error on ${replyFromNumber} (${result.error.class}, code ${result.error.code}) — not falling back`)
+            await alertAdmin(
+              `URGENT: Agent number ${replyFromNumber} CANNOT SEND. ` +
+              `Code ${result.error.code} (${result.error.class}). ` +
+              `${result.error.hint} ` +
+              `Customer ${phone} got NO reply. Their msg: "${body.slice(0, 80)}"`
+            )
             try {
               await createAdminSupabase().from("customer_sms_logs").insert({
-                phone, body: `SEND FAILED TWICE — reply lost: ${reply.slice(0, 200)}`,
+                phone,
+                body: `SEND BLOCKED on ${replyFromNumber} — code ${result.error.code} ${result.error.class}: ${result.error.hint} — reply lost: ${reply.slice(0, 200)}`,
+                direction: "error",
+                message_sid: `send_blocked_${messageSid}`,
+              })
+            } catch {}
+            return // Leave pending_send marker — operator must fix Twilio config
+          }
+
+          // TRANSIENT error → retry once on the same agent number
+          console.error(`[customer SMS] TRANSIENT error to ${phone} (code ${result.error.code}), retrying in 3s...`)
+          await new Promise(r => setTimeout(r, 3000))
+          result = await sendViaTwilioAPI(phone, reply, replyFromNumber)
+
+          if (!result.ok && replyFromNumber && shouldFallBackToDefault(result.error)) {
+            // Still transient after retry → fall back to default number.
+            // This is the ONLY path that uses the default for an agent reply.
+            console.error(`[customer SMS] retry still transient (${result.error.code}), falling back to default`)
+            const fallback = await sendViaTwilioAPI(phone, reply)
+            if (fallback.ok) {
+              await alertAdmin(`Transient Twilio error on ${replyFromNumber} — reply to ${phone} sent from default. Code ${result.error.code}.`)
+              result = fallback
+            }
+          }
+
+          if (!result.ok) {
+            console.error(`[customer SMS] ALL ATTEMPTS FAILED to ${phone}`)
+            await alertAdmin(`SMS SEND FAILED to ${phone}. Code ${result.error.code} (${result.error.class}). Customer got NO reply. Their msg: "${body.slice(0, 80)}"`)
+            try {
+              await createAdminSupabase().from("customer_sms_logs").insert({
+                phone, body: `SEND FAILED — reply lost: ${reply.slice(0, 200)}`,
                 direction: "error", message_sid: `send_fail_${messageSid}`,
               })
             } catch {}
             return // Leave pending_send marker for recovery cron
           }
         }
+
         // Success — remove the pending_send marker
         try {
           await createAdminSupabase().from("customer_sms_logs").delete().eq("message_sid", pendingSid)
