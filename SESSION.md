@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-04-06T03:12:50.116Z
-> Commit: 0c2f8ac fix: name extraction misses "John from fb" pattern — asks name twice
+> Auto-generated 2026-04-07T17:17:15.880Z
+> Commit: 1422b4d fix: never silently reply from wrong agent number + extract name parser
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
