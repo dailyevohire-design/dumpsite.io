@@ -506,6 +506,13 @@ CRITICAL RULES — NEVER BREAK:
 - NEVER give price ranges or estimates from your general knowledge. Only share exact prices when the system gives you a specific quote to present. If you don't have a quote yet, say "let me get you the exact number" and ask the next question to complete the quote.
 - ALWAYS follow the task instruction. The >>> YOUR TASK <<< section tells you exactly what to say. Do that FIRST, then add personality. Don't ignore the task to talk about something else.
 
+NEVER ASK FOR LOCATION INFO BEYOND THE ADDRESS:
+- NEVER ask for the customer's zip code. NEVER. The system geocodes the street address automatically and gets everything we need (city, state, coordinates, distance, zone).
+- NEVER ask for postal code. Same reason.
+- NEVER ask for city or state separately. The geocoder returns those from the street address.
+- NEVER ask for cross streets, landmarks, neighborhood, or "more details about the location." Once you have a street address you have what you need.
+- If the address came in incomplete (e.g. "1234 Main St" with no city), the system handles geocoding edge cases — DO NOT ask the customer to clarify. If pricing fails the system will route to manual confirmation, you don't need to chase the location.
+
 NO FAKE PLEASANTRIES — THIS IS THE MOST IMPORTANT TONE RULE:
 Real people texting do NOT open with greeting fluff. They respond directly. You MUST do the same.
 - NEVER start with "glad you reached out", "thanks for reaching out", "happy to help", "great to hear from you", "appreciate you contacting us", "thanks for your message", "thanks for getting in touch", "thank you for", "good to hear", or anything in that family. These sound like a customer service script, not a real person.
@@ -630,6 +637,17 @@ function validate(r: string, lastOutbound: string): string {
   r = r.replace(/^(hey|hi|hello)?\s*[,!]?\s*(thanks for (reaching out|getting in touch|texting|your message|contacting us|messaging)|thank you for (reaching out|getting in touch|texting|your message|contacting us|messaging)|glad you (reached out|texted|got in touch|messaged)|happy to help( you)?( with that)?|great to hear from you|appreciate you (reaching out|texting|contacting us)|i'?d (be )?(happy|glad|love) to (help|assist)( you)?( with that)?)\s*[,.!]?\s*/i, "").trim()
   // Strip standalone "Of course" / "Absolutely" / "Certainly" / "No problem" openers
   r = r.replace(/^(of course|absolutely|certainly|no problem|for sure)\s*[,!.]?\s*/i, "").trim()
+  // ── ZIP/POSTAL/CITY ASK STRIPPER ──
+  // Sarah's training data is full of customer-service scripts that ask for
+  // zip code or postal code. We never need that — geocoding handles it. If
+  // she generates one anyway, strip the entire sentence so the customer
+  // never sees it. Belt-and-suspenders for the prompt rule.
+  r = r.split(/(?<=[.?!])\s+|\n+/)
+    .filter(sentence => !/\b(zip\s*code|zipcode|postal\s*code|what.?s your zip|whats your zip|need your zip|need a zip|whats the zip|what.s the zip|cross street|nearest cross|landmark|neighborhood)\b/i.test(sentence))
+    .join(" ")
+    .trim()
+  // If after stripping we're left with nothing, send a safe ask-next-thing
+  if (r.length < 3) r = "Let me get you the exact number, one sec"
   // Truncate if too long
   if (r.length > 320) r = r.split(/[.?\n]/).filter(s => s.trim().length > 5).slice(0, 3).join(". ").trim()
   // Remove trailing period

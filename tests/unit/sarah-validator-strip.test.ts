@@ -12,6 +12,15 @@ function stripRoboticOpeners(r: string): string {
   return r
 }
 
+function stripZipAsks(r: string): string {
+  r = r.split(/(?<=[.?!])\s+|\n+/)
+    .filter(sentence => !/\b(zip\s*code|zipcode|postal\s*code|what.?s your zip|whats your zip|need your zip|need a zip|whats the zip|what.s the zip|cross street|nearest cross|landmark|neighborhood)\b/i.test(sentence))
+    .join(" ")
+    .trim()
+  if (r.length < 3) r = "Let me get you the exact number, one sec"
+  return r
+}
+
 describe('Sarah validator robotic opener strip', () => {
   it('strips "Hey, glad you reached out!"', () => {
     expect(stripRoboticOpeners("Hey, glad you reached out! Whats the address")).toBe("Whats the address")
@@ -51,6 +60,28 @@ describe('Sarah validator robotic opener strip', () => {
 
   it('leaves "yeah we cover that area" untouched', () => {
     expect(stripRoboticOpeners("yeah we cover that area, what are you using it for")).toBe("yeah we cover that area, what are you using it for")
+  })
+
+  it('strips "whats your zip code" sentence — keeps the rest', () => {
+    expect(stripZipAsks("Got the address. Whats your zip code? I need it for pricing.")).toBe("Got the address. I need it for pricing.")
+  })
+  it('strips "I need your zip" sentence', () => {
+    expect(stripZipAsks("Got it. I need your zip to confirm. Thanks!")).toBe("Got it. Thanks!")
+  })
+  it('strips "what zipcode" (no space)', () => {
+    expect(stripZipAsks("ok and what zipcode is that?")).toBe("Let me get you the exact number, one sec")
+  })
+  it('strips "postal code" sentence', () => {
+    expect(stripZipAsks("Got the street. Whats the postal code?")).toBe("Got the street.")
+  })
+  it('strips "cross street" sentence', () => {
+    expect(stripZipAsks("Thanks. Whats the nearest cross street?")).toBe("Thanks.")
+  })
+  it('leaves a clean reply alone', () => {
+    expect(stripZipAsks("Got the address, what are you using the dirt for")).toBe("Got the address, what are you using the dirt for")
+  })
+  it('replaces empty result with safe fallback', () => {
+    expect(stripZipAsks("whats your zip code")).toBe("Let me get you the exact number, one sec")
   })
 
   it('strips "Sorry" opener (laughter rule catches it before the apology rule)', () => {
