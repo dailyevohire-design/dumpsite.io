@@ -24,6 +24,8 @@ export async function GET() {
     { data: recentSms },
     { data: recentCustSms },
     { data: driverCount },
+    { data: salesAgents },
+    { data: agentOrders },
   ] = await Promise.all([
     // Orders today
     sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents, cities(name), created_at").gte("created_at", since),
@@ -33,10 +35,10 @@ export async function GET() {
     sb.from("conversations").select("phone, state, extracted_city, active_order_id, updated_at")
       .in("state", ["ACTIVE", "OTW_PENDING", "PHOTO_PENDING", "APPROVAL_PENDING", "JOB_PRESENTED", "ASKING_TRUCK", "ASKING_ADDRESS"])
       .order("updated_at", { ascending: false }).limit(20),
-    // Active customer conversations
-    sb.from("customer_conversations").select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents, updated_at")
-      .in("state", ["COLLECTING", "QUOTING", "ASKING_DIMENSIONS", "ORDER_PLACED", "AWAITING_PAYMENT"])
-      .order("updated_at", { ascending: false }).limit(20),
+    // Active customer conversations — include agent + material + source for sales view
+    sb.from("customer_conversations").select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents, material_type, agent_id, source_number, updated_at")
+      .in("state", ["COLLECTING", "QUOTING", "ASKING_DIMENSIONS", "ORDER_PLACED", "AWAITING_PAYMENT", "AWAITING_PRIORITY_PAYMENT", "FOLLOW_UP"])
+      .order("updated_at", { ascending: false }).limit(50),
     // Stale orders (dispatching 4h+)
     sb.from("dispatch_orders").select("id, client_name, yards_needed, driver_pay_cents, cities(name), created_at")
       .eq("status", "dispatching").lt("created_at", fourHoursAgo),
@@ -60,6 +62,12 @@ export async function GET() {
     sb.from("customer_sms_logs").select("phone, body, direction, created_at").order("created_at", { ascending: false }).limit(30),
     // Total active drivers
     sb.from("driver_profiles").select("id", { count: "exact", head: true }).eq("status", "active"),
+    // Sales agents
+    sb.from("sales_agents").select("id, name, twilio_number, commission_rate").eq("active", true),
+    // Agent order stats — customer orders with agent attribution (today)
+    sb.from("customer_conversations").select("agent_id, state, total_price_cents, payment_status")
+      .not("agent_id", "is", null)
+      .gte("updated_at", weekAgo),
   ])
 
   // Calculate metrics
@@ -75,6 +83,27 @@ export async function GET() {
 
   const pendingPayTotal = (pendingDriverPay || []).reduce((s, p) => s + p.amount_cents / 100, 0)
   const unpaidCustTotal = (unpaidCustomers || []).reduce((s, c) => s + ((c.total_price_cents || 0) / 100), 0)
+
+  // Build agent pipeline — leads, quoted $, orders per agent
+  const agentMap: Record<string, { name: string; leads: number; quotedCents: number; orders: number; paidCents: number }> = {}
+  for (const a of (salesAgents || [])) {
+    agentMap[a.id] = { name: a.name, leads: 0, quotedCents: 0, orders: 0, paidCents: 0 }
+  }
+  for (const c of (activeCustConvs || [])) {
+    if (c.agent_id && agentMap[c.agent_id]) {
+      agentMap[c.agent_id].leads++
+      if (c.total_price_cents) agentMap[c.agent_id].quotedCents += c.total_price_cents
+      if (c.state === "ORDER_PLACED" || c.state === "AWAITING_PAYMENT" || c.state === "AWAITING_PRIORITY_PAYMENT") agentMap[c.agent_id].orders++
+    }
+  }
+  for (const o of (agentOrders || [])) {
+    if (o.agent_id && agentMap[o.agent_id] && o.payment_status === "paid") {
+      agentMap[o.agent_id].paidCents += o.total_price_cents || 0
+    }
+  }
+  const agentPipeline = Object.entries(agentMap).map(([id, v]) => ({ id, ...v }))
+  // Count unassigned active customer convos
+  const unassignedLeads = (activeCustConvs || []).filter((c: any) => !c.agent_id).length
 
   return NextResponse.json({
     timestamp: new Date().toISOString(),
@@ -96,6 +125,9 @@ export async function GET() {
       drivers: activeDriverConvs || [],
       customers: activeCustConvs || [],
     },
+    agentPipeline,
+    unassignedLeads,
+    salesAgents: (salesAgents || []).map((a: any) => ({ id: a.id, name: a.name })),
     staleOrders: staleOrders || [],
     unpaidCustomers: unpaidCustomers || [],
     stuckDrivers: stuckDrivers || [],

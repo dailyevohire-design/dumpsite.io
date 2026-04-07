@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-04-05T13:40:12.475Z
-> Commit: ce99776 redesign: contractor-focused homepage v5 — topo lines, time calculator, membership tiers, FAQ, sticky CTA
+> Auto-generated 2026-04-06T03:12:50.116Z
+> Commit: 0c2f8ac fix: name extraction misses "John from fb" pattern — asks name twice
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
@@ -10,7 +10,7 @@
 - GitHub: dailyevohire-design/dumpsite.io
 
 ## Live Stats
-- Open orders: 0
+- Open orders: 1
 - Active drivers: 134
 - Active reservations: 0
 - Material photos: 11

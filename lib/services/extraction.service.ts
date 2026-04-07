@@ -80,6 +80,16 @@ Rules:
       parsed.intent = 'APPROVAL_PHOTO'
     }
 
+    // Bare-city safety net — Claude sometimes misses "in dallas", "im in fort worth", or a lone city name.
+    // If we still have no city, run a regex over known DFW cities and lift it into the result.
+    if (!parsed.city) {
+      const bareCity = detectBareCity(text)
+      if (bareCity) {
+        parsed.city = bareCity
+        if (!parsed.intent || parsed.intent === 'UNKNOWN') parsed.intent = 'NEED_DUMPSITE'
+      }
+    }
+
     return parsed as ExtractionResult
   } catch (err: any) {
     console.error('[extraction] error:', err?.message)
@@ -106,6 +116,37 @@ Rules:
     const loadMatch = text.match(/(?:done|dumped|finished)\s+(\d+)/i)
     if (loadMatch) result.loadCount = parseInt(loadMatch[1])
 
+    const bareCity = detectBareCity(text)
+    if (bareCity) {
+      result.city = bareCity
+      if (result.intent === 'UNKNOWN') result.intent = 'NEED_DUMPSITE'
+    }
+
     return result
   }
+}
+
+// Known DFW cities — extend as we expand. Order matters: longest first so "fort worth" matches before "worth".
+const DFW_CITIES = [
+  'fort worth', 'grand prairie', 'haltom city', 'north richland hills', 'flower mound',
+  'cedar hill', 'duncanville', 'desoto', 'lancaster', 'mesquite', 'rowlett', 'rockwall',
+  'wylie', 'sachse', 'garland', 'plano', 'frisco', 'mckinney', 'allen', 'prosper',
+  'celina', 'little elm', 'the colony', 'lewisville', 'carrollton', 'farmers branch',
+  'addison', 'irving', 'coppell', 'grapevine', 'colleyville', 'southlake', 'keller',
+  'roanoke', 'argyle', 'denton', 'arlington', 'mansfield', 'burleson', 'crowley',
+  'benbrook', 'weatherford', 'aledo', 'azle', 'saginaw', 'watauga', 'bedford',
+  'euless', 'hurst', 'midlothian', 'waxahachie', 'red oak', 'ennis', 'forney',
+  'terrell', 'kaufman', 'seagoville', 'balch springs', 'dallas', 'mckinney',
+]
+
+export function detectBareCity(text: string): string | null {
+  if (!text) return null
+  const lower = text.toLowerCase()
+  for (const c of DFW_CITIES) {
+    const pattern = new RegExp('\\b' + c.replace(/\s+/g, '\\s+') + '\\b', 'i')
+    if (pattern.test(lower)) {
+      return c.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' ')
+    }
+  }
+  return null
 }

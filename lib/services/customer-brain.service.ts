@@ -13,6 +13,48 @@ const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const LARGE_ORDER = 500
 
 // ─────────────────────────────────────────────────────────
+// SALES AGENT LOOKUP — maps Twilio numbers to agents
+// Cached in memory for 5 minutes to avoid DB hit on every SMS
+// ─────────────────────────────────────────────────────────
+type SalesAgent = { id: string; name: string; twilio_number: string; personal_number: string; commission_rate: number }
+let agentCache: { agents: SalesAgent[]; loadedAt: number } = { agents: [], loadedAt: 0 }
+const AGENT_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
+async function loadAgents(): Promise<SalesAgent[]> {
+  if (Date.now() - agentCache.loadedAt < AGENT_CACHE_TTL && agentCache.agents.length > 0) return agentCache.agents
+  const sb = createAdminSupabase()
+  const { data, error } = await sb.from("sales_agents").select("id, name, twilio_number, personal_number, commission_rate").eq("active", true)
+  if (error) {
+    console.error("[sales agents] Failed to load:", error.message)
+    return agentCache.agents // Return stale cache on error
+  }
+  agentCache = { agents: data || [], loadedAt: Date.now() }
+  return agentCache.agents
+}
+
+async function lookupAgent(sourceNumber: string): Promise<SalesAgent | null> {
+  if (!sourceNumber) return null
+  const agents = await loadAgents()
+  // Match by digits — sourceNumber is already normalized (no +1 prefix)
+  return agents.find(a => a.twilio_number === sourceNumber) || null
+}
+
+async function notifyAgent(agent: SalesAgent, msg: string, sid: string) {
+  if (!agent.personal_number) return
+  // Send from admin number (not from the agent's Twilio number — that would confuse the customer webhook)
+  const adminFrom = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
+  if (!adminFrom) { console.error("[notifyAgent] No admin FROM number configured"); return }
+  try {
+    await twilioClient.messages.create({ body: msg, from: adminFrom, to: `+1${agent.personal_number}` })
+    console.log(`[notifyAgent] Notified ${agent.name} at ${agent.personal_number}`)
+  } catch (e) {
+    console.error(`[notifyAgent] FAILED to notify ${agent.name}:`, (e as any)?.message)
+    // Log to DB so we have a record
+    try { await createAdminSupabase().from("customer_sms_logs").insert({ phone: "system", body: `AGENT NOTIFY FAILED: ${agent.name} — ${msg.slice(0, 300)}`, direction: "error", message_sid: `agent_notify_fail_${sid}` }) } catch {}
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // PRICING ENGINE — exact match to your Excel
 // ─────────────────────────────────────────────────────────
 const SOURCE_YARDS = [
@@ -225,6 +267,7 @@ async function saveConv(phone: string, u: Record<string, any>, readAt?: string):
     p_payment_method: u.payment_method ?? null, p_payment_account: u.payment_account ?? null,
     p_payment_status: u.payment_status ?? null, p_dispatch_order_id: u.dispatch_order_id ?? null,
     p_follow_up_at: u.follow_up_at ?? null, p_follow_up_count: u.follow_up_count ?? null,
+    p_source_number: u.source_number ?? null, p_agent_id: u.agent_id ?? null,
   })
   if (error) {
     console.error("[CRITICAL] saveConv FAILED:", error.message, "| phone:", phone, "| state:", u.state)
@@ -423,6 +466,12 @@ WHEN CUSTOMER ASKS ABOUT TIMING:
 - Explain delivery is typically 1-5 business days depending on area and availability
 - Ask if they need it by a specific date or if they're flexible — this matters for scheduling
 
+AD LEADS (CRAIGSLIST, FACEBOOK, ETC):
+- Most customers found you through a Craigslist or Facebook ad. They were auto-replied with something like "about to step into a meeting, text me at this number" or "heading to lunch, shoot me a text."
+- They think they're texting the person from the ad. DO NOT break that illusion. DO NOT introduce yourself as Sarah. DO NOT say "this is Fill Dirt Near Me" or any company name. Just respond naturally like you're the person they expect.
+- They may say things like "I saw your ad", "texting about the dirt", "someone told me to text this number" — just roll with it. You already know they came from an ad. Don't explain it.
+- Some customers will text once, get busy, and text again hours or days later from the same number. That's totally normal. The system remembers their conversation. Pick up where you left off, don't restart from scratch. If they seem confused, just say "hey we were chatting earlier" and continue.
+
 CRITICAL RULES — NEVER BREAK:
 - NEVER say "I'll get back to you", "let me check and get back", "I'll follow up", or any promise to proactively text them later. You CANNOT initiate texts. If you say this, the customer waits forever and nobody follows up.
 - NEVER give price ranges or estimates from your general knowledge. Only share exact prices when the system gives you a specific quote to present. If you don't have a quote yet, say "let me get you the exact number" and ask the next question to complete the quote.
@@ -549,16 +598,22 @@ function validate(r: string, lastOutbound: string): string {
 // ─────────────────────────────────────────────────────────
 // MAIN HANDLER
 // ─────────────────────────────────────────────────────────
-export async function handleCustomerSMS(sms: { from: string; body: string; messageSid: string; numMedia: number; mediaUrl?: string }): Promise<string> {
+export async function handleCustomerSMS(sms: { from: string; body: string; messageSid: string; numMedia: number; mediaUrl?: string; sourceNumber?: string }): Promise<string> {
   const phone = normalizePhone(sms.from)
   let body = (sms.body || "").trim()
   let lower = body.toLowerCase().trim()
   const sid = sms.messageSid
+  const sourceNumber = sms.sourceNumber || ""
 
   try {
 
   if (await isDupe(sid)) return ""
   await logMsg(phone, body || (sms.numMedia > 0 ? "[photo]" : "[empty]"), "inbound", sid)
+
+  // ── SALES AGENT ATTRIBUTION ──
+  // Look up which agent's Twilio number was texted. Store on conversation for commission tracking.
+  // Agent is set ONCE on first contact and preserved via COALESCE on subsequent messages.
+  const agent = await lookupAgent(sourceNumber)
 
   // ── RAPID-FIRE CONCATENATION ──
   // If customer sent multiple messages in quick succession WITHOUT Sarah replying,
@@ -617,6 +672,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (sms.numMedia > 0 && !body) {
     const { conv: photoConv } = await getConv(phone)
     if (photoConv.opted_out) return ""
+    // Persist agent attribution even on photo-only first contact
+    if (agent && !photoConv.agent_id) {
+      await saveConv(phone, { source_number: sourceNumber, agent_id: agent.id }, photoConv.updated_at)
+    }
     const s = await callSarah("[Customer sent a photo]", photoConv, await getHistory(phone), "Customer sent a photo. Acknowledge it naturally, like 'thanks for the pic' or 'got the photo'. Then continue with whatever question you need to ask next based on what info is still missing")
     const r = validate(s.response, "")
     await logMsg(phone, r, "outbound", `photo_${sid}`)
@@ -641,6 +700,12 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const lastOut = history.filter(h => h.role === "assistant").slice(-1)[0]?.content || ""
   const updates: Record<string, any> = {}
   let reply = ""
+
+  // Set agent attribution — only on first contact (COALESCE preserves existing values)
+  if (agent && !conv.agent_id) {
+    updates.source_number = sourceNumber
+    updates.agent_id = agent.id
+  }
 
   // ═══════════════════════════════════════════════════════
   // CODE DETERMINES WHAT TO DO → SONNET DECIDES HOW TO SAY IT
@@ -776,6 +841,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const s = await callSarah(body, conv, history, `Payment confirmed. Thank them and let them know we appreciate their business. If they ever need more material, just text us`)
       reply = validate(s.response, lastOut)
       await notifyAdmin(`PAYMENT CONFIRMED: ${conv.customer_name} | ${fmt$(conv.total_price_cents||0)} | ${conv.payment_method}`, sid)
+      // Notify sales agent
+      const payAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
+      if (payAgent) await notifyAgent(payAgent, `Payment confirmed: ${conv.customer_name} | ${fmt$(conv.total_price_cents||0)} | ${conv.payment_method || "unknown method"}`, sid)
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
@@ -839,6 +907,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           if (orderId) {
             updates.dispatch_order_id = orderId
             await notifyAdmin(`PRIORITY PAID: ${conv.customer_name} | ${fmt$(conv.priority_total_cents||0)} | ${conv.yards_needed}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | Guaranteed ${conv.priority_guaranteed_date}`, sid)
+            // Notify sales agent
+            const prioAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
+            if (prioAgent) await notifyAgent(prioAgent, `Priority order PAID: ${conv.customer_name} | ${fmt$(conv.priority_total_cents||0)} | ${conv.yards_needed}yds ${fmtMaterial(conv.material_type||"fill_dirt")} to ${conv.delivery_city} | Guaranteed ${conv.priority_guaranteed_date}`, sid)
           }
           const s = await callSarah(body, conv, history, `Payment confirmed. Tell them their priority delivery is locked in for ${conv.priority_guaranteed_date}. They'll get a text when their driver is heading their way`)
           reply = validate(s.response, lastOut)
@@ -1024,6 +1095,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           const s = await callSarah(body, conv, history, `Customer chose priority. Tell them to lock in their guaranteed delivery for ${conv.priority_guaranteed_date}, just complete payment at this link: ${checkout.url} — once that goes through you'll get their driver scheduled right away. Keep it natural, dont say "click here" just work the link into the message`)
           reply = validate(s.response, lastOut)
           await notifyAdmin(`PRIORITY ORDER PENDING PAYMENT: ${conv.customer_name} | ${fmt$(conv.priority_total_cents)} | ${yards}yds ${material} | ${conv.delivery_city} | Guaranteed ${conv.priority_guaranteed_date}`, sid)
+          // Notify sales agent about incoming priority order
+          const prioOrderAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
+          if (prioOrderAgent) await notifyAgent(prioOrderAgent, `Priority order pending payment: ${conv.customer_name} | ${fmt$(conv.priority_total_cents)} | ${yards}yds ${material} to ${conv.delivery_city} | Awaiting Stripe payment`, sid)
         } else {
           // Stripe failed — fall back to manual handling
           const s = await callSarah(body, conv, history, "Tell the customer you're having a small issue getting the payment link set up. You'll have someone from the team text them shortly to get it sorted out")
@@ -1041,6 +1115,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           const yards = conv.yards_needed || MIN_YARDS
           await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
           if (yards >= LARGE_ORDER) await notifyAdmin(`LARGE ORDER ${yards}yds — ${conv.customer_name} ${conv.delivery_city}`, sid)
+          // Notify sales agent
+          const orderAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
+          if (orderAgent) await notifyAgent(orderAgent, `New order received: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} to ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
           const s = await callSarah(body, conv, history, `Customer chose standard delivery. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
           reply = validate(s.response, lastOut)
         } else {
@@ -1129,12 +1206,18 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const merged = { ...conv, ...updates }
     const mHas = (k: string) => { const v = (merged as any)[k]; return v !== null && v !== undefined && v !== "" }
     let newInstruction = ""
+    // Agent numbers: customer came from an ad, was told "text me" — DON'T introduce as Sarah or mention company name
+    // Default number: no agent context — introduce as Sarah with Fill Dirt Near Me
+    const isAgentLead = agent !== null
+    const intro = isAgentLead
+      ? "Hey, respond casually like you're picking up where the ad left off. Do NOT introduce yourself by name. Do NOT say any company name. Just jump right in like you're the person they expect to talk to."
+      : "Say hey this is Sarah with Fill Dirt Near Me."
     if (firstMsgParts.length > 0) {
       // They gave us info — acknowledge it and ask for the NEXT missing thing
       const nextMissing = !mHas("customer_name") ? "ask their name" : !mHas("delivery_address") ? "ask for the delivery address" : !mHas("material_purpose") ? "ask what the dirt is for" : !mHas("yards_needed") ? "ask how many cubic yards" : "ask if big trucks can get to their property"
-      newInstruction = `New customer texted. Say hey this is Sarah with Fill Dirt Near Me. They already told you: ${firstMsgParts.join(", ")}. Acknowledge what they shared, then ${nextMissing}. One short message`
+      newInstruction = `New customer texted. ${intro} They already told you: ${firstMsgParts.join(", ")}. Acknowledge what they shared, then ${nextMissing}. One short message`
     } else {
-      newInstruction = "New customer just texted. Say hey this is Sarah with Fill Dirt Near Me. Ask what their name is. One short message, nothing else. Do NOT apologize, do NOT use dashes, do NOT use exclamation marks"
+      newInstruction = `New customer just texted. ${intro} Ask what their name is. One short message, nothing else. Do NOT apologize, do NOT use dashes, do NOT use exclamation marks`
     }
     const s = await callSarah(body, merged, history, newInstruction)
     reply = validate(s.response, lastOut)

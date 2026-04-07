@@ -59,6 +59,34 @@ export async function GET(request: NextRequest) {
     alerts.push(`STUCK DRIVER: ${c.phone} in ${c.state} for ${mins} min`)
   }
 
+  // 2b. STUCK DISCOVERY — driver sent last message, we acked or said nothing useful, no progress in 10+ min
+  // This catches the "in dallas → 10.4 → silence" failure mode.
+  const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  const { data: stuckDiscovery } = await sb.from("conversations")
+    .select("phone, state, updated_at")
+    .in("state", ["DISCOVERY", "ASKING_TRUCK", "GETTING_NAME"])
+    .lt("updated_at", tenMinAgo)
+
+  for (const c of stuckDiscovery || []) {
+    // Only fire if driver sent the last message — they're waiting on us
+    const { data: lastMsg } = await sb.from("sms_logs")
+      .select("direction").eq("phone", c.phone).order("created_at", { ascending: false }).limit(1)
+    if (lastMsg?.[0]?.direction !== "inbound") continue
+
+    const mins = Math.round((Date.now() - new Date(c.updated_at).getTime()) / 60000)
+    alerts.push(`STRANDED DRIVER: ${c.phone} stuck in ${c.state} ${mins}m, last msg was theirs`)
+
+    // Auto re-prompt with a forward-progress question
+    const reprompt = c.state === "ASKING_TRUCK"
+      ? "what kind of truck you running bro"
+      : "whats your loading address, i can see what i got close"
+    try {
+      await tw.messages.create({ body: reprompt, from: FROM, to: `+1${c.phone}` })
+      await sb.from("sms_logs").insert({ phone: c.phone, body: `[STRANDED REPROMPT ${mins}m] ${reprompt}`, direction: "outbound", message_sid: `stranded_${Date.now()}` })
+      await sb.from("conversations").update({ updated_at: new Date().toISOString() }).eq("phone", c.phone)
+    } catch (e) { console.error("[stranded reprompt]", e) }
+  }
+
   // 3. STUCK CUSTOMER CONVERSATIONS — no update in 15+ min during active flow
   const { data: stuckCust } = await sb.from("customer_conversations")
     .select("phone, customer_name, state, updated_at")

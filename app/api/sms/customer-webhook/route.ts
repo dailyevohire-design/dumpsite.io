@@ -44,9 +44,10 @@ async function alertAdmin(msg: string) {
   }
 }
 
-async function sendViaTwilioAPI(to: string, body: string): Promise<boolean> {
+async function sendViaTwilioAPI(to: string, body: string, replyFrom?: string): Promise<boolean> {
   const { sid, key, secret } = getTwilioAuth()
-  const from = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
+  // Reply from the same number the customer texted (sales agent number), or fall back to default
+  const from = replyFrom || process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
   const digits = to.replace(/\D/g, "")
   const toE164 = digits.length === 10 ? `+1${digits}` : digits.length === 11 && digits.startsWith("1") ? `+${digits}` : `+1${digits}`
 
@@ -90,6 +91,7 @@ export async function POST(req: NextRequest) {
   }
 
   const from = formData.get("From") || ""
+  const to = formData.get("To") || ""
   const body = formData.get("Body") || ""
   const messageSid = formData.get("MessageSid") || ""
   const numMedia = parseInt(formData.get("NumMedia") || "0")
@@ -111,8 +113,21 @@ export async function POST(req: NextRequest) {
     return new Response("Unauthorized", { status: 401 })
   }
 
+  // TEMP DEBUG (remove after Micah routing fix verified):
+  // log raw To/From so we can see what Twilio is actually delivering
   try {
-    const reply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl })
+    await createAdminSupabase().from("customer_sms_logs").insert({
+      phone: from.replace(/\D/g, "").replace(/^1/, ""),
+      body: `DEBUG inbound raw — From="${from}" To="${to}"`,
+      direction: "error",
+      message_sid: `dbg_${messageSid}`,
+    })
+  } catch {}
+
+  try {
+    // Pass the Twilio To number so the brain can track which sales agent number was texted
+    const sourceNumber = to.replace(/\D/g, "").replace(/^1/, "")
+    const reply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl, sourceNumber })
     if (!reply) return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })
 
     const phone = from.replace(/\D/g, "").replace(/^1/, "")
@@ -127,18 +142,31 @@ export async function POST(req: NextRequest) {
       })
     } catch {}
 
+    // Reply from the same number the customer texted — critical for multi-agent tracking
+    // Format as E.164 for Twilio FROM field
+    const replyFromNumber = sourceNumber ? `+1${sourceNumber}` : undefined
+
     // Human-like delay, then send with retry + admin alert on failure
     const delay = 5000
 
     after(async () => {
       try {
         await new Promise(r => setTimeout(r, delay))
-        const sent = await sendViaTwilioAPI(phone, reply)
+        const sent = await sendViaTwilioAPI(phone, reply, replyFromNumber)
         if (!sent) {
           // Retry once after 3 seconds
           console.error(`[customer SMS] FIRST SEND FAILED to ${phone}, retrying in 3s...`)
           await new Promise(r => setTimeout(r, 3000))
-          const retrySent = await sendViaTwilioAPI(phone, reply)
+          const retrySent = await sendViaTwilioAPI(phone, reply, replyFromNumber)
+          if (!retrySent && replyFromNumber) {
+            // Agent number failed twice — fall back to default number so customer isn't left hanging
+            console.error(`[customer SMS] Agent number ${replyFromNumber} failed, falling back to default`)
+            const fallbackSent = await sendViaTwilioAPI(phone, reply)
+            if (fallbackSent) {
+              console.log(`[customer SMS] Sent via fallback number to ${phone}`)
+              await alertAdmin(`Agent number ${replyFromNumber} CANNOT SEND SMS. Reply to ${phone} sent from default number. Check Twilio config for this number.`)
+            }
+          }
           if (!retrySent) {
             // Both attempts failed — alert admin immediately
             console.error(`[customer SMS] BOTH SENDS FAILED to ${phone}`)

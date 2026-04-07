@@ -201,6 +201,16 @@ export async function generateJesseResponse(context: JesseContext): Promise<stri
     }
     cleaned = cleaned.replace(/\.\s*$/, "").trim()
 
+    // Safety: in progression states, a bare acknowledgment ("10.4", "ok", "perfect") with no
+    // forward question strands the driver. Force a real question instead.
+    const progressionStates = new Set(["DISCOVERY", "ASKING_TRUCK", "PHOTO_PENDING", "GETTING_NAME"]);
+    if (progressionStates.has(context.state)) {
+      const bareAck = /^(10[\.\-]?4( thank you| thanks)?|ok|okay|copy|copy that|perfect|beautiful|bet|fasho|yes sir|yessir|got it|10[\.\-]?4 got it)$/i;
+      if (bareAck.test(cleaned)) {
+        return fallbackResponse(context.state);
+      }
+    }
+
     return cleaned || fallbackResponse(context.state);
   } catch (err) {
     console.error("[Jesse] generation failed:", err);
@@ -243,6 +253,8 @@ function fallbackResponse(state: string): string {
     PAYMENT_CONFIRMED:           ["got it, sending shortly", "10.4 sending now"],
     AWAITING_PAYMENT_COLLECTION: ["how you want it, zelle or venmo"],
   };
-  const options = map[state] ?? ["10.4"];
+  // Never silently ack with "10.4" — that strands the conversation. If we don't have a
+  // mapping for this state, force a forward-progress question.
+  const options = map[state] ?? ["whats your loading address bro", "where you at, i can see what i got close"];
   return options[Math.floor(Math.random() * options.length)];
 }

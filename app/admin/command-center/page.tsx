@@ -1,5 +1,5 @@
 "use client"
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 
 interface CommandData {
   timestamp: string
@@ -13,10 +13,28 @@ interface CommandData {
     pendingDriverPayments: number; pendingDriverPayTotal: number
   }
   activeConversations: { drivers: any[]; customers: any[] }
+  agentPipeline: { id: string; name: string; leads: number; quotedCents: number; orders: number; paidCents: number }[]
+  unassignedLeads: number
+  salesAgents: { id: string; name: string }[]
   staleOrders: any[]; unpaidCustomers: any[]; stuckDrivers: any[]; stuckCustomers: any[]; noShows: any[]
   recentSms: any[]; recentCustSms: any[]
   driverCount: number
 }
+
+// ── Customer state colors ──
+const CUST_STATE: Record<string, { color: string; label: string }> = {
+  NEW: { color: "#6b7280", label: "NEW" },
+  COLLECTING: { color: "#3b82f6", label: "COLLECTING" },
+  ASKING_DIMENSIONS: { color: "#3b82f6", label: "DIMENSIONS" },
+  QUOTING: { color: "#f59e0b", label: "QUOTING" },
+  ORDER_PLACED: { color: "#10b981", label: "ORDERED" },
+  AWAITING_PAYMENT: { color: "#f97316", label: "AWAITING PAY" },
+  AWAITING_PRIORITY_PAYMENT: { color: "#f97316", label: "PRIORITY PAY" },
+  FOLLOW_UP: { color: "#eab308", label: "FOLLOW UP" },
+  DELIVERED: { color: "#10b981", label: "DELIVERED" },
+  CLOSED: { color: "#6b7280", label: "CLOSED" },
+}
+const custState = (s: string) => CUST_STATE[s] || { color: "#6b7280", label: s }
 
 function Card({ title, children, alert }: { title: string; children: React.ReactNode; alert?: boolean }) {
   return (
@@ -66,10 +84,106 @@ function SmsRow({ phone, body, direction, time }: { phone: string; body: string;
   )
 }
 
+// ── Customer conversation row with click-to-expand SMS thread ──
+function CustomerRow({ conv, agentName, smsLog, expanded, onToggle }: {
+  conv: any; agentName: string; smsLog: any[]; expanded: boolean; onToggle: () => void
+}) {
+  const st = custState(conv.state)
+  const ago = Math.round((Date.now() - new Date(conv.updated_at).getTime()) / 60000)
+  const agoStr = ago < 60 ? `${ago}m` : `${Math.round(ago / 60)}h`
+  const phone = (conv.phone || "").replace(/\D/g, "")
+  const fmtPhone = phone.length === 10 ? `(${phone.slice(0, 3)}) ${phone.slice(3, 6)}-${phone.slice(6)}` : phone.slice(-4)
+  const material = conv.material_type ? conv.material_type.replace(/_/g, " ") : ""
+  const quote = conv.total_price_cents ? `$${Math.round(conv.total_price_cents / 100)}` : ""
+  const yards = conv.yards_needed ? `${conv.yards_needed}yds` : ""
+  const customerMsgs = smsLog.filter(m => m.phone === phone)
+
+  return (
+    <div style={{ borderBottom: "1px solid #222" }}>
+      <div
+        onClick={onToggle}
+        style={{ display: "grid", gridTemplateColumns: "90px 1fr 80px 60px 90px 50px", alignItems: "center", padding: "8px 0", cursor: "pointer", fontSize: 13, gap: 8 }}
+      >
+        <span style={{ color: "#8b5cf6", fontWeight: 600, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {agentName || "---"}
+        </span>
+        <span style={{ color: "#e2e8f0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {conv.customer_name || fmtPhone}
+          {conv.delivery_city ? <span style={{ color: "#666", marginLeft: 6 }}>{conv.delivery_city}</span> : null}
+        </span>
+        <span style={{ color: "#888", fontSize: 12, textAlign: "right" }}>
+          {yards} {material ? material.split(" ")[0] : ""}
+        </span>
+        <span style={{ color: quote ? "#10b981" : "#444", fontWeight: 600, textAlign: "right" }}>{quote}</span>
+        <span style={{
+          color: st.color, fontWeight: 700, fontSize: 11, textAlign: "center",
+          background: st.color + "18", padding: "2px 8px", borderRadius: 4,
+        }}>
+          {st.label}
+        </span>
+        <span style={{ color: ago > 120 ? "#ef4444" : "#555", textAlign: "right", fontSize: 12 }}>{agoStr}</span>
+      </div>
+      {expanded && (
+        <div style={{ background: "#0a0a0a", borderTop: "1px solid #222", padding: "8px 12px", maxHeight: 300, overflowY: "auto" }}>
+          {customerMsgs.length === 0 ? (
+            <div style={{ color: "#555", fontSize: 12 }}>No SMS history loaded</div>
+          ) : customerMsgs.map((m: any, i: number) => (
+            <div key={i} style={{ padding: "3px 0", fontSize: 12 }}>
+              <span style={{ color: m.direction === "inbound" ? "#4ade80" : "#60a5fa", marginRight: 6, fontWeight: 600, fontSize: 11 }}>
+                {m.direction === "inbound" ? "CUST" : "SARAH"}
+              </span>
+              <span style={{ color: m.direction === "inbound" ? "#d1d5db" : "#9ca3af" }}>{(m.body || "").slice(0, 200)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Agent pipeline card ──
+function AgentPipelineCard({ pipeline, unassigned }: { pipeline: CommandData["agentPipeline"]; unassigned: number }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: `repeat(${pipeline.length + (unassigned > 0 ? 1 : 0)}, 1fr)`, gap: 12, marginBottom: 12 }}>
+      {pipeline.map(a => (
+        <div key={a.id} style={{ background: "#111", border: "1px solid #333", borderRadius: 8, padding: 14, textAlign: "center" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#8b5cf6", marginBottom: 8 }}>{a.name.split(" ")[0].toUpperCase()}</div>
+          <div style={{ fontSize: 24, fontWeight: 700, color: "#fff" }}>{a.leads}</div>
+          <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>active leads</div>
+          <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 6 }}>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: "#f59e0b" }}>${Math.round(a.quotedCents / 100)}</div>
+              <div style={{ fontSize: 10, color: "#666" }}>quoted</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: "#10b981" }}>{a.orders}</div>
+              <div style={{ fontSize: 10, color: "#666" }}>orders</div>
+            </div>
+          </div>
+          {a.paidCents > 0 && (
+            <div style={{ marginTop: 6, fontSize: 12, color: "#10b981" }}>
+              ${Math.round(a.paidCents / 100)} collected
+            </div>
+          )}
+        </div>
+      ))}
+      {unassigned > 0 && (
+        <div style={{ background: "#111", border: "1px solid #333", borderRadius: 8, padding: 14, textAlign: "center" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#6b7280", marginBottom: 8 }}>UNASSIGNED</div>
+          <div style={{ fontSize: 24, fontWeight: 700, color: "#fff" }}>{unassigned}</div>
+          <div style={{ fontSize: 11, color: "#888" }}>leads</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function CommandCenter() {
   const [data, setData] = useState<CommandData | null>(null)
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<"overview" | "drivers" | "customers" | "sms">("overview")
+  const [expandedPhone, setExpandedPhone] = useState<string | null>(null)
+  const intervalRef = useRef<NodeJS.Timeout | null>(null)
 
   const refresh = async () => {
     try {
@@ -79,15 +193,26 @@ export default function CommandCenter() {
     setLoading(false)
   }
 
-  useEffect(() => { refresh(); const i = setInterval(refresh, 30000); return () => clearInterval(i) }, [])
+  // 10s polling on customers tab, 30s on others
+  useEffect(() => {
+    refresh()
+    if (intervalRef.current) clearInterval(intervalRef.current)
+    const ms = tab === "customers" ? 10000 : 30000
+    intervalRef.current = setInterval(refresh, ms)
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
+  }, [tab])
 
   if (loading || !data) return <div style={{ padding: 40, color: "#888" }}>Loading command center...</div>
 
   const a = data.alerts
   const totalAlerts = a.staleOrders + a.unpaidCustomers + a.stuckDriverConvs + a.stuckCustomerConvs + a.driverNoShows
 
+  // Build agent name lookup
+  const agentNames: Record<string, string> = {}
+  for (const ag of (data.salesAgents || [])) agentNames[ag.id] = ag.name
+
   return (
-    <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px", fontFamily: "-apple-system, sans-serif", color: "#fff", background: "#0a0a0a", minHeight: "100vh" }}>
+    <div style={{ maxWidth: 960, margin: "0 auto", padding: "20px 16px", fontFamily: "-apple-system, sans-serif", color: "#fff", background: "#0a0a0a", minHeight: "100vh" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <h1 style={{ margin: 0, fontSize: 20 }}>Command Center</h1>
         <div style={{ display: "flex", gap: 8 }}>
@@ -124,6 +249,19 @@ export default function CommandCenter() {
           <Stat label="Yards" value={data.revenue.week.yards} />
           <Stat label="Revenue" value={`$${data.revenue.week.revenue}`} color="#4CAF50" />
         </Card>
+        {(data.agentPipeline || []).length > 0 && (
+          <Card title="Sales Agent Performance (This Week)">
+            {data.agentPipeline.map(a => (
+              <div key={a.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #222", fontSize: 13 }}>
+                <span style={{ color: "#8b5cf6", fontWeight: 600, width: 140 }}>{a.name}</span>
+                <span style={{ color: "#3b82f6" }}>{a.leads} leads</span>
+                <span style={{ color: "#f59e0b" }}>${Math.round(a.quotedCents / 100)} quoted</span>
+                <span style={{ color: "#10b981" }}>{a.orders} orders</span>
+                <span style={{ color: "#10b981", fontWeight: 600 }}>${Math.round(a.paidCents / 100)} paid</span>
+              </div>
+            ))}
+          </Card>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <Card title="Stale Orders (4h+ no driver)">
             {data.staleOrders.length === 0 ? <div style={{ color: "#4CAF50" }}>None</div> :
@@ -168,16 +306,56 @@ export default function CommandCenter() {
       </>}
 
       {tab === "customers" && <>
-        <Card title={`Active Customer Conversations (${data.activeConversations.customers.length})`}>
-          {data.activeConversations.customers.length === 0 ? <div style={{ color: "#888" }}>No active customer conversations</div> :
-            data.activeConversations.customers.map((c: any, i: number) => (
-              <ConvRow key={i} phone={c.phone} state={c.state} detail={`${c.customer_name || ""} ${c.delivery_city || ""} ${c.yards_needed ? c.yards_needed + "yds" : ""}`} time={c.updated_at} />
-            ))}
-        </Card>
+        {/* Agent pipeline header */}
+        <AgentPipelineCard pipeline={data.agentPipeline || []} unassigned={data.unassignedLeads || 0} />
+
+        {/* State legend */}
+        <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+          {["COLLECTING", "QUOTING", "ORDER_PLACED", "AWAITING_PAYMENT", "FOLLOW_UP"].map(s => {
+            const st = custState(s)
+            const count = data.activeConversations.customers.filter((c: any) => c.state === s).length
+            return (
+              <div key={s} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: st.color }} />
+                <span style={{ color: "#888" }}>{st.label}</span>
+                <span style={{ color: st.color, fontWeight: 600 }}>{count}</span>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Column headers */}
+        <div style={{ display: "grid", gridTemplateColumns: "90px 1fr 80px 60px 90px 50px", padding: "0 0 4px", fontSize: 10, color: "#555", textTransform: "uppercase", letterSpacing: 1, borderBottom: "1px solid #333", marginBottom: 2, gap: 8 }}>
+          <span>Agent</span>
+          <span>Customer</span>
+          <span style={{ textAlign: "right" }}>Order</span>
+          <span style={{ textAlign: "right" }}>Quote</span>
+          <span style={{ textAlign: "center" }}>Status</span>
+          <span style={{ textAlign: "right" }}>Ago</span>
+        </div>
+
+        {data.activeConversations.customers.length === 0 ? (
+          <div style={{ color: "#888", padding: 20, textAlign: "center" }}>No active customer conversations</div>
+        ) : (
+          data.activeConversations.customers.map((c: any, i: number) => (
+            <CustomerRow
+              key={i}
+              conv={c}
+              agentName={c.agent_id ? (agentNames[c.agent_id] || "").split(" ")[0] : ""}
+              smsLog={data.recentCustSms || []}
+              expanded={expandedPhone === c.phone}
+              onToggle={() => setExpandedPhone(expandedPhone === c.phone ? null : c.phone)}
+            />
+          ))
+        )}
+
         {data.stuckCustomers.length > 0 && (
           <Card title="Stuck Customer Conversations (2h+)" alert>
             {data.stuckCustomers.map((c: any, i: number) => (
-              <ConvRow key={i} phone={c.phone} state={c.state} detail={c.customer_name || ""} time={c.updated_at} />
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 13, borderBottom: "1px solid #222" }}>
+                <span style={{ color: "#ff6666" }}>{c.customer_name || c.phone?.slice(-4)}</span>
+                <span style={{ color: custState(c.state).color, fontWeight: 600, fontSize: 11 }}>{custState(c.state).label}</span>
+              </div>
             ))}
           </Card>
         )}
@@ -197,7 +375,7 @@ export default function CommandCenter() {
       </>}
 
       <div style={{ textAlign: "center", color: "#333", fontSize: 11, marginTop: 20 }}>
-        Auto-refreshes every 30s | Last updated: {new Date(data.timestamp).toLocaleTimeString()}
+        {tab === "customers" ? "Auto-refreshes every 10s" : "Auto-refreshes every 30s"} | Last updated: {new Date(data.timestamp).toLocaleTimeString()}
       </div>
     </div>
   )
