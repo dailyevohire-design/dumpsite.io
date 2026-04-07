@@ -374,15 +374,37 @@ async function createDispatchOrder(conv: any, phone: string): Promise<string | n
 
     // Resolve city_id from delivery_city — this ensures correct region dispatch
     // DFW orders → DFW drivers, Denver orders → Denver drivers
+    //
+    // Lookup strategy (in order — first match wins):
+    //   1. EXACT case-insensitive match on name (handles "Dallas" → Dallas row)
+    //   2. ilike "%name%" + limit 1 (handles minor variants — old behavior was
+    //      .maybeSingle() which returned null if multiple cities matched, e.g.
+    //      "Dallas" matched both "Dallas" and "North Dallas")
+    // The is_active filter is loose (allow null OR true) so legacy rows that
+    // never had is_active set don't cause "City not found" errors.
     let cityId: string | null = null
     if (conv.delivery_city) {
-      const { data: city } = await sb
+      const cityName = conv.delivery_city.trim()
+      // 1. Exact match
+      const { data: exact } = await sb
         .from("cities")
-        .select("id")
-        .ilike("name", `%${conv.delivery_city.trim()}%`)
-        .eq("is_active", true)
-        .maybeSingle()
-      cityId = city?.id || null
+        .select("id, is_active")
+        .ilike("name", cityName)
+        .limit(1)
+      if (exact && exact.length > 0 && exact[0].is_active !== false) {
+        cityId = exact[0].id
+      }
+      // 2. Substring fallback
+      if (!cityId) {
+        const { data: fuzzy } = await sb
+          .from("cities")
+          .select("id, is_active")
+          .ilike("name", `%${cityName}%`)
+          .limit(1)
+        if (fuzzy && fuzzy.length > 0 && fuzzy[0].is_active !== false) {
+          cityId = fuzzy[0].id
+        }
+      }
     }
 
     if (!cityId) {
@@ -938,7 +960,13 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const has = (v: any) => v !== null && v !== undefined && v !== ""
   // Detect correction language — customer wants to change previously given info
   // "actually" alone is too common in casual speech ("I actually need fill dirt") — require it with correction context
-  const isCorrection = /\b(wrong|change it|correction|not that|meant to say|instead of|I meant|should be|typo|oops|mistake|scratch that|wait no|no wait|let me fix|hold on|my bad)\b/i.test(lower) || (/\bactually\b/i.test(lower) && /\b(it's|its|should|is|was|meant|wrong|not|change|different)\b/i.test(lower))
+  // "I want X not Y" / "X not Y" / "actually X" all count as corrections.
+  // The "not" pattern is the most common natural way to correct ("I want
+  // topsoil not structural fill") and the old regex missed it.
+  const isCorrection = /\b(wrong|change it|correction|not that|meant to say|instead of|I meant|should be|typo|oops|mistake|scratch that|wait no|no wait|let me fix|hold on|my bad)\b/i.test(lower)
+    || (/\bactually\b/i.test(lower) && /\b(it's|its|should|is|was|meant|wrong|not|change|different|want|need)\b/i.test(lower))
+    || /\b(want|need)\s+\w+(\s+\w+)?\s+not\s+\w+/i.test(lower)  // "want topsoil not structural"
+    || /\bnot\s+(fill dirt|structural fill|topsoil|sand)\b/i.test(lower)  // "not structural fill"
   const needName = !has(conv.customer_name) || (isCorrection && /\b(name|call me|im actually|i'm actually)\b/i.test(lower))
   const needAddress = !has(conv.delivery_address) || (isCorrection && isAddress)
   const needPurpose = !has(conv.material_purpose)
@@ -1692,7 +1720,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     // from spamming admin with MANUAL_PRIORITY alerts for dates we can
     // already hit.
     const dateWithinStandard = isWithinStandardWindow(merged.delivery_date || "")
-    const needsPriorityQuote = isSpecificDate && !dateWithinStandard
+    // needsPriorityQuote is false when quarry pricing is killswitched OFF —
+    // every date gets standard pricing, no admin alerts, no LLM lottery.
+    const quarryEnabled = process.env.PRIORITY_QUARRY_ENABLED === "true"
+    const needsPriorityQuote = quarryEnabled && isSpecificDate && !dateWithinStandard
     const dualQuote = (merged.delivery_lat && merged.delivery_lng)
       ? await getDualQuote(
           merged.customer_name || "",

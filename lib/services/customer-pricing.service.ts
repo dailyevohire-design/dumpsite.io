@@ -297,6 +297,14 @@ export async function calcPriorityQuote(
   standardPerYardCents: number, // to enforce priority >= standard
   requestedDate?: string,
 ): Promise<PriorityQuote | null> {
+  // KILLSWITCH: priority quoting requires the public_prices quarry table.
+  // If it isn't seeded yet, return null cleanly so the brain falls through
+  // to standard-only pricing instead of spamming admin with MANUAL_PRIORITY
+  // alerts. Set PRIORITY_QUARRY_ENABLED=true in env once the quarry data
+  // is in place.
+  if (process.env.PRIORITY_QUARRY_ENABLED !== "true") {
+    return null
+  }
   // ── Step 1: Find quarries within 60 miles with matching material ──
   const materialNames = QUARRY_MATERIAL_MAP[materialType] || ["Fill Dirt"]
   const sb = createAdminSupabase()
