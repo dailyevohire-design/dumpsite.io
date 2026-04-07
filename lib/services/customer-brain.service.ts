@@ -545,6 +545,28 @@ OUTPUT FORMAT: JSON only, no markdown
 {"response":"your text to the customer","extractedData":{}}`
 
 // ─────────────────────────────────────────────────────────
+// DETERMINISTIC ORDER-CONFIRMATION PRESENTER
+// ─────────────────────────────────────────────────────────
+// When a customer accepts a standard quote, the brain creates the dispatch
+// order and we MUST tell the customer "your order is confirmed" deterministically.
+// Sarah is unreliable for critical confirmation moments — same reason she's
+// unreliable for price relay.
+function presentStandardConfirmText(opts: {
+  firstName: string
+  yards: number
+  material: string
+  city: string
+  totalCents: number
+  delivery_date?: string
+}): string {
+  const greeting = opts.firstName ? `${opts.firstName} you're all set` : "All set"
+  const dateLine = opts.delivery_date && !/flexible|whenever/i.test(opts.delivery_date)
+    ? `for ${opts.delivery_date}`
+    : `for delivery in 3-5 business days`
+  return `${greeting}, your order is confirmed ${dateLine} — ${opts.yards} yards of ${opts.material} to ${opts.city || "your location"} at ${fmt$(opts.totalCents)}. You'll get a text when your driver is heading your way. Payment is collected after delivery, we take Venmo, Zelle, or online invoice (card has a 3.5% fee), I'll send the details after the drop`
+}
+
+// ─────────────────────────────────────────────────────────
 // DETERMINISTIC QUOTE PRESENTERS
 // ─────────────────────────────────────────────────────────
 // Sarah is an LLM and is unreliable at relaying exact numbers. The brain
@@ -1298,8 +1320,16 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           // Notify sales agent
           const orderAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
           if (orderAgent) await notifyAgent(orderAgent, `New order received: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} to ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
-          const s = await callSarah(body, conv, history, `Customer chose standard delivery. Tell them their delivery is confirmed for ${conv.delivery_date || "the schedule"}. They'll get a text when their driver is heading their way. Mention that payment is collected after delivery, we accept Venmo, Zelle, or online invoice (card has a 3.5% fee). Keep it casual, dont send actual account info yet`)
-          reply = validate(s.response, lastOut)
+          // DETERMINISTIC confirmation — never let Sarah drift on the moment
+          // we tell the customer their order is locked in.
+          reply = validate(presentStandardConfirmText({
+            firstName: (conv.customer_name || "").split(/\s+/)[0],
+            yards,
+            material: fmtMaterial(conv.material_type || "fill_dirt"),
+            city: conv.delivery_city || "",
+            totalCents: conv.total_price_cents || 0,
+            delivery_date: conv.delivery_date,
+          }), lastOut)
         } else {
           // Dispatch failed — DO NOT tell customer it's confirmed
           updates.state = "QUOTING" // Stay in QUOTING so they can retry
