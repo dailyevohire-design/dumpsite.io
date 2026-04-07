@@ -140,6 +140,78 @@ export function calcStandardQuote(
 }
 
 // ─────────────────────────────────────────────────────────
+// STANDARD-WINDOW DETECTOR
+// ─────────────────────────────────────────────────────────
+// Standard delivery is 3-5 business days. If the customer's requested date
+// falls within that window, we should NOT attempt priority/quarry pricing —
+// we can just use the standard zone quote and confirm the date with them.
+//
+// Only TRULY urgent dates (today, tomorrow, day-after-tomorrow, ASAP) need
+// the priority quarry path. Everything else (Friday from Mon/Tue, next week,
+// end of month, in 2 weeks, etc.) is standard.
+//
+// This is what stops the brain from spamming admin with MANUAL_PRIORITY
+// alerts for dates we can already meet with standard delivery.
+export function isWithinStandardWindow(dateText: string, today: Date = new Date()): boolean {
+  const t = (dateText || "").toLowerCase().trim()
+  if (!t) return true // no date given → flexible → standard
+
+  // Hard urgent — definitely NOT within standard window
+  if (/\b(today|hoy|right away|same day|same.?day|asap|as soon as|urgent|lo antes|cuanto antes)\b/.test(t)) return false
+  if (/\b(tomorrow|manana|mañana)\b/.test(t)) return false
+  if (/\b(day after tomorrow|in (a |1 )?day|next day|in 24 hours|tonight)\b/.test(t)) return false
+
+  // Flexible signals — definitely within standard window
+  if (/\b(flexible|whenever|no rush|no hurry|not urgent|when.?ever|no specific|any.?time|any day|doesn.?t matter|don.?t care|up to you)\b/.test(t)) return true
+  if (/\b(this week|next week|this weekend|next weekend|next month|in (a|two|three|few|several|2|3|4|5|6) (weeks?|months?|days?)|end of (the )?(week|month))\b/.test(t)) return true
+
+  // Day-of-week names: figure out how many days until that day
+  const dayMap: Record<string, number> = {
+    sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
+    domingo: 0, lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6,
+  }
+  const dayMatch = t.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|domingo|lunes|martes|miercoles|jueves|viernes|sabado)\b/)
+  if (dayMatch) {
+    const targetIdx = dayMap[dayMatch[1]]
+    const todayIdx = today.getDay()
+    let daysUntil = (targetIdx - todayIdx + 7) % 7
+    if (daysUntil === 0) daysUntil = 7 // "Friday" said on Friday → assume next Friday
+    // 3+ days out → standard window, 0-2 days out → urgent
+    return daysUntil >= 3
+  }
+
+  // Numeric date M/D — parse and check business-days delta
+  const numDate = t.match(/\b(\d{1,2})[\/\-](\d{1,2})\b/)
+  if (numDate) {
+    const month = parseInt(numDate[1], 10) - 1
+    const day = parseInt(numDate[2], 10)
+    const target = new Date(today.getFullYear(), month, day)
+    if (target < today) target.setFullYear(today.getFullYear() + 1) // already passed → next year
+    const diffDays = Math.ceil((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
+    return diffDays >= 3
+  }
+
+  // "April 15" / "apr 15"
+  const monthDate = t.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+(\d{1,2})\b/)
+  if (monthDate) {
+    const months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]
+    const m = months.indexOf(monthDate[1])
+    const d = parseInt(monthDate[2], 10)
+    if (m >= 0 && d > 0) {
+      const target = new Date(today.getFullYear(), m, d)
+      if (target < today) target.setFullYear(today.getFullYear() + 1)
+      const diffDays = Math.ceil((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
+      return diffDays >= 3
+    }
+  }
+
+  // Default: if we can't tell and it's not clearly urgent, treat as standard.
+  // The brain will still present standard pricing — better than spamming
+  // admin with priority-confirm alerts on dates we can already meet.
+  return true
+}
+
+// ─────────────────────────────────────────────────────────
 // SAFE FALLBACK QUOTE — never returns null
 // ─────────────────────────────────────────────────────────
 // Used by the customer brain when:

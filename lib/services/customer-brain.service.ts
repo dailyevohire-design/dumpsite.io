@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { createAdminSupabase } from "../supabase"
-import { getDualQuote, safeFallbackQuote } from "./customer-pricing.service"
+import { getDualQuote, safeFallbackQuote, isWithinStandardWindow } from "./customer-pricing.service"
 import { createDispatchOrder as systemDispatch } from "./dispatch.service"
 import { createCustomerPaymentCheckout, checkPaymentStatus } from "./payment.service"
 import twilio from "twilio"
@@ -1552,6 +1552,14 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     // Detect if customer gave a SPECIFIC date vs "flexible/whenever"
     const isFlexibleDate = /flexible|whenever|no rush|no hurry|not urgent|no specific|any.?time|doesn.?t matter|don.?t care/i.test(merged.delivery_date || "")
     const isSpecificDate = !isFlexibleDate && has(merged.delivery_date)
+    // CRITICAL: even when the date is "specific," if it falls within our
+    // 3-5 business day standard window (e.g. "by Friday" said on a Tuesday,
+    // "next week", "in 2 weeks"), we DO NOT need priority/quarry pricing.
+    // Standard zone pricing already meets that date. This stops the brain
+    // from spamming admin with MANUAL_PRIORITY alerts for dates we can
+    // already hit.
+    const dateWithinStandard = isWithinStandardWindow(merged.delivery_date || "")
+    const needsPriorityQuote = isSpecificDate && !dateWithinStandard
     const dualQuote = (merged.delivery_lat && merged.delivery_lng)
       ? await getDualQuote(
           merged.customer_name || "",
@@ -1576,8 +1584,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         updates._priority_quarry_name = dualQuote.priority.quarryName
       }
       // Sarah presents the formatted dual quote exactly as the pricing engine wrote it
-      if (isSpecificDate && dualQuote.priority) {
-        // Customer gave specific date — MUST present both options clearly
+      if (needsPriorityQuote && dualQuote.priority) {
+        // Customer gave a TRULY urgent date (today/tomorrow/ASAP) AND we have
+        // a quarry quote — present both options
         instruction = `Customer needs it by ${merged.delivery_date}. Present BOTH options clearly:
 
 Option 1 - Standard delivery: ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), 3-5 business days, sometimes sooner if we get a cancellation
@@ -1585,15 +1594,17 @@ Option 1 - Standard delivery: ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dua
 Option 2 - Guaranteed by ${merged.delivery_date}: ${fmt$(dualQuote.priority.totalCents)} (${fmt$(dualQuote.priority.perYardCents)}/yard), locked in delivery date, payment upfront to secure the date
 
 Ask which works better for them. Keep it natural, two short lines for the options then ask which one`
-      } else if (isSpecificDate && !dualQuote.priority) {
-        // Customer asked for specific date but quarry pricing failed.
-        // Present the standard quote with full transparency, mark for manual
-        // priority follow-up. Customer never gets stuck — they have a number
-        // they can react to right now.
+      } else if (needsPriorityQuote && !dualQuote.priority) {
+        // TRULY urgent date but quarry pricing failed — manual priority alert
         const msg = `${conv.customer_name || phone} wants guaranteed delivery by "${merged.delivery_date}" — no quarry pricing available for ${fmtMaterial(merged.material_type||"fill_dirt")}. Standard quote ${fmt$(dualQuote.standard.totalCents)} was presented. Confirm exact upcharge and text customer.`
         await notifyAdmin(`MANUAL PRIORITY NEEDED: ${msg}`, `manual_prio_${Date.now()}`)
         await flagPendingAction(phone, "MANUAL_PRIORITY", msg)
         instruction = `Customer wants it by ${merged.delivery_date}. Present the standard quote first: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} is ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard) for standard 3-5 business days. Then say something like "for guaranteed by ${merged.delivery_date} specifically I need a couple minutes to confirm the exact upcharge, give me a sec and I'll lock in the number." Keep it natural and short.`
+      } else if (isSpecificDate && dateWithinStandard) {
+        // Customer gave a date that's already within the standard window
+        // (e.g. "by Friday" said on a Tuesday). No priority needed, no admin
+        // alert, just present standard pricing and confirm we'll meet the date.
+        instruction = `Customer asked for delivery by ${merged.delivery_date}, and that's within our standard 3-5 business day window so we can hit that with the standard quote. Present it: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} comes to ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), delivery by ${merged.delivery_date} no problem. Ask if they want to get that scheduled.`
       } else if (isFlexibleDate) {
         // Flexible date — just show standard
         instruction = `Present the standard quote: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} comes to ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
