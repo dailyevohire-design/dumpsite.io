@@ -969,10 +969,28 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     return null
   })()
   // Flexible yes/no — match at start or as the whole message. Allows trailing words like "yes please do it"
-  const isYes = /^(yes|yeah|yep|sure|ok|okay|si|dale|absolutely|definitely|perfect|ready)\b/i.test(lower) || /\b(lets do it|let's do it|sounds good|go ahead|book it|schedule it|set it up|do it|im down|i'm down|im in|i'm in|lets go|let's go|sure thing|sounds great|sounds perfect|that works|works for me|go for it|lock it in)\b/i.test(lower)
-  const isNo = /^(no|nah|nope|pass|never mind|not now|not interested)\b/i.test(lower) || /\b(too much|too expensive|way too much|too high|cant afford|can't afford|out of my budget|too pricey|hard pass|no way|no thanks|no thank you|nah im good|nah i'm good|not right now|maybe later|ill pass|i'll pass)\b/i.test(lower)
+  // ── isYes / isNo — anchored to confirmation/rejection intent ──
+  // CRITICAL: these decide whether the brain places an order. Any false
+  // positive places an order the customer didn't approve.
+  //
+  // The simple words "ok" / "okay" / "ready" / "sure" must NOT match alone —
+  // they're often acknowledgements ("ok let me think", "ok thanks", "ready
+  // for the price?") not confirmations. Require either:
+  //   (a) the word standalone (the entire trimmed message is "ok")
+  //   (b) the word followed by an unambiguous confirmation phrase
+  // Same logic applies to "no" (false-positive on "no rush", "no problem",
+  // "no tax right").
+  const trimmedLower = lower.trim()
+  const isBareYes = /^(yes|yeah|yep|yup|si|dale|sounds good|perfect|works|absolutely|definitely)[.!?]?$/i.test(trimmedLower)
+  const isBareNo = /^(no|nah|nope|pass)[.!?]?$/i.test(trimmedLower)
+  const isYes = isBareYes
+    || /\b(lets do it|let's do it|go ahead|book it|schedule it|set it up|do it|im down|i'm down|im in|i'm in|lets go|let's go|sure thing|sounds great|sounds perfect|that works|works for me|go for it|lock it in|lock me in|lock it|im ready|i'm ready|ready to (book|schedule|go|order|move|do)|ready to move forward|move forward|ill take it|i'll take it|sign me up|count me in|im sold|i'm sold|ok lets do|ok let's do|ok book|ok schedule|ok lets go|ok let's go|ok do it|yes please|yes lets|yes let's|yes book|yes schedule|yes do)\b/i.test(lower)
+  const isNo = isBareNo
+    || /\b(too much|too expensive|way too much|too high|cant afford|can't afford|out of my budget|too pricey|hard pass|no way|no thanks|no thank you|nah im good|nah i'm good|not right now|not interested|maybe later|ill pass|i'll pass|cancel that|forget it|nevermind|never mind|dont want|don't want|dont need|don't need|not gonna|im out|i'm out)\b/i.test(lower)
   // Must be an actual cancellation REQUEST, not a question about cancellation policy
-  const isCancel = /\b(i want to cancel|cancel (my|the|this) (order|delivery)|please cancel|need to cancel|cancel it|refund|money back|want my money)\b/i.test(lower)
+  // isCancel — must be a clear cancellation REQUEST. Removed "want my money"
+  // because "I want my money's worth" is a negotiation, not a cancellation.
+  const isCancel = /\b(i want to cancel|cancel (my|the|this) (order|delivery)|please cancel|need to cancel|cancel it|cancel everything|refund my (order|delivery|payment)|i need a refund|want a refund|money back please|give me my money back)\b/i.test(lower)
   const isStatus = /\b(status|tracking|eta|update)\b|where.*(my|is my|the).*(order|delivery|driver|truck)|when.*(my|is my|the).*(order|delivery|driver|truck|arriving|coming|getting here)|how long.*(until|till|before|for)|any.*(update|news|word)|what.*(happening|going on).*order|check.*(on|my).*(order|delivery)/i.test(lower)
   // Must clearly indicate they made a payment, not just casual "done" or "sent" in other context
   const isPaymentConfirm = /\b(just sent|payment sent|i sent it|i paid|just paid|i transferred|just transferred|sent the payment|sent it|paid it|payment done|its paid|it's paid|sent the money|money sent|sent via|paid via)\b/i.test(lower)
@@ -1273,7 +1291,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // ── DELIVERED — delivery done, payment confirmed ──
   if (state === "DELIVERED") {
     // Check if they want a new order (any material/project/yard language)
-    const wantsNewOrder = /\b(more|another|new order|need dirt|need fill|need topsoil|need sand|delivery|another load|order again|same thing|same order|reorder)\b/i.test(lower) || inlineMaterial || inlineYards || isAddress
+    // wantsNewOrder must be intent-clear, not a positive comment about the
+    // last delivery. "the delivery was great" must NOT trigger a new order.
+    // Require explicit intent words or actual order data (material/yards/address).
+    const wantsNewOrder = /\b(need more|want more|order more|another (load|delivery|order)|new (order|delivery|load)|more dirt|more fill|more topsoil|more sand|need (dirt|fill|topsoil|sand)|want (dirt|fill|topsoil|sand)|order again|same thing|same order|reorder|do it again|book another|need to (order|book|schedule)|can i (order|get|book))\b/i.test(lower) || inlineMaterial || inlineYards || isAddress
     if (wantsNewOrder) {
       // Start fresh order — clear old data, keep name
       const s = await callSarah(body, conv, history, `Returning customer wants to place a new order. Welcome them back, acknowledge what they said, and ask what they need. They already know the process so keep it efficient`)
@@ -1342,7 +1363,11 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
     // Customer asking about delivery timing (common in QUOTING state) —
     // answer deterministically so Sarah doesnt mangle the quote text.
-    const isAskingWhen = /\b(when|how soon|how long|how fast|how quick|eta|timeframe|timeline|what.?s the timeline|by when|schedule|deliver(y|ed)?)\b/i.test(lower)
+    //
+    // CRITICAL: do NOT include bare "schedule" or "deliver" — those match
+    // confirmations like "schedule the delivery please" / "yes deliver it".
+    // Require an actual interrogative or open question structure.
+    const isAskingWhen = /\b(when (can|will|do|would|are|could)|how soon|how long|how fast|how quick|whats the eta|what.?s the eta|whats the timeline|what.?s the timeline|when.s delivery|when is delivery|how much time|what.?s the timeframe|whats the timeframe|when do you|when would you|how many days)\b/i.test(lower)
       && !isYes && !isNo
     if (isAskingWhen) {
       const yards = conv.yards_needed || MIN_YARDS
