@@ -1442,19 +1442,56 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       instruction = `Ask how many cubic yards of ${fmtMaterial(merged.material_type)} they need. If they're not sure, you can help calculate from dimensions (length x width x depth in feet)`
     }
   } else if (!mHas("access_type")) {
-    // Check if customer just answered yes/no to the access question
-    if (isYes || /\b(sure|yep|yeah|of course|definitely|absolutely|they can|it can|room|plenty|wide|open|no problem|no issue)\b/i.test(lower)) {
+    // ── ACCESS DETECTION ──
+    // Customer can answer in many ways. We classify into:
+    //   dump_truck_and_18wheeler  (yes / 18-wheeler can fit / wide open / etc)
+    //   dump_truck_only           (no / can't fit a semi / just dump trucks /
+    //                              tandem / regular trucks / small ones / etc)
+    //
+    // Critical: if we asked the access question and we can't classify, we
+    // DEFAULT to dump_truck_only rather than re-asking. Per the truck-access
+    // rule: dump trucks go EVERYWHERE — only 18-wheelers need access. Picking
+    // dump_truck_only is the safe inclusive choice and never blocks delivery.
+    const justAskedAccess = /\b(18.?wheeler|18 wheeler|big truck|big rig|semi|standard dump|regular dump|dump truck|access|fit|wider road|turn around|wider street|narrow|tight street)\b/i.test(lastOut || "")
+    const mentions18Wheeler = /\b(18.?wheeler|18 wheeler|semi|big truck|big rig|tractor.?trailer|wheeler)\b/i.test(lower)
+    const mentionsDumpTruckSpec = /\b(dump truck|dump trucks|regular truck|regular trucks|standard truck|standard trucks|tandem|triaxle|tri.?axle|quad axle|smaller truck|small truck|smaller trucks|small trucks|just dump|just standard|just the dump|just the standard|just regular|small ones|regular ones|standard ones|the dump ones)\b/i.test(lower)
+    const positiveSignal = isYes || /\b(sure|yep|yeah|of course|definitely|absolutely|they can|it can|room|plenty|wide|wide open|open|no problem|no issue|no big deal|no sweat|fits|can fit|will fit|works|fine|easy|big enough|enough room|huge|large)\b/i.test(lower)
+    // "no" excluded when it's followed by problem/issue/big deal/sweat — positive idioms
+    const negativeSignal = isNo || /\bno(?!\s+(problem|issue|big\s+deal|sweat|doubt))\b/i.test(lower) || /\b(nope|nah|cant|can.?t|wont|won.?t|cannot|wont fit|won.?t fit|cant fit|can.?t fit|too tight|too narrow|too small|narrow|tight|small|skinny|residential|driveway|alley)\b/i.test(lower)
+
+    let resolved: "dump_truck_and_18wheeler" | "dump_truck_only" | null = null
+    if (mentions18Wheeler && positiveSignal && !negativeSignal) {
+      resolved = "dump_truck_and_18wheeler"
+    } else if (mentions18Wheeler && negativeSignal) {
+      resolved = "dump_truck_only"
+    } else if (mentionsDumpTruckSpec) {
+      // "dump trucks" / "tandem" / "regular trucks" — they're picking the
+      // smaller-truck option even without saying "no"
+      resolved = "dump_truck_only"
+    } else if (positiveSignal && !mentions18Wheeler) {
+      // Bare "yes" right after the access question → they're saying YES, an
+      // 18-wheeler can fit
+      resolved = "dump_truck_and_18wheeler"
+    } else if (negativeSignal) {
+      resolved = "dump_truck_only"
+    } else if (justAskedAccess) {
+      // Catchall: we just asked about access, the customer responded with
+      // something we couldn't parse. Default to dump_truck_only (always works)
+      // and move on. Never loop on this question.
+      resolved = "dump_truck_only"
+    }
+
+    if (resolved === "dump_truck_and_18wheeler") {
       updates.access_type = "dump_truck_and_18wheeler"
-      // Skip ahead — don't re-ask, move to date
       if (!mHas("delivery_date")) {
         instruction = "Got it, 18-wheelers can get in. Now ask about their timeline, do they need it by a specific date or are they flexible"
       } else {
         instruction = "__GENERATE_QUOTE__"
       }
-    } else if (isNo || /\b(no|nope|nah|cant|can.?t|wont fit|too tight|too narrow|small)\b/i.test(lower)) {
+    } else if (resolved === "dump_truck_only") {
       updates.access_type = "dump_truck_only"
       if (!mHas("delivery_date")) {
-        instruction = "Got it, standard dump trucks only, no 18-wheelers. Now ask about their timeline, do they need it by a specific date or are they flexible"
+        instruction = "Got it, standard dump trucks. Now ask about their timeline, do they need it by a specific date or are they flexible"
       } else {
         instruction = "__GENERATE_QUOTE__"
       }
