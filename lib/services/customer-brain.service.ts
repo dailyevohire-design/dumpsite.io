@@ -478,6 +478,25 @@ CRITICAL RULES — NEVER BREAK:
 - NEVER give price ranges or estimates from your general knowledge. Only share exact prices when the system gives you a specific quote to present. If you don't have a quote yet, say "let me get you the exact number" and ask the next question to complete the quote.
 - ALWAYS follow the task instruction. The >>> YOUR TASK <<< section tells you exactly what to say. Do that FIRST, then add personality. Don't ignore the task to talk about something else.
 
+NO FAKE PLEASANTRIES — THIS IS THE MOST IMPORTANT TONE RULE:
+Real people texting do NOT open with greeting fluff. They respond directly. You MUST do the same.
+- NEVER start with "glad you reached out", "thanks for reaching out", "happy to help", "great to hear from you", "appreciate you contacting us", "thanks for your message", "thanks for getting in touch", "thank you for", "good to hear", or anything in that family. These sound like a customer service script, not a real person.
+- NEVER start with "Of course", "Absolutely", "Certainly", "No problem", "For sure" as a standalone opener.
+- NEVER use "I'd be happy to", "I'd love to", "I would be glad to" — none of that.
+- Open with the actual answer or the actual question. If they said "I need 20 yards of fill dirt" your reply opens with information about that, not a thank you.
+- It's OK and good to be warm. Warmth comes from short, direct, useful replies — not from preambles.
+
+GOOD examples of opening lines:
+  "got it, whats the address"
+  "20 yards is right around a triaxle load. wheres it going"
+  "yeah we cover that area, what are you using it for"
+  "fill dirt's $12-18/yard depending on distance, let me get you the exact number"
+BAD examples (NEVER do these):
+  "Hey, glad you reached out!"
+  "Thanks for getting in touch, happy to help with your dirt needs"
+  "Of course, I'd be glad to help you out with that"
+  "Appreciate you texting in, let me see what I can do"
+
 SELF-CHECK BEFORE RESPONDING:
 1. Did I follow the TASK instruction above?
 2. Did I answer their question FIRST before asking mine?
@@ -573,10 +592,16 @@ function validate(r: string, lastOutbound: string): string {
   r = r.replace(/\s*[—–]\s*/g, ", ").replace(/,\s*,/g, ",").trim()
   // Strip exclamation marks — real people texting don't use these
   r = r.replace(/!/g, "")
-  // Strip "Ha " / "Haha " / "Lol " openers — sounds fake
-  r = r.replace(/^(ha|haha|hehe|lol|oops|sorry|my bad|apologies)\s*,?\s*/i, "").trim()
+  // Strip "Ha " / "Haha " / "Lol " openers — sounds fake.
+  // \b is critical: without it, "Happy" → "ppy" because "Ha" matches.
+  r = r.replace(/^(ha|haha|hehe|lol|oops|sorry|my bad|apologies)\b\s*,?\s*/i, "").trim()
   // Never apologize — Sarah has nothing to be sorry for
   r = r.replace(/\b(sorry about that|my apologies|I apologize|sorry for)\b/gi, "").replace(/\s{2,}/g, " ").trim()
+  // Strip robotic customer-service openers — these make Sarah sound like a script,
+  // not a real person texting from her phone. Belt-and-suspenders for the prompt rule.
+  r = r.replace(/^(hey|hi|hello)?\s*[,!]?\s*(thanks for (reaching out|getting in touch|texting|your message|contacting us|messaging)|thank you for (reaching out|getting in touch|texting|your message|contacting us|messaging)|glad you (reached out|texted|got in touch|messaged)|happy to help( you)?( with that)?|great to hear from you|appreciate you (reaching out|texting|contacting us)|i'?d (be )?(happy|glad|love) to (help|assist)( you)?( with that)?)\s*[,.!]?\s*/i, "").trim()
+  // Strip standalone "Of course" / "Absolutely" / "Certainly" / "No problem" openers
+  r = r.replace(/^(of course|absolutely|certainly|no problem|for sure)\s*[,!.]?\s*/i, "").trim()
   // Truncate if too long
   if (r.length > 320) r = r.split(/[.?\n]/).filter(s => s.trim().length > 5).slice(0, 3).join(". ").trim()
   // Remove trailing period
@@ -730,13 +755,21 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   })()
 
   // ── DELIVERY DATE EXTRACTION ──
+  // Detect if our LAST outbound message was the timing question. If so, we
+  // accept the customer's response as the date answer no matter what they
+  // say — otherwise we'd loop forever asking "do you need it by a date or
+  // are you flexible" because the regex below misses common phrasings like
+  // "in two weeks", "end of the month", "weekend", "no specific date", etc.
+  const justAskedTiming = /\b(timeline|specific date|are you flexible|by when|need it by|when do you need|when would you|when did you|what.s your timeline|need this by|need that by|when are you|when you need)\b/i.test(lastOut || "")
   const inlineDate = (() => {
     if (/\b(today|hoy)\b/i.test(lower)) return "Today"
     if (/\b(tomorrow|manana|mañana)\b/i.test(lower)) return "Tomorrow"
     if (/\b(asap|as soon as|right away|urgent|lo antes|cuanto antes)\b/i.test(lower)) return "ASAP"
-    if (/\b(this week)\b/i.test(lower)) return "This week"
-    if (/\b(next week)\b/i.test(lower)) return "Next week"
-    if (/\b(flexible|whenever|no rush|no hurry|not urgent|when.?ever)\b/i.test(lower)) return "Flexible"
+    if (/\b(this week|this weekend)\b/i.test(lower)) return "This week"
+    if (/\b(next week|next weekend)\b/i.test(lower)) return "Next week"
+    if (/\b(next month|in a month|end of (the )?month)\b/i.test(lower)) return "Next month"
+    if (/\b(in (a )?(few|couple|two|three|2|3) (weeks|days)|in (\d+) (weeks|days))\b/i.test(lower)) return body.trim().slice(0, 60)
+    if (/\b(flexible|whenever|no rush|no hurry|not urgent|when.?ever|no specific|any.?time|any day|doesn.?t matter|don.?t care|up to you)\b/i.test(lower)) return "Flexible"
     // Try to match a date like "April 5" or "4/5" or "monday"
     const dateMatch = body.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i)
     if (dateMatch) return dateMatch[0]
@@ -744,6 +777,13 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     if (numDate) return `${numDate[1]}/${numDate[2]}`
     const monthDate = body.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+(\d{1,2})\b/i)
     if (monthDate) return `${monthDate[1]} ${monthDate[2]}`
+    // FALLBACK: if we just asked about timing and they responded with anything
+    // non-trivial, take it as the date so we never loop. The pricing engine
+    // and isFlexibleDate downstream interpret "Flexible" vs specific from the
+    // text itself.
+    if (justAskedTiming && body.trim().length >= 2 && body.trim().length < 80) {
+      return body.trim()
+    }
     return null
   })()
   // Flexible yes/no — match at start or as the whole message. Allows trailing words like "yes please do it"
