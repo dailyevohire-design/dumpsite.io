@@ -1278,10 +1278,40 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // ── QUOTING — we gave a price, waiting for yes/no ──
   if (state === "QUOTING") {
-    // Detect if customer picked priority or standard
-    const isPriority = /priority|option 2|guaranteed|lock.?in|specific date|quarry/i.test(lower)
-    const isStandard = /standard|option 1|regular|3.?5\s*(day|business)|flexible|cheaper|first/i.test(lower)
+    // Detect if customer picked priority or standard.
+    // CRITICAL: do NOT include "cheaper" or "first" in isStandard — those
+    // get falsely triggered by "can you do cheaper" (negotiation, NOT
+    // confirmation) which would fire an order the customer didn't agree to.
+    const isPriority = /\b(priority|option 2|guaranteed|lock.?in|quarry)\b/i.test(lower)
+    const isStandard = /\b(standard|option 1|first option|the first one|regular delivery|3.?5\s*(day|business))\b/i.test(lower)
     const hasPriorityQuote = has(conv.priority_total_cents)
+
+    // Customer is negotiating (asking for discount) — DO NOT confirm an
+    // order, just hold the line on pricing deterministically.
+    const isNegotiating = /\b(cheaper|cheap|discount|lower price|lower the price|come down|knock off|knock down|too high|too expensive|deal|price match|haggle|reduce|sale|coupon)\b/i.test(lower)
+    if (isNegotiating) {
+      const yards = conv.yards_needed || MIN_YARDS
+      const material = fmtMaterial(conv.material_type || "fill_dirt")
+      const firstName = (conv.customer_name || "").split(/\s+/)[0]
+      const greeting = firstName ? `${firstName} ` : ""
+      reply = validate(`${greeting}that's already our locked in zone rate for ${yards} yards of ${material} to ${conv.delivery_city || "your area"} at ${fmt$(conv.total_price_cents || 0)} (${fmt$(conv.price_per_yard_cents || 0)}/yard). I can't go lower on this load, but if you can do a bigger load the per yard rate stays the same so its more efficient. Want to lock it in or think about it`, lastOut)
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+
+    // Customer asking about delivery timing (common in QUOTING state) —
+    // answer deterministically so Sarah doesnt mangle the quote text.
+    const isAskingWhen = /\b(when|how soon|how long|how fast|how quick|eta|timeframe|timeline|what.?s the timeline|by when|schedule|deliver(y|ed)?)\b/i.test(lower)
+      && !isYes && !isNo
+    if (isAskingWhen) {
+      const yards = conv.yards_needed || MIN_YARDS
+      const material = fmtMaterial(conv.material_type || "fill_dirt")
+      const firstName = (conv.customer_name || "").split(/\s+/)[0]
+      const greeting = firstName ? `${firstName} ` : ""
+      reply = validate(`${greeting}standard delivery is 3-5 business days, sometimes sooner if we get a cancellation in your area. ${yards} yards of ${material} to ${conv.delivery_city || "your area"} at ${fmt$(conv.total_price_cents || 0)} total. Want me to get it scheduled`, lastOut)
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
 
     if (isYes || isPriority || isStandard) {
       // Customer wants to move forward — determine which option
