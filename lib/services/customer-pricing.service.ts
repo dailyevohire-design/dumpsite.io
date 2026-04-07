@@ -140,6 +140,56 @@ export function calcStandardQuote(
 }
 
 // ─────────────────────────────────────────────────────────
+// SAFE FALLBACK QUOTE — never returns null
+// ─────────────────────────────────────────────────────────
+// Used by the customer brain when:
+//   • geocoding failed (no coords)
+//   • address is outside the 60-mile service zone
+//   • getDualQuote crashed for any reason
+//
+// The point: the customer ALWAYS gets a number they can react to. We never
+// say "having a little trouble pulling up pricing" — that's the stuck signal
+// that breaks the conversation. Instead we present a transparent estimate
+// based on the published zone table, mark it as needs-manual-confirmation,
+// and alert admin so a human can lock in the exact figure within the hour.
+export interface FallbackQuote extends StandardQuote {
+  isFallback: true
+  reason: "no_coordinates" | "outside_service_area" | "pricing_engine_error"
+}
+
+export function safeFallbackQuote(
+  materialType: string,
+  yards: number,
+  reason: FallbackQuote["reason"],
+  distanceMilesHint?: number,
+): FallbackQuote {
+  // Pick a zone:
+  //  - if we have a distance hint, use the matching zone (this happens when
+  //    geocoding succeeded but quarry pricing later failed)
+  //  - otherwise default to zone B ($15/yd) — middle of the table, fair both
+  //    to the customer and to us. NEVER zone C, NEVER zone A by default.
+  let zone = ZONES[1] // zone B default
+  if (typeof distanceMilesHint === "number" && distanceMilesHint >= 0) {
+    const found = ZONES.find(z => distanceMilesHint >= z.min && (distanceMilesHint < z.max || (z.zone === "C" && distanceMilesHint <= z.max)))
+    if (found) zone = found
+  }
+  const surcharge = SURCHARGE_CENTS[materialType] || 0
+  const perYard = zone.baseCents + surcharge
+  const billable = Math.max(yards, MIN_YARDS)
+  const total = billable * perYard
+  return {
+    type: "standard",
+    zone: zone.zone,
+    perYardCents: perYard,
+    totalCents: total,
+    billableYards: billable,
+    estimatedDelivery: "3-5 business days",
+    isFallback: true,
+    reason,
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // PRIORITY QUOTE — quarry + real drive time + delivery cost
 // ─────────────────────────────────────────────────────────
 export interface QuarryOption {

@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { createAdminSupabase } from "../supabase"
-import { getDualQuote } from "./customer-pricing.service"
+import { getDualQuote, safeFallbackQuote } from "./customer-pricing.service"
 import { createDispatchOrder as systemDispatch } from "./dispatch.service"
 import { createCustomerPaymentCheckout, checkPaymentStatus } from "./payment.service"
 import twilio from "twilio"
@@ -1110,6 +1110,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         // Dual quote was shown but they just said "yes" — need to clarify
         const s = await callSarah(body, conv, history, `Customer said yes but we gave them two options. Ask which one they want: standard delivery at ${fmt$(conv.total_price_cents||0)} (3-5 business days) or priority at ${fmt$(conv.priority_total_cents)} (guaranteed by ${conv.priority_guaranteed_date}). Keep it casual, just ask which works better`)
         reply = validate(s.response, lastOut)
+      } else if (wantsPriority && !hasPriorityQuote) {
+        // Customer asked for guaranteed/priority but we never built a quarry quote
+        // (quarry data missing for this material/region, or initial quote was the
+        // standalone fallback path). Don't silently fall to standard — that's a
+        // bait-and-switch. Keep them in QUOTING, alert admin to manually confirm
+        // the upcharge, and tell the customer we're locking in the exact figure.
+        await notifyAdmin(`MANUAL PRIORITY CONFIRM: ${conv.customer_name || phone} chose PRIORITY for ${conv.yards_needed || MIN_YARDS}yds ${fmtMaterial(conv.material_type||"fill_dirt")} to ${conv.delivery_city || "?"} — no quarry quote was generated upfront. Standard quote was ${fmt$(conv.total_price_cents||0)}. Confirm exact upcharge for their requested date "${conv.delivery_date || "?"}" and text customer with payment link.`, `manual_prio2_${Date.now()}`)
+        const s = await callSarah(body, conv, history, `Customer chose priority/guaranteed delivery. Tell them you're pulling the exact upcharge for their specific date right now and will text them back in a couple minutes with the locked-in number and a payment link to secure the date. Casual, confident, NOT apologetic.`)
+        reply = validate(s.response, lastOut)
       } else if (wantsPriority && hasPriorityQuote) {
         // PRIORITY — charge upfront via Stripe before dispatching
         updates.order_type = "priority"
@@ -1140,10 +1149,16 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           const prioOrderAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
           if (prioOrderAgent) await notifyAgent(prioOrderAgent, `Priority order pending payment: ${conv.customer_name} | ${fmt$(conv.priority_total_cents)} | ${yards}yds ${material} to ${conv.delivery_city} | Awaiting Stripe payment`, sid)
         } else {
-          // Stripe failed — fall back to manual handling
-          const s = await callSarah(body, conv, history, "Tell the customer you're having a small issue getting the payment link set up. You'll have someone from the team text them shortly to get it sorted out")
+          // Stripe failed — DO NOT say "having a small issue" (stuck signal).
+          // Tell the customer their order is locked in, payment link incoming
+          // in 2 minutes. Alert admin LOUDLY with full order details so they
+          // can manually create a Stripe checkout and text the link.
+          updates.state = "AWAITING_PRIORITY_PAYMENT" // hold the priority slot
+          updates.order_type = "priority"
+          await savePriorityFields(phone, { order_type: "priority" })
+          const s = await callSarah(body, conv, history, `Customer chose priority. Tell them you've got their guaranteed delivery for ${conv.priority_guaranteed_date} locked in and you're sending the payment link in the next couple minutes. Casual and confident, NOT apologetic. Do NOT say there's an issue.`)
           reply = validate(s.response, lastOut)
-          await notifyAdmin(`STRIPE CHECKOUT FAILED for ${conv.customer_name} (${phone}) — priority order ${fmt$(conv.priority_total_cents)} needs manual handling. Error: ${checkout.error}`, sid)
+          await notifyAdmin(`URGENT STRIPE FAILED for ${conv.customer_name || phone} — priority ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed || MIN_YARDS}yds ${fmtMaterial(conv.material_type||"fill_dirt")} guaranteed ${conv.priority_guaranteed_date}. Customer was told payment link in 2 min. CREATE STRIPE CHECKOUT MANUALLY AND TEXT THEM. Stripe error: ${checkout.error}`, sid)
         }
       } else {
         // STANDARD — existing flow, pay after delivery
@@ -1452,33 +1467,45 @@ Option 1 - Standard delivery: ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dua
 Option 2 - Guaranteed by ${merged.delivery_date}: ${fmt$(dualQuote.priority.totalCents)} (${fmt$(dualQuote.priority.perYardCents)}/yard), locked in delivery date, payment upfront to secure the date
 
 Ask which works better for them. Keep it natural, two short lines for the options then ask which one`
-      } else if (isFlexibleDate || !dualQuote.priority) {
-        // Flexible date or no priority available — just show standard
+      } else if (isSpecificDate && !dualQuote.priority) {
+        // Customer asked for specific date but quarry pricing failed.
+        // Present the standard quote with full transparency, mark for manual
+        // priority follow-up. Customer never gets stuck — they have a number
+        // they can react to right now.
+        await notifyAdmin(`MANUAL PRIORITY NEEDED: ${conv.customer_name || phone} wants guaranteed delivery by "${merged.delivery_date}" — no quarry pricing available for ${fmtMaterial(merged.material_type||"fill_dirt")}. Standard quote ${fmt$(dualQuote.standard.totalCents)} was presented. Confirm exact upcharge and text customer.`, `manual_prio_${Date.now()}`)
+        instruction = `Customer wants it by ${merged.delivery_date}. Present the standard quote first: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} is ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard) for standard 3-5 business days. Then say something like "for guaranteed by ${merged.delivery_date} specifically I need a couple minutes to confirm the exact upcharge, give me a sec and I'll lock in the number." Keep it natural and short.`
+      } else if (isFlexibleDate) {
+        // Flexible date — just show standard
         instruction = `Present the standard quote: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} comes to ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
       } else {
         // Has priority but date wasn't clearly specific — show both but lead with standard
         instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
       }
     } else {
-      // Fallback: use inline zone pricing if getDualQuote fails
-      const quote = calcQuote(merged.distance_miles || 0, merged.material_type || "fill_dirt", merged.yards_needed || MIN_YARDS)
-      if (quote) {
-        updates.price_per_yard_cents = quote.perYardCents
-        updates.total_price_cents = quote.totalCents
-        updates.state = "QUOTING"
-        const firstName = (merged.customer_name || "").split(/\s+/)[0]
-        instruction = `Give ${firstName} their quote: ${quote.billable} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||"their location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
-      } else if (merged.delivery_lat && merged.delivery_lng) {
-        // Had coords but zone calc failed — genuinely outside service area
-        instruction = "Their delivery address is outside your service area (more than 60 miles from your yards in Dallas, Fort Worth or Denver). Let them know and ask if there's another address"
-        updates.state = "COLLECTING"
-      } else {
-        // No coords — geocode failed, address was saved but we can't price it
-        // Don't tell them "outside service area" — that's a lie. Escalate.
-        await notifyAdmin(`CANNOT QUOTE: ${conv.customer_name || phone} at "${merged.delivery_address}" — no coordinates. Geocode failed. Needs manual quote.`, `no_coords_${Date.now()}`)
-        instruction = "Tell the customer you're having a little trouble pulling up the exact pricing for their address. Someone from the team will text them with a quote shortly"
-        updates.state = "COLLECTING"
-      }
+      // ── NEVER STUCK PATH ──
+      // getDualQuote returned null. This happens when geocoding failed (no
+      // coords) or the customer is genuinely outside the 60-mile service zone.
+      // We do NOT loop or say "having a little trouble." We present a safe
+      // fallback quote, mark the conversation for manual confirmation, and
+      // alert admin loudly so a human can lock in the exact figure.
+      const reason: "no_coordinates" | "outside_service_area" =
+        (merged.delivery_lat && merged.delivery_lng) ? "outside_service_area" : "no_coordinates"
+      const fb = safeFallbackQuote(
+        merged.material_type || "fill_dirt",
+        merged.yards_needed || MIN_YARDS,
+        reason,
+        merged.distance_miles || undefined,
+      )
+      updates.price_per_yard_cents = fb.perYardCents
+      updates.total_price_cents = fb.totalCents
+      updates.zone = fb.zone
+      updates.state = "QUOTING"
+      const reasonHuman = reason === "no_coordinates"
+        ? `geocoding failed for "${merged.delivery_address}"`
+        : `address is outside the 60-mile service zone`
+      await notifyAdmin(`MANUAL CONFIRM NEEDED: ${conv.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(merged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`, `fallback_${Date.now()}`)
+      const firstName = (merged.customer_name || "").split(/\s+/)[0]
+      instruction = `Give ${firstName} a transparent estimate: ${fb.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||"their location"} runs around ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard) for standard delivery. Tell them you want to double-check the exact number for their specific address and you'll text them back the locked-in price within the hour. Be casual and confident, NOT apologetic — this is just dotting an i.`
     }
   }
 
@@ -1504,20 +1531,24 @@ Ask which works better for them. Keep it natural, two short lines for the option
       }
       instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
     } else {
-      const quote = calcQuote((qMerged.distance_miles || 0), qMerged.material_type || "fill_dirt", qMerged.yards_needed || MIN_YARDS)
-      if (quote) {
-        updates.price_per_yard_cents = quote.perYardCents
-        updates.total_price_cents = quote.totalCents
-        updates.state = "QUOTING"
-        instruction = `Give ${(qMerged.customer_name||"").split(/\s+/)[0]} their quote: ${quote.billable} yards of ${fmtMaterial(qMerged.material_type||"")} to ${qMerged.delivery_city||"your location"} comes to ${fmt$(quote.totalCents)} (${fmt$(quote.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
-      } else if (qMerged.delivery_lat && qMerged.delivery_lng) {
-        instruction = "Their delivery address is outside our service area. Let them know and ask if there's another address"
-        updates.state = "COLLECTING"
-      } else {
-        await notifyAdmin(`CANNOT QUOTE: ${qMerged.customer_name || phone} at "${qMerged.delivery_address}" — no coordinates. Needs manual quote.`, `no_coords2_${Date.now()}`)
-        instruction = "Tell the customer you're having a little trouble pulling up the exact pricing for their address. Someone from the team will text them with a quote shortly"
-        updates.state = "COLLECTING"
-      }
+      // ── NEVER STUCK PATH (mirror of the main pricing branch) ──
+      const reason: "no_coordinates" | "outside_service_area" =
+        (qMerged.delivery_lat && qMerged.delivery_lng) ? "outside_service_area" : "no_coordinates"
+      const fb = safeFallbackQuote(
+        qMerged.material_type || "fill_dirt",
+        qMerged.yards_needed || MIN_YARDS,
+        reason,
+        qMerged.distance_miles || undefined,
+      )
+      updates.price_per_yard_cents = fb.perYardCents
+      updates.total_price_cents = fb.totalCents
+      updates.zone = fb.zone
+      updates.state = "QUOTING"
+      const reasonHuman = reason === "no_coordinates"
+        ? `geocoding failed for "${qMerged.delivery_address}"`
+        : `address is outside the 60-mile service zone`
+      await notifyAdmin(`MANUAL CONFIRM NEEDED: ${qMerged.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(qMerged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`, `fallback2_${Date.now()}`)
+      instruction = `Give ${(qMerged.customer_name||"").split(/\s+/)[0]} a transparent estimate: ${fb.billableYards} yards of ${fmtMaterial(qMerged.material_type||"")} to ${qMerged.delivery_city||"their location"} runs around ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard) for standard delivery. Tell them you want to double-check the exact number for their specific address and will text back the locked-in price within the hour. Casual and confident, NOT apologetic.`
     }
   }
 
@@ -1602,9 +1633,21 @@ Ask which works better for them. Keep it natural, two short lines for the option
   return reply
 
   } catch (err: any) {
-    console.error("[CUSTOMER BRAIN CRASH]", err?.message || err)
+    // Brain crashed mid-conversation. Customer gets a safety reply so they're
+    // not silently dropped, but admin gets a LOUD alert with full context so
+    // a human can take over before this becomes a stuck conversation.
+    console.error("[CUSTOMER BRAIN CRASH]", err?.message || err, err?.stack || "")
     const fallback = "Give me one sec, let me check on that"
-    try { await logMsg(normalizePhone(sms.from), fallback, "outbound", `safety_${sms.messageSid}`) } catch {}
+    const phoneFallback = normalizePhone(sms.from)
+    try { await logMsg(phoneFallback, fallback, "outbound", `safety_${sms.messageSid}`) } catch {}
+    try {
+      await notifyAdmin(
+        `BRAIN CRASH for ${phoneFallback}: ${(err?.message || String(err)).slice(0, 200)}. ` +
+        `Customer's last msg: "${(sms.body || "").slice(0, 100)}". ` +
+        `Sent safety reply. TAKE OVER MANUALLY.`,
+        `crash_${sms.messageSid}`,
+      )
+    } catch {}
     return fallback
   }
 }
