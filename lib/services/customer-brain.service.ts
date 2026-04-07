@@ -954,6 +954,22 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
+    // NEVER-STUCK: count how many recent outbound messages were payment-method
+    // prompts. After 3 in a row with no Venmo/Zelle/invoice match, give up
+    // and hand off to a human via admin alert. Customer was likely confused
+    // or evasive — a person can finish the collection.
+    const recentPayPrompts = history
+      .filter(h => h.role === "assistant")
+      .slice(-4)
+      .filter(h => /\b(venmo|zelle|invoice|payment|pay)\b/i.test(h.content)).length
+    if (recentPayPrompts >= 3) {
+      await flagPendingAction(phone, "MANUAL_QUOTE", `${conv.customer_name || phone} delivered (${fmt$(conv.total_price_cents||0)}) — couldn't get a clear payment method after ${recentPayPrompts} tries. Call them or send invoice manually.`)
+      await notifyAdmin(`PAYMENT METHOD STUCK: ${conv.customer_name || phone} delivered ${fmt$(conv.total_price_cents||0)} — couldn't pin a method after ${recentPayPrompts} tries. CALL OR INVOICE MANUALLY.`, `pay_stuck_${Date.now()}`)
+      const s = await callSarah(body, conv, history, "Tell them no worries on the payment method — youll have someone from the team reach out directly to take care of it. Casual and friendly.")
+      reply = validate(s.response, lastOut)
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
     // General question while waiting for payment
     const s = await callSarah(body, conv, history, `Delivery is complete, waiting on payment of ${fmt$(conv.total_price_cents||0)}. Answer their question, then remind them we accept Venmo, Zelle, or online invoice (card with 3.5% fee). Which works for them`)
     reply = validate(s.response, lastOut)
@@ -1249,8 +1265,24 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       reply = validate(s.response, lastOut)
       await notifyAdmin(`INVOICE NEEDED: ${conv.customer_name} | ${email} | ${fmt$(conv.total_price_cents||0)}`, sid)
     } else {
-      const s = await callSarah(body, conv, history, "Need their email to send the invoice. They didn't give a valid email. Ask again naturally")
-      reply = validate(s.response, lastOut)
+      // NEVER-STUCK: count how many times we've already asked for the email
+      // in the recent outbound history. After 2 unparseable attempts, give up
+      // and let admin handle the invoice manually using their phone — never
+      // trap the customer in an "ask for email" loop.
+      const recentEmailAsks = history
+        .filter(h => h.role === "assistant")
+        .slice(-3)
+        .filter(h => /\bemail\b/i.test(h.content)).length
+      if (recentEmailAsks >= 2) {
+        updates.state = "AWAITING_PAYMENT"
+        await flagPendingAction(phone, "MANUAL_QUOTE", `${conv.customer_name || phone} couldn't provide a valid email after ${recentEmailAsks} asks. Standard quote ${fmt$(conv.total_price_cents||0)}. Use their phone (${phone}) to send the invoice manually or call them.`)
+        await notifyAdmin(`MANUAL INVOICE: ${conv.customer_name || phone} couldn't give a valid email. Send invoice manually or use phone.`, `email_giveup_${Date.now()}`)
+        const s = await callSarah(body, conv, history, "No worries on the email, you'll have someone from the team reach out to handle the invoice directly. Thank them and confirm.")
+        reply = validate(s.response, lastOut)
+      } else {
+        const s = await callSarah(body, conv, history, "Need their email to send the invoice. Ask again naturally — say something like 'just to make sure I got it right, whats your email'")
+        reply = validate(s.response, lastOut)
+      }
     }
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -1415,7 +1447,12 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         updates.material_type = lastMaterial.key
         instruction = `They confirmed ${lastMaterial.name}. Now ask how many cubic yards they need. If they're not sure, you can help calculate from dimensions`
       } else {
-        instruction = `Customer said they need dirt for: "${merged.material_purpose}". Based on your knowledge, recommend the right material type (fill dirt, structural fill, screened topsoil, or sand). Explain briefly why that material is right for their project. Then ask how many cubic yards they need, and offer to help calculate if they're not sure`
+        // NEVER-STUCK: customer affirmed but Sarah's last message didn't have
+        // a material keyword we could pin to. Default to fill_dirt (most
+        // common, safest choice) and proceed. The pricing engine and admin
+        // dashboard will catch any mismatch downstream.
+        updates.material_type = "fill_dirt"
+        instruction = `They confirmed. Going with fill dirt (most common for general projects). Now ask how many cubic yards they need. If they're not sure, you can help calculate from dimensions`
       }
     } else {
       instruction = `Customer said they need dirt for: "${merged.material_purpose}". Based on your knowledge, recommend the right material type (fill dirt, structural fill, screened topsoil, or sand). Explain briefly why that material is right for their project. Then ask how many cubic yards they need, and offer to help calculate if they're not sure`
@@ -1424,6 +1461,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     // Detect if they gave partial dimensions (e.g. "40 x 40" — 2 numbers, missing depth)
     const hasPartialDims = /\d+\s*[x×]\s*\d+/i.test(body) || /\d+\s*by\s*\d+/i.test(body) || /\d+\s*ft?\s*[x×]\s*\d+/i.test(body)
     const nums = body.match(/(\d+\.?\d*)/g)
+    // Detect if our last outbound was the yards question — used as the
+    // never-stuck signal so we never re-ask the same thing forever.
+    const justAskedYards = /\b(cubic yards?|how many yards?|how much (dirt|fill|topsoil|sand|material)|how many do you need|how many cy|how many loads)\b/i.test(lastOut || "")
     if (hasPartialDims && nums && nums.length === 2) {
       // They gave length x width but no depth — ask for depth, we'll calculate
       updates.state = "ASKING_DIMENSIONS"
@@ -1438,6 +1478,13 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     } else if (/don.?t know|not sure|no idea|how much|figure|calculate|dimensions|measure/i.test(lower)) {
       instruction = "Customer doesn't know how many yards. Ask them for the dimensions of the area, length width and depth in feet. Tell them you'll calculate it for them"
       updates.state = "ASKING_DIMENSIONS"
+    } else if (justAskedYards) {
+      // NEVER-STUCK CATCHALL: we asked about yards and the customer responded
+      // with something un-parseable ("a couple loads", "as much as you can",
+      // "what does that mean"). Route to the dimensions helper so Sarah
+      // offers to compute from L x W x D — we never re-ask the same thing.
+      updates.state = "ASKING_DIMENSIONS"
+      instruction = "Customer responded but didn't give a clear yard amount. Tell them no worries, you can calculate it from the dimensions of the area. Ask for length, width, and depth in feet (or inches for the depth). If they have a project type like 'pool fill' or 'leveling backyard' you can also work from that — be helpful and figure out what they need."
     } else {
       instruction = `Ask how many cubic yards of ${fmtMaterial(merged.material_type)} they need. If they're not sure, you can help calculate from dimensions (length x width x depth in feet)`
     }
@@ -1696,6 +1743,23 @@ Ask which works better for them. Keep it natural, two short lines for the option
 
   const s = await callSarah(body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them")
   reply = validate(s.response, lastOut)
+
+  // ── GLOBAL LOOP DETECTOR ──
+  // If we're about to send a reply that's substantially the same as either of
+  // the last 2 outbound messages, the brain is stuck in a loop. Force a hand-
+  // off to admin and replace the reply with a graceful "someone will reach
+  // out" so the customer never sees the same Sarah message 3 times in a row.
+  // Similarity check: first 60 chars (case + whitespace normalized).
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 60)
+  const recentOutbound = history.filter(h => h.role === "assistant").slice(-2).map(h => norm(h.content))
+  const newNorm = norm(reply)
+  if (newNorm.length > 10 && recentOutbound.filter(r => r === newNorm).length >= 2) {
+    console.error(`[brain LOOP DETECTED] phone=${phone} state=${state} repeating: "${newNorm}"`)
+    await flagPendingAction(phone, "BRAIN_CRASH", `LOOP DETECTED — Sarah was about to repeat the same message a 3rd time. State: ${state}. Last customer msg: "${body.slice(0, 80)}". Repeated reply: "${reply.slice(0, 100)}". TAKE OVER MANUALLY.`)
+    await notifyAdmin(`LOOP DETECTED for ${conv.customer_name || phone} — Sarah stuck repeating "${newNorm}". State: ${state}. TAKE OVER.`, `loop_${sid}`)
+    reply = "Hey, let me grab someone from the team to help you out — they'll text you in just a few minutes"
+  }
+
   // Persist priority quote data FIRST (before saveConv) to avoid state/data mismatch
   // Check with != null instead of truthiness so $0 quotes still save
   if (updates._priority_total_cents != null) {
