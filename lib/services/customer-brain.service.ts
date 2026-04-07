@@ -501,6 +501,13 @@ AD LEADS (CRAIGSLIST, FACEBOOK, ETC):
 - They may say things like "I saw your ad", "texting about the dirt", "someone told me to text this number" — just roll with it. You already know they came from an ad. Don't explain it.
 - Some customers will text once, get busy, and text again hours or days later from the same number. That's totally normal. The system remembers their conversation. Pick up where you left off, don't restart from scratch. If they seem confused, just say "hey we were chatting earlier" and continue.
 
+YOUR NAME WHEN AN AGENT IS ASSIGNED:
+- If the CONVERSATION STATE includes a line "YOUR NAME IN THIS CONVERSATION: {name}", that is who you are in this conversation. NOT Sarah. The customer texted that agent's number from an ad and thinks they're talking to that person.
+- Drop your name ONCE, casually, on the message right after the customer tells you their name. Example: customer says "im Mike", you reply "got it Mike, im John, whats the delivery address". Don't say "Hi I'm John" — just slip it in naturally.
+- After that one introduction, do NOT keep repeating your name. Real people don't say their name in every text.
+- NEVER use the name "Sarah" if a different name is specified in the CONVERSATION STATE.
+- NEVER mention any company name (Fill Dirt Near Me, etc.) when you have an assigned agent name. The customer thinks this is a personal phone, not a business line.
+
 CRITICAL RULES — NEVER BREAK:
 - NEVER say "I'll get back to you", "let me check and get back", "I'll follow up", or any promise to proactively text them later. You CANNOT initiate texts. If you say this, the customer waits forever and nobody follows up.
 - NEVER give price ranges or estimates from your general knowledge. Only share exact prices when the system gives you a specific quote to present in the TASK section.
@@ -612,11 +619,13 @@ function presentDualQuoteText(opts: {
 async function callSarah(
   body: string, conv: any, history: { role: "user"|"assistant"; content: string }[],
   instruction: string,
+  agentName?: string,
 ): Promise<{ response: string; extractedData?: any }> {
   try {
     // Build context — tells Sonnet exactly what we know and what to do
     const has = (v: any) => v !== null && v !== undefined && v !== ""
     const collected: string[] = []
+    if (agentName) collected.push(`YOUR NAME IN THIS CONVERSATION: ${agentName} (use this name, NOT Sarah)`)
     if (has(conv.customer_name)) collected.push(`Name: ${conv.customer_name}`)
     if (has(conv.delivery_address)) collected.push(`Address: ${conv.delivery_address} (${conv.delivery_city || ""}, ${conv.distance_miles || "?"}mi, Zone ${conv.zone || "?"})`)
     if (has(conv.material_purpose)) collected.push(`Purpose: ${conv.material_purpose}`)
@@ -766,6 +775,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // Look up which agent's Twilio number was texted. Store on conversation for commission tracking.
   // Agent is set ONCE on first contact and preserved via COALESCE on subsequent messages.
   const agent = await lookupAgent(sourceNumber)
+  // First name only (e.g. "John Luehrsen" → "John"). Used as Sarah's identity
+  // when the customer texted an agent number. Falls back to undefined when
+  // there's no agent (default number → Sarah from Fill Dirt Near Me).
+  const agentFirstName = agent ? (agent.name || "").split(/\s+/)[0] : undefined
 
   // ── RAPID-FIRE CONCATENATION ──
   // If customer sent multiple messages in quick succession WITHOUT Sarah replying,
@@ -1426,11 +1439,14 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const merged = { ...conv, ...updates }
     const mHas = (k: string) => { const v = (merged as any)[k]; return v !== null && v !== undefined && v !== "" }
     let newInstruction = ""
-    // Agent numbers: customer came from an ad, was told "text me" — DON'T introduce as Sarah or mention company name
+    // Agent numbers: customer came from an ad. The first message is casual
+    // (no introduction) so Sarah picks up where the ad left off. The agent's
+    // name gets dropped LATER, on the message right after the customer gives
+    // their name (handled in the COLLECTING flow below).
     // Default number: no agent context — introduce as Sarah with Fill Dirt Near Me
     const isAgentLead = agent !== null
     const intro = isAgentLead
-      ? "Hey, respond casually like you're picking up where the ad left off. Do NOT introduce yourself by name. Do NOT say any company name. Just jump right in like you're the person they expect to talk to."
+      ? "Respond casually like you're picking up where the ad left off. Do NOT introduce yourself by name yet. Do NOT say any company name. Just jump right in like you're the person they expect to talk to."
       : "Say hey this is Sarah with Fill Dirt Near Me."
     if (firstMsgParts.length > 0) {
       // They gave us info — acknowledge it and ask for the NEXT missing thing
@@ -1439,7 +1455,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     } else {
       newInstruction = `New customer just texted. ${intro} Ask what their name is. One short message, nothing else. Do NOT apologize, do NOT use dashes, do NOT use exclamation marks`
     }
-    const s = await callSarah(body, merged, history, newInstruction)
+    const s = await callSarah(body, merged, history, newInstruction, agentFirstName)
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -1539,7 +1555,18 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (!mHas("customer_name")) {
     instruction = "You still need their name. Ask naturally, like 'and whats your name' or 'what was your name'. If they told you about their project, acknowledge it briefly first then ask their name. Do NOT re-introduce yourself"
   } else if (!mHas("delivery_address")) {
-    instruction = `Ask ${(merged.customer_name||"").split(/\s+/)[0]} for the delivery address. Explain you need it to give an accurate quote based on their location`
+    // Detect if the customer JUST gave us their name (it's in updates, not in
+    // conv yet). If so, this is the natural moment for an agent to introduce
+    // themselves: "got it Mike, im John, whats the address?"
+    const justGotName = !!updates.customer_name && !conv.customer_name
+    const customerFirst = (merged.customer_name || "").split(/\s+/)[0]
+    if (justGotName && agentFirstName) {
+      instruction = `They just told you their name is ${customerFirst}. Acknowledge it casually, introduce yourself as ${agentFirstName} (just the first name, no company name), then ask for the delivery address. Example tone: "got it ${customerFirst}, im ${agentFirstName}, whats the delivery address" — natural and short.`
+    } else if (justGotName) {
+      instruction = `They just told you their name is ${customerFirst}. Acknowledge it casually then ask for the delivery address. Example: "got it ${customerFirst}, whats the delivery address"`
+    } else {
+      instruction = `Ask ${customerFirst} for the delivery address. Explain you need it to give an accurate quote based on their location`
+    }
   } else if (!mHas("material_purpose")) {
     instruction = "Ask what they're using the material for. Explain this helps you recommend the right type of dirt for their project. Be genuinely curious about their project"
   } else if (!mHas("material_type")) {
@@ -1932,7 +1959,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (instruction === "__DETERMINISTIC_REPLY__" && reply && reply.length > 0) {
     reply = validate(reply, lastOut)
   } else {
-    const s = await callSarah(body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them")
+    const s = await callSarah(body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them", agentFirstName)
     reply = validate(s.response, lastOut)
   }
 
