@@ -7,22 +7,27 @@ describe('safeFallbackQuote', () => {
     expect(q).not.toBeNull()
     expect(q.zone).toBe('B')
     expect(q.perYardCents).toBe(1500)        // $15/yd zone B base
-    expect(q.totalCents).toBe(30000)         // 20 × $15
+    expect(q.totalCents).toBe(30000)         // 20 × $15 (no small-load fee — exactly 20 yards)
+    expect(q.smallLoadFeeCents).toBe(0)      // 20+ yards = no fee
     expect(q.billableYards).toBe(20)
     expect(q.isFallback).toBe(true)
     expect(q.reason).toBe('no_coordinates')
   })
 
-  it('enforces 10-yard minimum even when customer asked for less', () => {
+  it('enforces 10-yard minimum AND charges small-load fee', () => {
     const q = safeFallbackQuote('fill_dirt', 5, 'no_coordinates')
     expect(q.billableYards).toBe(10)
-    expect(q.totalCents).toBe(15000)
+    expect(q.dirtSubtotalCents).toBe(15000)  // 10 × $15
+    expect(q.smallLoadFeeCents).toBe(5000)   // +$50 small-load fee
+    expect(q.totalCents).toBe(20000)         // dirt + fee
   })
 
-  it('applies material surcharge for screened topsoil (+$5/yd)', () => {
+  it('applies material surcharge for screened topsoil (+$5/yd) plus small-load fee', () => {
     const q = safeFallbackQuote('screened_topsoil', 10, 'no_coordinates')
     expect(q.perYardCents).toBe(2000)        // $15 + $5
-    expect(q.totalCents).toBe(20000)
+    expect(q.dirtSubtotalCents).toBe(20000)  // 10 × $20
+    expect(q.smallLoadFeeCents).toBe(5000)   // small-load fee (under 20yds)
+    expect(q.totalCents).toBe(25000)         // dirt + fee
   })
 
   it('applies structural fill surcharge (+$8/yd)', () => {
@@ -33,6 +38,19 @@ describe('safeFallbackQuote', () => {
   it('applies sand surcharge (+$6/yd)', () => {
     const q = safeFallbackQuote('sand', 10, 'no_coordinates')
     expect(q.perYardCents).toBe(2100)        // $15 + $6
+  })
+
+  it('NO small-load fee for orders 20+ yards', () => {
+    const q = safeFallbackQuote('fill_dirt', 20, 'no_coordinates')
+    expect(q.smallLoadFeeCents).toBe(0)
+    expect(q.totalCents).toBe(30000)         // 20 × $15
+  })
+
+  it('charges small-load fee for 19 yards (just under threshold)', () => {
+    const q = safeFallbackQuote('fill_dirt', 19, 'no_coordinates')
+    expect(q.smallLoadFeeCents).toBe(5000)
+    expect(q.dirtSubtotalCents).toBe(28500)  // 19 × $15
+    expect(q.totalCents).toBe(33500)
   })
 
   it('uses zone A pricing when distance hint is in zone A range', () => {

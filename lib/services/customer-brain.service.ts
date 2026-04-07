@@ -604,23 +604,44 @@ function presentStandardConfirmText(opts: {
 // for tone elsewhere; she never relays the dollar amount.
 function presentStandardQuoteText(opts: {
   firstName: string
-  yards: number
+  yards: number              // billable yards (after MIN_YARDS bump)
   material: string
   city: string
-  totalCents: number
+  totalCents: number         // all-in: dirt + small-load fee
   perYardCents: number
   delivery_date?: string
+  smallLoadFeeCents?: number // $50/truck if applicable
+  dirtSubtotalCents?: number // dirt only, before small-load fee
+  customerRequestedYards?: number  // what the customer originally said (optional)
 }): string {
   const yards = opts.yards
   const mat = opts.material
   const city = opts.city || "your location"
   const total = fmt$(opts.totalCents)
   const perYd = fmt$(opts.perYardCents)
+  const fee = opts.smallLoadFeeCents || 0
+  const dirtSubtotal = opts.dirtSubtotalCents ?? (opts.totalCents - fee)
+
   const dateLine = opts.delivery_date && !/flexible|whenever/i.test(opts.delivery_date)
-    ? ` for ${opts.delivery_date} no problem`
-    : ` standard 3-5 business days`
-  const greeting = opts.firstName ? `${opts.firstName} ` : ""
-  return `${greeting}${yards} yards of ${mat} to ${city} comes to ${total} (${perYd}/yard)${dateLine}. Want me to get that scheduled`
+    ? ` for ${opts.delivery_date}`
+    : ` for standard 3-5 business day delivery`
+  const greeting = opts.firstName ? `${opts.firstName}, ` : ""
+
+  // If customer asked for less than the minimum, explain the bump
+  let minNote = ""
+  if (opts.customerRequestedYards && opts.customerRequestedYards < yards) {
+    minNote = ` our minimum delivery is ${yards} yards (one truckload), anything you don't use you can pile wherever you want on the property.`
+  }
+
+  // Breakdown when there's a small-load fee
+  let breakdown = ""
+  if (fee > 0) {
+    breakdown = ` thats ${fmt$(dirtSubtotal)} for the dirt at ${perYd}/yard plus a ${fmt$(fee)} small load fee since its under 20 yards.`
+  } else {
+    breakdown = ` (${perYd}/yard)`
+  }
+
+  return `${greeting}${yards} yards of ${mat} to ${city} runs ${total}${breakdown}${minNote}${dateLine}. Want me to get that scheduled`
 }
 
 function presentDualQuoteText(opts: {
@@ -1299,6 +1320,26 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
+    // Customer asking "what's included" — answer deterministically
+    const isAskingWhatsIncluded = /\b(what.?s included|whats included|what does that include|whats in it|does that include|do you spread|do you grade|do you level|is delivery included|delivery free|free delivery|drop off only|just drop|just delivery|spread it|spread the dirt|grade it|extra fees|hidden fees|any fees|any other charges|tax included|with tax|includes tax)\b/i.test(lower)
+      && !isYes && !isNo
+    if (isAskingWhatsIncluded) {
+      reply = validate(`Delivery and dump only — we drop the dirt where you want it on your property. We don't spread or grade. Tax and delivery are included in the quoted price. The only thing not in there is if you want a specific guaranteed date, that's a separate priority option`, lastOut)
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+
+    // "Is that firm" / "is that the best you can do" — same as negotiation
+    const isAskingFirm = /\b(is that firm|firm price|best you can do|best price|final price|is that final|locked in|set in stone|wiggle room|any flexibility|any room|fixed price)\b/i.test(lower)
+      && !isYes && !isNo
+    if (isAskingFirm) {
+      const yards = conv.yards_needed || MIN_YARDS
+      const material = fmtMaterial(conv.material_type || "fill_dirt")
+      reply = validate(`Yeah that's our zone rate for ${yards} yards of ${material} to ${conv.delivery_city || "your area"} at ${fmt$(conv.total_price_cents || 0)}. Locked in by zone, can't move on it. Want me to get it scheduled`, lastOut)
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+
     // Customer asking about delivery timing (common in QUOTING state) —
     // answer deterministically so Sarah doesnt mangle the quote text.
     const isAskingWhen = /\b(when|how soon|how long|how fast|how quick|eta|timeframe|timeline|what.?s the timeline|by when|schedule|deliver(y|ed)?)\b/i.test(lower)
@@ -1808,6 +1849,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           city: merged.delivery_city || "",
           totalCents: dualQuote.standard.totalCents,
           perYardCents: dualQuote.standard.perYardCents,
+          smallLoadFeeCents: dualQuote.standard.smallLoadFeeCents,
+          dirtSubtotalCents: dualQuote.standard.dirtSubtotalCents,
+          customerRequestedYards: merged.yards_needed,
         }) + `. for guaranteed by ${merged.delivery_date} specifically someone will text you the exact upcharge in a couple minutes`
         instruction = "__DETERMINISTIC_REPLY__"
         const msg = `${conv.customer_name || phone} wants guaranteed delivery by "${merged.delivery_date}" — no quarry pricing available for ${fmtMaterial(merged.material_type||"fill_dirt")}. Standard quote ${fmt$(dualQuote.standard.totalCents)} was presented. Confirm exact upcharge and text customer.`
@@ -1825,6 +1869,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           totalCents: dualQuote.standard.totalCents,
           perYardCents: dualQuote.standard.perYardCents,
           delivery_date: merged.delivery_date,
+          smallLoadFeeCents: dualQuote.standard.smallLoadFeeCents,
+          dirtSubtotalCents: dualQuote.standard.dirtSubtotalCents,
+          customerRequestedYards: merged.yards_needed,
         })
         instruction = "__DETERMINISTIC_REPLY__"
       }
@@ -1861,6 +1908,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         city: merged.delivery_city || "",
         totalCents: fb.totalCents,
         perYardCents: fb.perYardCents,
+        smallLoadFeeCents: fb.smallLoadFeeCents,
+        dirtSubtotalCents: fb.dirtSubtotalCents,
+        customerRequestedYards: merged.yards_needed,
       })
       instruction = "__DETERMINISTIC_REPLY__"
     }
@@ -1912,6 +1962,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           totalCents: dualQuote.standard.totalCents,
           perYardCents: dualQuote.standard.perYardCents,
           delivery_date: qMerged.delivery_date,
+          smallLoadFeeCents: dualQuote.standard.smallLoadFeeCents,
+          dirtSubtotalCents: dualQuote.standard.dirtSubtotalCents,
+          customerRequestedYards: qMerged.yards_needed,
         })
       }
       instruction = "__DETERMINISTIC_REPLY__"
@@ -1942,6 +1995,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         city: qMerged.delivery_city || "",
         totalCents: fb.totalCents,
         perYardCents: fb.perYardCents,
+        smallLoadFeeCents: fb.smallLoadFeeCents,
+        dirtSubtotalCents: fb.dirtSubtotalCents,
+        customerRequestedYards: qMerged.yards_needed,
       })
       instruction = "__DETERMINISTIC_REPLY__"
     }

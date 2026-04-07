@@ -19,6 +19,23 @@ const SURCHARGE_CENTS: Record<string, number> = {
 const MIN_YARDS = 10
 const MARGIN_PER_YARD_CENTS = 600  // $6/yard on priority
 
+// Small-load surcharge: any order under 20 yards gets +$50/truck added to
+// the standard quote. This covers fixed dispatch costs that don't scale with
+// load size (loading time, fuel to/from yard, driver minimum). Most sub-20
+// orders are 1 truck (tandem 10yd, triaxle 16yd, end dump 18yd) so the fee
+// is typically $50 flat for these orders. Applied in BOTH calcStandardQuote
+// and safeFallbackQuote so customers always see consistent pricing.
+const SMALL_LOAD_FEE_CENTS = 5000  // $50 per truck
+const SMALL_LOAD_THRESHOLD_YARDS = 20
+
+function trucksForLoad(yards: number): number {
+  // Single truck handles up to 18 yards (end dump). 19-20 still 1 truck
+  // (end dump can hold ~20 in practice). 21+ needs 2 trucks. We're only
+  // calling this for sub-20 orders so the answer is always 1.
+  if (yards <= 20) return 1
+  return Math.ceil(yards / 18)
+}
+
 // Truck specs
 const TRUCKS = {
   tandem:    { capacity: 10, rateCents: 10000 },  // $100/hr
@@ -104,7 +121,9 @@ export interface StandardQuote {
   type: "standard"
   zone: string
   perYardCents: number
-  totalCents: number
+  totalCents: number       // dirt subtotal + small-load fee (the all-in number)
+  dirtSubtotalCents: number  // billable * perYard, no fees
+  smallLoadFeeCents: number  // $50/truck for sub-20-yard orders, else $0
   billableYards: number
   estimatedDelivery: string
 }
@@ -127,13 +146,21 @@ export function calcStandardQuote(
   const surcharge = SURCHARGE_CENTS[materialType] || 0
   const perYard = zone.baseCents + surcharge
   const billable = Math.max(yards, MIN_YARDS)
-  const total = billable * perYard
+  const dirtSubtotal = billable * perYard
+
+  // Small-load fee: sub-20-yard orders get +$50/truck
+  let smallLoadFee = 0
+  if (billable < SMALL_LOAD_THRESHOLD_YARDS) {
+    smallLoadFee = SMALL_LOAD_FEE_CENTS * trucksForLoad(billable)
+  }
 
   return {
     type: "standard",
     zone: zone.zone,
     perYardCents: perYard,
-    totalCents: total,
+    totalCents: dirtSubtotal + smallLoadFee,
+    dirtSubtotalCents: dirtSubtotal,
+    smallLoadFeeCents: smallLoadFee,
     billableYards: billable,
     estimatedDelivery: "3-5 business days",
   }
@@ -248,12 +275,18 @@ export function safeFallbackQuote(
   const surcharge = SURCHARGE_CENTS[materialType] || 0
   const perYard = zone.baseCents + surcharge
   const billable = Math.max(yards, MIN_YARDS)
-  const total = billable * perYard
+  const dirtSubtotal = billable * perYard
+  let smallLoadFee = 0
+  if (billable < SMALL_LOAD_THRESHOLD_YARDS) {
+    smallLoadFee = SMALL_LOAD_FEE_CENTS * trucksForLoad(billable)
+  }
   return {
     type: "standard",
     zone: zone.zone,
     perYardCents: perYard,
-    totalCents: total,
+    totalCents: dirtSubtotal + smallLoadFee,
+    dirtSubtotalCents: dirtSubtotal,
+    smallLoadFeeCents: smallLoadFee,
     billableYards: billable,
     estimatedDelivery: "3-5 business days",
     isFallback: true,
