@@ -320,6 +320,34 @@ async function sendSMS(to: string, body: string, sid: string) {
 
 const ADMIN_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
 
+// Pending-action types — keep in sync with the command center's stuck panel.
+// Each one represents a stuck path the brain handed off to a human.
+type PendingActionType =
+  | "MANUAL_QUOTE"           // safeFallbackQuote was used (geocode fail or outside zone)
+  | "MANUAL_PRIORITY"        // customer wanted guaranteed date, no quarry quote available
+  | "URGENT_STRIPE"          // Stripe checkout creation failed for a priority order
+  | "DISPATCH_FAILED"        // dispatch creation failed after order accepted
+  | "BRAIN_CRASH"            // the customer brain threw mid-handler
+  | "MANUAL_CITY"            // delivery_city not in cities table
+  | "NO_DRIVERS"             // out-of-area / no available drivers
+
+async function flagPendingAction(phone: string, type: PendingActionType, message: string): Promise<void> {
+  // Inserts a queryable row into customer_sms_logs that the command-center
+  // dashboard reads. We use customer_sms_logs (no migration needed) and a
+  // special direction value so it doesn't pollute the conversation history.
+  // Resolve = the dashboard updates direction to "resolved_action".
+  try {
+    await createAdminSupabase().from("customer_sms_logs").insert({
+      phone: phone || "system",
+      body: `${type} | ${message.slice(0, 800)}`,
+      direction: "pending_action",
+      message_sid: `pending_${type.toLowerCase()}_${Date.now()}`,
+    })
+  } catch (e) {
+    console.error("[flagPendingAction] insert failed:", (e as any)?.message)
+  }
+}
+
 async function notifyAdmin(msg: string, sid: string) {
   if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Admin: ${msg.slice(0, 80)}`); return }
   // Use driver number for admin alerts so replies don't hit customer webhook
@@ -1116,7 +1144,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         // standalone fallback path). Don't silently fall to standard — that's a
         // bait-and-switch. Keep them in QUOTING, alert admin to manually confirm
         // the upcharge, and tell the customer we're locking in the exact figure.
-        await notifyAdmin(`MANUAL PRIORITY CONFIRM: ${conv.customer_name || phone} chose PRIORITY for ${conv.yards_needed || MIN_YARDS}yds ${fmtMaterial(conv.material_type||"fill_dirt")} to ${conv.delivery_city || "?"} — no quarry quote was generated upfront. Standard quote was ${fmt$(conv.total_price_cents||0)}. Confirm exact upcharge for their requested date "${conv.delivery_date || "?"}" and text customer with payment link.`, `manual_prio2_${Date.now()}`)
+        const mp2 = `${conv.customer_name || phone} chose PRIORITY for ${conv.yards_needed || MIN_YARDS}yds ${fmtMaterial(conv.material_type||"fill_dirt")} to ${conv.delivery_city || "?"} — no quarry quote was generated upfront. Standard quote was ${fmt$(conv.total_price_cents||0)}. Confirm exact upcharge for their requested date "${conv.delivery_date || "?"}" and text customer with payment link.`
+        await notifyAdmin(`MANUAL PRIORITY CONFIRM: ${mp2}`, `manual_prio2_${Date.now()}`)
+        await flagPendingAction(phone, "MANUAL_PRIORITY", mp2)
         const s = await callSarah(body, conv, history, `Customer chose priority/guaranteed delivery. Tell them you're pulling the exact upcharge for their specific date right now and will text them back in a couple minutes with the locked-in number and a payment link to secure the date. Casual, confident, NOT apologetic.`)
         reply = validate(s.response, lastOut)
       } else if (wantsPriority && hasPriorityQuote) {
@@ -1158,7 +1188,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           await savePriorityFields(phone, { order_type: "priority" })
           const s = await callSarah(body, conv, history, `Customer chose priority. Tell them you've got their guaranteed delivery for ${conv.priority_guaranteed_date} locked in and you're sending the payment link in the next couple minutes. Casual and confident, NOT apologetic. Do NOT say there's an issue.`)
           reply = validate(s.response, lastOut)
-          await notifyAdmin(`URGENT STRIPE FAILED for ${conv.customer_name || phone} — priority ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed || MIN_YARDS}yds ${fmtMaterial(conv.material_type||"fill_dirt")} guaranteed ${conv.priority_guaranteed_date}. Customer was told payment link in 2 min. CREATE STRIPE CHECKOUT MANUALLY AND TEXT THEM. Stripe error: ${checkout.error}`, sid)
+          const stripeMsg = `${conv.customer_name || phone} — priority ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed || MIN_YARDS}yds ${fmtMaterial(conv.material_type||"fill_dirt")} guaranteed ${conv.priority_guaranteed_date}. Customer was told payment link in 2 min. CREATE STRIPE CHECKOUT MANUALLY AND TEXT THEM. Stripe error: ${checkout.error}`
+          await notifyAdmin(`URGENT STRIPE FAILED: ${stripeMsg}`, sid)
+          await flagPendingAction(phone, "URGENT_STRIPE", stripeMsg)
         }
       } else {
         // STANDARD — existing flow, pay after delivery
@@ -1179,7 +1211,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         } else {
           // Dispatch failed — DO NOT tell customer it's confirmed
           updates.state = "QUOTING" // Stay in QUOTING so they can retry
-          await notifyAdmin(`DISPATCH FAILED for ${conv.customer_name} (${phone}) | ${conv.yards_needed}yds to ${conv.delivery_city} | Customer was NOT told order is confirmed. Needs manual dispatch.`, sid)
+          const dispMsg = `${conv.customer_name} (${phone}) | ${conv.yards_needed}yds to ${conv.delivery_city} | Customer was NOT told order is confirmed. Needs manual dispatch.`
+          await notifyAdmin(`DISPATCH FAILED for ${dispMsg}`, sid)
+          await flagPendingAction(phone, "DISPATCH_FAILED", dispMsg)
           const s = await callSarah(body, conv, history, "Tell the customer you're working on getting their delivery set up. Ask them to give you just a few minutes while you confirm the details on your end")
           reply = validate(s.response, lastOut)
         }
@@ -1472,7 +1506,9 @@ Ask which works better for them. Keep it natural, two short lines for the option
         // Present the standard quote with full transparency, mark for manual
         // priority follow-up. Customer never gets stuck — they have a number
         // they can react to right now.
-        await notifyAdmin(`MANUAL PRIORITY NEEDED: ${conv.customer_name || phone} wants guaranteed delivery by "${merged.delivery_date}" — no quarry pricing available for ${fmtMaterial(merged.material_type||"fill_dirt")}. Standard quote ${fmt$(dualQuote.standard.totalCents)} was presented. Confirm exact upcharge and text customer.`, `manual_prio_${Date.now()}`)
+        const msg = `${conv.customer_name || phone} wants guaranteed delivery by "${merged.delivery_date}" — no quarry pricing available for ${fmtMaterial(merged.material_type||"fill_dirt")}. Standard quote ${fmt$(dualQuote.standard.totalCents)} was presented. Confirm exact upcharge and text customer.`
+        await notifyAdmin(`MANUAL PRIORITY NEEDED: ${msg}`, `manual_prio_${Date.now()}`)
+        await flagPendingAction(phone, "MANUAL_PRIORITY", msg)
         instruction = `Customer wants it by ${merged.delivery_date}. Present the standard quote first: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} is ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard) for standard 3-5 business days. Then say something like "for guaranteed by ${merged.delivery_date} specifically I need a couple minutes to confirm the exact upcharge, give me a sec and I'll lock in the number." Keep it natural and short.`
       } else if (isFlexibleDate) {
         // Flexible date — just show standard
@@ -1503,7 +1539,9 @@ Ask which works better for them. Keep it natural, two short lines for the option
       const reasonHuman = reason === "no_coordinates"
         ? `geocoding failed for "${merged.delivery_address}"`
         : `address is outside the 60-mile service zone`
-      await notifyAdmin(`MANUAL CONFIRM NEEDED: ${conv.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(merged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`, `fallback_${Date.now()}`)
+      const fbMsg = `${conv.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(merged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`
+      await notifyAdmin(`MANUAL CONFIRM NEEDED: ${fbMsg}`, `fallback_${Date.now()}`)
+      await flagPendingAction(phone, "MANUAL_QUOTE", fbMsg)
       const firstName = (merged.customer_name || "").split(/\s+/)[0]
       instruction = `Give ${firstName} a transparent estimate: ${fb.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||"their location"} runs around ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard) for standard delivery. Tell them you want to double-check the exact number for their specific address and you'll text them back the locked-in price within the hour. Be casual and confident, NOT apologetic — this is just dotting an i.`
     }
@@ -1547,7 +1585,9 @@ Ask which works better for them. Keep it natural, two short lines for the option
       const reasonHuman = reason === "no_coordinates"
         ? `geocoding failed for "${qMerged.delivery_address}"`
         : `address is outside the 60-mile service zone`
-      await notifyAdmin(`MANUAL CONFIRM NEEDED: ${qMerged.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(qMerged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`, `fallback2_${Date.now()}`)
+      const fbMsg2 = `${qMerged.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(qMerged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`
+      await notifyAdmin(`MANUAL CONFIRM NEEDED: ${fbMsg2}`, `fallback2_${Date.now()}`)
+      await flagPendingAction(phone, "MANUAL_QUOTE", fbMsg2)
       instruction = `Give ${(qMerged.customer_name||"").split(/\s+/)[0]} a transparent estimate: ${fb.billableYards} yards of ${fmtMaterial(qMerged.material_type||"")} to ${qMerged.delivery_city||"their location"} runs around ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard) for standard delivery. Tell them you want to double-check the exact number for their specific address and will text back the locked-in price within the hour. Casual and confident, NOT apologetic.`
     }
   }
@@ -1640,14 +1680,9 @@ Ask which works better for them. Keep it natural, two short lines for the option
     const fallback = "Give me one sec, let me check on that"
     const phoneFallback = normalizePhone(sms.from)
     try { await logMsg(phoneFallback, fallback, "outbound", `safety_${sms.messageSid}`) } catch {}
-    try {
-      await notifyAdmin(
-        `BRAIN CRASH for ${phoneFallback}: ${(err?.message || String(err)).slice(0, 200)}. ` +
-        `Customer's last msg: "${(sms.body || "").slice(0, 100)}". ` +
-        `Sent safety reply. TAKE OVER MANUALLY.`,
-        `crash_${sms.messageSid}`,
-      )
-    } catch {}
+    const crashMsg = `${(err?.message || String(err)).slice(0, 200)}. Customer's last msg: "${(sms.body || "").slice(0, 100)}". Sent safety reply. TAKE OVER MANUALLY.`
+    try { await notifyAdmin(`BRAIN CRASH for ${phoneFallback}: ${crashMsg}`, `crash_${sms.messageSid}`) } catch {}
+    try { await flagPendingAction(phoneFallback, "BRAIN_CRASH", crashMsg) } catch {}
     return fallback
   }
 }

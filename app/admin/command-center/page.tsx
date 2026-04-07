@@ -19,6 +19,72 @@ interface CommandData {
   staleOrders: any[]; unpaidCustomers: any[]; stuckDrivers: any[]; stuckCustomers: any[]; noShows: any[]
   recentSms: any[]; recentCustSms: any[]
   driverCount: number
+  pendingActions: PendingAction[]
+}
+
+interface PendingAction {
+  id: string
+  phone: string
+  type: string
+  message: string
+  created_at: string
+  minutesOld: number
+  customer_name: string | null
+  state: string | null
+  delivery_city: string | null
+  yards_needed: number | null
+  total_price_cents: number | null
+}
+
+const PENDING_TYPE_COLOR: Record<string, string> = {
+  MANUAL_QUOTE:    "#f59e0b",
+  MANUAL_PRIORITY: "#f97316",
+  URGENT_STRIPE:   "#ef4444",
+  DISPATCH_FAILED: "#ef4444",
+  BRAIN_CRASH:     "#dc2626",
+  MANUAL_CITY:     "#eab308",
+  NO_DRIVERS:      "#eab308",
+}
+
+function PendingActionsCard({ items, onResolve }: { items: PendingAction[]; onResolve: (id: string) => void }) {
+  if (!items || items.length === 0) {
+    return (
+      <Card title="Stuck Conversations / Manual Actions">
+        <div style={{ color: "#10b981", fontSize: 13 }}>None — every conversation moving forward cleanly</div>
+      </Card>
+    )
+  }
+  return (
+    <Card title={`${items.length} Stuck — needs your attention`} alert>
+      {items.map(item => {
+        const color = PENDING_TYPE_COLOR[item.type] || "#888"
+        const phone = (item.phone || "").replace(/\D/g, "")
+        const fmtPhone = phone.length === 10 ? `(${phone.slice(0, 3)}) ${phone.slice(3, 6)}-${phone.slice(6)}` : phone
+        const ageStr = item.minutesOld < 60 ? `${item.minutesOld}m` : `${Math.round(item.minutesOld / 60)}h`
+        const ageColor = item.minutesOld > 60 ? "#ef4444" : item.minutesOld > 15 ? "#f59e0b" : "#888"
+        const tel = `sms:+1${phone}`
+        return (
+          <div key={item.id} style={{ background: "#0a0a0a", border: `1px solid ${color}33`, borderLeft: `3px solid ${color}`, borderRadius: 6, padding: 12, marginBottom: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <div>
+                <span style={{ background: color, color: "#000", fontWeight: 700, fontSize: 11, padding: "2px 8px", borderRadius: 4, marginRight: 8 }}>{item.type}</span>
+                <span style={{ color: "#fff", fontWeight: 600, fontSize: 14 }}>{item.customer_name || fmtPhone}</span>
+                {item.delivery_city && <span style={{ color: "#888", marginLeft: 8, fontSize: 12 }}>· {item.delivery_city}</span>}
+                {item.yards_needed && <span style={{ color: "#888", marginLeft: 8, fontSize: 12 }}>· {item.yards_needed}yds</span>}
+                {item.total_price_cents && <span style={{ color: "#10b981", marginLeft: 8, fontSize: 12, fontWeight: 600 }}>${Math.round(item.total_price_cents / 100)}</span>}
+              </div>
+              <span style={{ color: ageColor, fontSize: 12, fontWeight: 600 }}>{ageStr} ago</span>
+            </div>
+            <div style={{ color: "#ccc", fontSize: 12, lineHeight: 1.4, marginBottom: 8 }}>{item.message}</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <a href={tel} style={{ background: "#2563eb", color: "#fff", padding: "5px 12px", borderRadius: 4, fontSize: 12, fontWeight: 600, textDecoration: "none" }}>Text {fmtPhone}</a>
+              <button onClick={() => onResolve(item.id)} style={{ background: "#16a34a", color: "#fff", padding: "5px 12px", borderRadius: 4, fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer" }}>Mark Resolved</button>
+            </div>
+          </div>
+        )
+      })}
+    </Card>
+  )
 }
 
 // ── Customer state colors ──
@@ -193,6 +259,14 @@ export default function CommandCenter() {
     setLoading(false)
   }
 
+  const resolveAction = async (id: string) => {
+    try {
+      const r = await fetch(`/api/admin/pending-actions/${id}/resolve`, { method: "POST" })
+      if (r.ok) refresh()
+      else alert("Failed to resolve — check console")
+    } catch (e) { console.error(e); alert("Network error resolving action") }
+  }
+
   // 10s polling on customers tab, 30s on others
   useEffect(() => {
     refresh()
@@ -222,6 +296,8 @@ export default function CommandCenter() {
           <button onClick={refresh} style={{ padding: "6px 14px", background: "#222", color: "#888", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13 }}>Refresh</button>
         </div>
       </div>
+
+      <PendingActionsCard items={data.pendingActions || []} onResolve={resolveAction} />
 
       {totalAlerts > 0 && (
         <Card title={`${totalAlerts} Active Alerts`} alert>

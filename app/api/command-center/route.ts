@@ -26,6 +26,7 @@ export async function GET() {
     { data: driverCount },
     { data: salesAgents },
     { data: agentOrders },
+    { data: pendingActionsRaw },
   ] = await Promise.all([
     // Orders today
     sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents, cities(name), created_at").gte("created_at", since),
@@ -68,6 +69,11 @@ export async function GET() {
     sb.from("customer_conversations").select("agent_id, state, total_price_cents, payment_status")
       .not("agent_id", "is", null)
       .gte("updated_at", weekAgo),
+    // Pending manual actions — every stuck-path the brain handed off to a human
+    sb.from("customer_sms_logs").select("id, phone, body, message_sid, created_at")
+      .eq("direction", "pending_action")
+      .gte("created_at", new Date(now - 48 * 60 * 60 * 1000).toISOString())
+      .order("created_at", { ascending: true }),
   ])
 
   // Calculate metrics
@@ -83,6 +89,54 @@ export async function GET() {
 
   const pendingPayTotal = (pendingDriverPay || []).reduce((s, p) => s + p.amount_cents / 100, 0)
   const unpaidCustTotal = (unpaidCustomers || []).reduce((s, c) => s + ((c.total_price_cents || 0) / 100), 0)
+
+  // ── Pending manual actions (the never-stuck handoff queue) ──
+  // Each row in customer_sms_logs with direction='pending_action' is a stuck
+  // path the brain handed off to a human. Body format: "TYPE | message".
+  // We enrich each one with the customer's current conversation state so the
+  // dashboard can show name, phone, current state, last activity.
+  const pendingActions: Array<{
+    id: string
+    phone: string
+    type: string
+    message: string
+    created_at: string
+    minutesOld: number
+    customer_name: string | null
+    state: string | null
+    delivery_city: string | null
+    yards_needed: number | null
+    total_price_cents: number | null
+  }> = []
+  if (pendingActionsRaw && pendingActionsRaw.length > 0) {
+    const phones = Array.from(new Set(pendingActionsRaw.map((r: any) => r.phone).filter((p: string) => p && p !== "system")))
+    let convsByPhone: Record<string, any> = {}
+    if (phones.length > 0) {
+      const { data: convs } = await sb
+        .from("customer_conversations")
+        .select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents")
+        .in("phone", phones)
+      for (const c of (convs || [])) convsByPhone[c.phone] = c
+    }
+    for (const r of pendingActionsRaw) {
+      const [type, ...rest] = (r.body || "").split(" | ")
+      const message = rest.join(" | ") || r.body || ""
+      const conv = convsByPhone[r.phone] || {}
+      pendingActions.push({
+        id: r.id,
+        phone: r.phone,
+        type: type || "UNKNOWN",
+        message,
+        created_at: r.created_at,
+        minutesOld: Math.round((now - new Date(r.created_at).getTime()) / 60000),
+        customer_name: conv.customer_name || null,
+        state: conv.state || null,
+        delivery_city: conv.delivery_city || null,
+        yards_needed: conv.yards_needed || null,
+        total_price_cents: conv.total_price_cents || null,
+      })
+    }
+  }
 
   // Build agent pipeline — leads, quoted $, orders per agent
   const agentMap: Record<string, { name: string; leads: number; quotedCents: number; orders: number; paidCents: number }> = {}
@@ -136,5 +190,6 @@ export async function GET() {
     recentSms: recentSms || [],
     recentCustSms: recentCustSms || [],
     driverCount: driverCount || 0,
+    pendingActions,
   })
 }
