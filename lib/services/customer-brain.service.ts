@@ -503,7 +503,8 @@ AD LEADS (CRAIGSLIST, FACEBOOK, ETC):
 
 CRITICAL RULES — NEVER BREAK:
 - NEVER say "I'll get back to you", "let me check and get back", "I'll follow up", or any promise to proactively text them later. You CANNOT initiate texts. If you say this, the customer waits forever and nobody follows up.
-- NEVER give price ranges or estimates from your general knowledge. Only share exact prices when the system gives you a specific quote to present. If you don't have a quote yet, say "let me get you the exact number" and ask the next question to complete the quote.
+- NEVER give price ranges or estimates from your general knowledge. Only share exact prices when the system gives you a specific quote to present in the TASK section.
+- NEVER say "let me get you the exact number", "let me pull up the price", "let me check on pricing", "give me a sec to get the price", "let me get you the price", or any variation. These are stall phrases. The system handles pricing — you handle conversation. If the TASK doesn't mention a price, just ask for the NEXT missing piece of info and DO NOT mention pricing at all. The customer must never hear you stall on a number.
 - ALWAYS follow the task instruction. The >>> YOUR TASK <<< section tells you exactly what to say. Do that FIRST, then add personality. Don't ignore the task to talk about something else.
 
 NEVER ASK FOR LOCATION INFO BEYOND THE ADDRESS:
@@ -542,6 +543,49 @@ SELF-CHECK BEFORE RESPONDING:
 
 OUTPUT FORMAT: JSON only, no markdown
 {"response":"your text to the customer","extractedData":{}}`
+
+// ─────────────────────────────────────────────────────────
+// DETERMINISTIC QUOTE PRESENTERS
+// ─────────────────────────────────────────────────────────
+// Sarah is an LLM and is unreliable at relaying exact numbers. The brain
+// builds the price message itself, in plain text, and sends it as the
+// reply directly — no LLM in the loop for the moment of truth. Sarah is
+// for tone elsewhere; she never relays the dollar amount.
+function presentStandardQuoteText(opts: {
+  firstName: string
+  yards: number
+  material: string
+  city: string
+  totalCents: number
+  perYardCents: number
+  delivery_date?: string
+}): string {
+  const yards = opts.yards
+  const mat = opts.material
+  const city = opts.city || "your location"
+  const total = fmt$(opts.totalCents)
+  const perYd = fmt$(opts.perYardCents)
+  const dateLine = opts.delivery_date && !/flexible|whenever/i.test(opts.delivery_date)
+    ? ` for ${opts.delivery_date} no problem`
+    : ` standard 3-5 business days`
+  const greeting = opts.firstName ? `${opts.firstName} ` : ""
+  return `${greeting}${yards} yards of ${mat} to ${city} comes to ${total} (${perYd}/yard)${dateLine}. Want me to get that scheduled`
+}
+
+function presentDualQuoteText(opts: {
+  firstName: string
+  yards: number
+  material: string
+  city: string
+  standardCents: number
+  standardPerYardCents: number
+  priorityCents: number
+  priorityPerYardCents: number
+  guaranteedDate: string
+}): string {
+  const greeting = opts.firstName ? `${opts.firstName} two options for ${opts.yards} yards of ${opts.material} to ${opts.city || "your location"}` : `two options for ${opts.yards} yards of ${opts.material}`
+  return `${greeting}\n\nStandard delivery: ${fmt$(opts.standardCents)} (${fmt$(opts.standardPerYardCents)}/yard) 3-5 business days\nGuaranteed by ${opts.guaranteedDate}: ${fmt$(opts.priorityCents)} (${fmt$(opts.priorityPerYardCents)}/yard) payment upfront to lock the date\n\nWhich works better for you`
+}
 
 async function callSarah(
   body: string, conv: any, history: { role: "user"|"assistant"; content: string }[],
@@ -601,10 +645,24 @@ async function callSarah(
     try { await notifyAdmin(`SONNET DOWN: Sarah brain failed twice. Customer state: ${conv?.state || "unknown"}. Error: ${(e as any)?.message || "unknown"}`, `sonnet_down_${Date.now()}`) } catch {}
     // Context-aware fallback based on conversation state
     const state = conv?.state || "NEW"
+    // For QUOTING, if we have a saved price, present it deterministically
+    // instead of saying "let me pull up those numbers" which is the stall
+    // signal that confused customers were complaining about.
+    const quotingFallback = conv?.total_price_cents
+      ? presentStandardQuoteText({
+          firstName: (conv.customer_name || "").split(/\s+/)[0] || "",
+          yards: conv.yards_needed || MIN_YARDS,
+          material: fmtMaterial(conv.material_type || "fill_dirt"),
+          city: conv.delivery_city || "",
+          totalCents: conv.total_price_cents,
+          perYardCents: conv.price_per_yard_cents || 0,
+          delivery_date: conv.delivery_date,
+        })
+      : "Working on getting that quote for you"
     const fallbacks: Record<string, string> = {
       NEW: "Hey whats your name",
-      COLLECTING: !conv?.customer_name ? "Hey whats your name" : !conv?.delivery_address ? "Whats the delivery address" : !conv?.material_purpose ? "What are you using the dirt for" : "Let me pull up those numbers, one sec",
-      QUOTING: "Let me pull up those numbers, one sec",
+      COLLECTING: !conv?.customer_name ? "Hey whats your name" : !conv?.delivery_address ? "Whats the delivery address" : !conv?.material_purpose ? "What are you using the dirt for" : quotingFallback,
+      QUOTING: quotingFallback,
       ASKING_DIMENSIONS: "What are the dimensions you're working with, length width and depth in feet",
       AWAITING_PAYMENT: "Just following up on payment, Venmo Zelle or invoice works for us",
       AWAITING_PRIORITY_PAYMENT: "Just checking in on that payment link, let me know if you need it resent",
@@ -1601,34 +1659,56 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         updates._priority_guaranteed_date = dualQuote.priority.guaranteedDate
         updates._priority_quarry_name = dualQuote.priority.quarryName
       }
-      // Sarah presents the formatted dual quote exactly as the pricing engine wrote it
+      // DETERMINISTIC QUOTE — bypass Sarah for the price moment so we never
+      // get the "let me get you the exact number" stall. The brain builds the
+      // text itself and we set `instruction = "__DETERMINISTIC_REPLY__"` to
+      // signal the final-callSarah block to skip the LLM entirely.
+      const firstName = (merged.customer_name || "").split(/\s+/)[0]
+      const matName = fmtMaterial(merged.material_type || "fill_dirt")
       if (needsPriorityQuote && dualQuote.priority) {
-        // Customer gave a TRULY urgent date (today/tomorrow/ASAP) AND we have
-        // a quarry quote — present both options
-        instruction = `Customer needs it by ${merged.delivery_date}. Present BOTH options clearly:
-
-Option 1 - Standard delivery: ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), 3-5 business days, sometimes sooner if we get a cancellation
-
-Option 2 - Guaranteed by ${merged.delivery_date}: ${fmt$(dualQuote.priority.totalCents)} (${fmt$(dualQuote.priority.perYardCents)}/yard), locked in delivery date, payment upfront to secure the date
-
-Ask which works better for them. Keep it natural, two short lines for the options then ask which one`
+        // Truly urgent date AND we have a quarry quote — present both options
+        reply = presentDualQuoteText({
+          firstName,
+          yards: dualQuote.standard.billableYards,
+          material: matName,
+          city: merged.delivery_city || "",
+          standardCents: dualQuote.standard.totalCents,
+          standardPerYardCents: dualQuote.standard.perYardCents,
+          priorityCents: dualQuote.priority.totalCents,
+          priorityPerYardCents: dualQuote.priority.perYardCents,
+          guaranteedDate: dualQuote.priority.guaranteedDate,
+        })
+        instruction = "__DETERMINISTIC_REPLY__"
       } else if (needsPriorityQuote && !dualQuote.priority) {
-        // TRULY urgent date but quarry pricing failed — manual priority alert
+        // TRULY urgent date but quarry pricing failed — present standard
+        // deterministically + flag manual priority so admin can text the
+        // exact upcharge. Customer gets a real number now.
+        reply = presentStandardQuoteText({
+          firstName,
+          yards: dualQuote.standard.billableYards,
+          material: matName,
+          city: merged.delivery_city || "",
+          totalCents: dualQuote.standard.totalCents,
+          perYardCents: dualQuote.standard.perYardCents,
+        }) + `. for guaranteed by ${merged.delivery_date} specifically someone will text you the exact upcharge in a couple minutes`
+        instruction = "__DETERMINISTIC_REPLY__"
         const msg = `${conv.customer_name || phone} wants guaranteed delivery by "${merged.delivery_date}" — no quarry pricing available for ${fmtMaterial(merged.material_type||"fill_dirt")}. Standard quote ${fmt$(dualQuote.standard.totalCents)} was presented. Confirm exact upcharge and text customer.`
         await notifyAdmin(`MANUAL PRIORITY NEEDED: ${msg}`, `manual_prio_${Date.now()}`)
         await flagPendingAction(phone, "MANUAL_PRIORITY", msg)
-        instruction = `Customer wants it by ${merged.delivery_date}. Present the standard quote first: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} is ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard) for standard 3-5 business days. Then say something like "for guaranteed by ${merged.delivery_date} specifically I need a couple minutes to confirm the exact upcharge, give me a sec and I'll lock in the number." Keep it natural and short.`
-      } else if (isSpecificDate && dateWithinStandard) {
-        // Customer gave a date that's already within the standard window
-        // (e.g. "by Friday" said on a Tuesday). No priority needed, no admin
-        // alert, just present standard pricing and confirm we'll meet the date.
-        instruction = `Customer asked for delivery by ${merged.delivery_date}, and that's within our standard 3-5 business day window so we can hit that with the standard quote. Present it: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} comes to ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), delivery by ${merged.delivery_date} no problem. Ask if they want to get that scheduled.`
-      } else if (isFlexibleDate) {
-        // Flexible date — just show standard
-        instruction = `Present the standard quote: ${dualQuote.standard.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||""} comes to ${fmt$(dualQuote.standard.totalCents)} (${fmt$(dualQuote.standard.perYardCents)}/yard), delivery in 3-5 business days. Ask if they want to get that scheduled`
       } else {
-        // Has priority but date wasn't clearly specific — show both but lead with standard
-        instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
+        // Standard quote (flexible date OR date already in standard window OR
+        // ambiguous specific). Always deterministic, always includes the
+        // delivery date if the customer gave one.
+        reply = presentStandardQuoteText({
+          firstName,
+          yards: dualQuote.standard.billableYards,
+          material: matName,
+          city: merged.delivery_city || "",
+          totalCents: dualQuote.standard.totalCents,
+          perYardCents: dualQuote.standard.perYardCents,
+          delivery_date: merged.delivery_date,
+        })
+        instruction = "__DETERMINISTIC_REPLY__"
       }
     } else {
       // ── NEVER STUCK PATH ──
@@ -1655,8 +1735,16 @@ Ask which works better for them. Keep it natural, two short lines for the option
       const fbMsg = `${conv.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(merged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`
       await notifyAdmin(`MANUAL CONFIRM NEEDED: ${fbMsg}`, `fallback_${Date.now()}`)
       await flagPendingAction(phone, "MANUAL_QUOTE", fbMsg)
-      const firstName = (merged.customer_name || "").split(/\s+/)[0]
-      instruction = `Give ${firstName} a transparent estimate: ${fb.billableYards} yards of ${fmtMaterial(merged.material_type||"")} to ${merged.delivery_city||"their location"} runs around ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard) for standard delivery. Tell them you want to double-check the exact number for their specific address and you'll text them back the locked-in price within the hour. Be casual and confident, NOT apologetic — this is just dotting an i.`
+      const fbFirstName = (merged.customer_name || "").split(/\s+/)[0]
+      reply = presentStandardQuoteText({
+        firstName: fbFirstName,
+        yards: fb.billableYards,
+        material: fmtMaterial(merged.material_type || "fill_dirt"),
+        city: merged.delivery_city || "",
+        totalCents: fb.totalCents,
+        perYardCents: fb.perYardCents,
+      })
+      instruction = "__DETERMINISTIC_REPLY__"
     }
   }
 
@@ -1680,7 +1768,35 @@ Ask which works better for them. Keep it natural, two short lines for the option
         updates._priority_guaranteed_date = dualQuote.priority.guaranteedDate
         updates._priority_quarry_name = dualQuote.priority.quarryName
       }
-      instruction = `Present this quote to the customer exactly as written (rephrase naturally but keep the numbers exact): ${dualQuote.formatted}`
+      // DETERMINISTIC — same logic as main branch
+      const qFirstName = (qMerged.customer_name || "").split(/\s+/)[0]
+      const qMatName = fmtMaterial(qMerged.material_type || "fill_dirt")
+      const qDateWithinStandard = isWithinStandardWindow(qMerged.delivery_date || "")
+      const qNeedsPriority = !!qMerged.delivery_date && !qDateWithinStandard
+      if (qNeedsPriority && dualQuote.priority) {
+        reply = presentDualQuoteText({
+          firstName: qFirstName,
+          yards: dualQuote.standard.billableYards,
+          material: qMatName,
+          city: qMerged.delivery_city || "",
+          standardCents: dualQuote.standard.totalCents,
+          standardPerYardCents: dualQuote.standard.perYardCents,
+          priorityCents: dualQuote.priority.totalCents,
+          priorityPerYardCents: dualQuote.priority.perYardCents,
+          guaranteedDate: dualQuote.priority.guaranteedDate,
+        })
+      } else {
+        reply = presentStandardQuoteText({
+          firstName: qFirstName,
+          yards: dualQuote.standard.billableYards,
+          material: qMatName,
+          city: qMerged.delivery_city || "",
+          totalCents: dualQuote.standard.totalCents,
+          perYardCents: dualQuote.standard.perYardCents,
+          delivery_date: qMerged.delivery_date,
+        })
+      }
+      instruction = "__DETERMINISTIC_REPLY__"
     } else {
       // ── NEVER STUCK PATH (mirror of the main pricing branch) ──
       const reason: "no_coordinates" | "outside_service_area" =
@@ -1701,7 +1817,15 @@ Ask which works better for them. Keep it natural, two short lines for the option
       const fbMsg2 = `${qMerged.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(qMerged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`
       await notifyAdmin(`MANUAL CONFIRM NEEDED: ${fbMsg2}`, `fallback2_${Date.now()}`)
       await flagPendingAction(phone, "MANUAL_QUOTE", fbMsg2)
-      instruction = `Give ${(qMerged.customer_name||"").split(/\s+/)[0]} a transparent estimate: ${fb.billableYards} yards of ${fmtMaterial(qMerged.material_type||"")} to ${qMerged.delivery_city||"their location"} runs around ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard) for standard delivery. Tell them you want to double-check the exact number for their specific address and will text back the locked-in price within the hour. Casual and confident, NOT apologetic.`
+      reply = presentStandardQuoteText({
+        firstName: (qMerged.customer_name || "").split(/\s+/)[0],
+        yards: fb.billableYards,
+        material: fmtMaterial(qMerged.material_type || "fill_dirt"),
+        city: qMerged.delivery_city || "",
+        totalCents: fb.totalCents,
+        perYardCents: fb.perYardCents,
+      })
+      instruction = "__DETERMINISTIC_REPLY__"
     }
   }
 
@@ -1770,8 +1894,17 @@ Ask which works better for them. Keep it natural, two short lines for the option
   if (!updates.state && state === "NEW") updates.state = "COLLECTING"
   if (!updates.state && state !== "COLLECTING" && state !== "ASKING_DIMENSIONS" && state !== "QUOTING") updates.state = state
 
-  const s = await callSarah(body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them")
-  reply = validate(s.response, lastOut)
+  // If the brain set instruction to __DETERMINISTIC_REPLY__, it has already
+  // populated `reply` with the exact message. Skip the LLM entirely. This is
+  // the only path that guarantees the customer sees the price text we built —
+  // Sarah is unreliable at relaying numbers and tends to stall with "let me
+  // get you the exact number" even when handed the figure.
+  if (instruction === "__DETERMINISTIC_REPLY__" && reply && reply.length > 0) {
+    reply = validate(reply, lastOut)
+  } else {
+    const s = await callSarah(body, merged, history, instruction || "Continue the conversation naturally. Figure out what they need and help them")
+    reply = validate(s.response, lastOut)
+  }
 
   // ── GLOBAL LOOP DETECTOR ──
   // If we're about to send a reply that's substantially the same as either of
