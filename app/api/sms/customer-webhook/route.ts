@@ -131,17 +131,6 @@ export async function POST(req: NextRequest) {
     return new Response("Unauthorized", { status: 401 })
   }
 
-  // TEMP DEBUG (remove after Micah routing fix verified):
-  // log raw To/From so we can see what Twilio is actually delivering
-  try {
-    await createAdminSupabase().from("customer_sms_logs").insert({
-      phone: from.replace(/\D/g, "").replace(/^1/, ""),
-      body: `DEBUG inbound raw — From="${from}" To="${to}"`,
-      direction: "error",
-      message_sid: `dbg_${messageSid}`,
-    })
-  } catch {}
-
   try {
     // Pass the Twilio To number so the brain can track which sales agent number was texted
     const sourceNumber = to.replace(/\D/g, "").replace(/^1/, "")

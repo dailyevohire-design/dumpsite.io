@@ -56,12 +56,12 @@ export async function GET(req: NextRequest) {
         to: `+1${row.phone}`,
         body: row.body,
       })
-      // Replace the pending marker with a real outbound entry
-      await sb.from("customer_sms_logs").delete().eq("id", row.id)
+      // Insert outbound FIRST so we never lose the log if delete succeeds but insert fails
       await sb.from("customer_sms_logs").insert({
         phone: row.phone, body: row.body, direction: "outbound",
         message_sid: msg.sid || `retry_${Date.now()}`,
       })
+      await sb.from("customer_sms_logs").delete().eq("id", row.id)
       results.push({ phone: row.phone, ok: true })
     } catch (e) {
       const errMsg = (e as any)?.message || "unknown"
