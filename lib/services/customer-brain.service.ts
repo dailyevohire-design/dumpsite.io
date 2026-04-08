@@ -72,6 +72,11 @@ const SURCHARGE: Record<string, number> = {
   fill_dirt: 0, screened_topsoil: 500, structural_fill: 800, sand: 600,
 }
 const MIN_YARDS = 10
+// HARD service area: only deliver within this radius of Dallas / Fort Worth / Denver yards.
+// Anything beyond this gets a polite refusal — we do NOT take the order, do NOT
+// quote it, do NOT dispatch drivers. Outside-area orders previously slipped through
+// the safeFallbackQuote path and confused both customers and drivers.
+const SERVICE_RADIUS_MILES = 100
 
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 3959, dLat = (lat2-lat1)*Math.PI/180, dLon = (lon2-lon1)*Math.PI/180
@@ -568,7 +573,7 @@ WHAT YOU KNOW ABOUT DIRT:
 - A typical pool fill is 150-300 cubic yards depending on size.
 - A typical yard leveling job is 10-50 cubic yards.
 - We deliver same day to 5 business days depending on availability and area.
-- We cover Dallas/Fort Worth metro and Denver metro, up to 60 miles from our yards.
+- We ONLY cover Dallas/Fort Worth metro and Denver metro, up to 100 miles from our yards. If a customer is anywhere else (Houston, Austin, Baltimore, anywhere outside DFW/Denver), tell them you'd love to help but we don't service their area yet — do NOT take an order, do NOT quote, do NOT promise delivery.
 - We do NOT spread or grade — delivery only. We drop it where you want it.
 - We do NOT deliver on top of septic systems or in areas where trucks might sink.
 - Dump trucks weigh 25-30 tons loaded. Driveways can handle them but soft ground cannot.
@@ -1760,17 +1765,37 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (isAddress && (needAddress || addressOutOfZone) && !isBareZip) {
     const geo = await geocode(body)
     if (geo) {
+      const nearest = nearestYard(geo.lat, geo.lng)
+      // ── HARD SERVICE AREA REFUSAL ──
+      // We only serve within SERVICE_RADIUS_MILES of Dallas / Fort Worth / Denver.
+      // Polite refusal, no quote, no dispatch, end the active flow. Admin is notified
+      // so we can track demand outside our area.
+      if (nearest.miles > SERVICE_RADIUS_MILES) {
+        updates.delivery_address = body.trim()
+        updates.delivery_city = geo.city
+        updates.delivery_lat = geo.lat
+        updates.delivery_lng = geo.lng
+        updates.distance_miles = nearest.miles
+        updates.zone = null
+        updates.state = "OUT_OF_AREA"
+        await notifyAdmin(`OUT OF AREA: ${conv.customer_name || phone} at "${body.trim()}" (${geo.city}) — ${nearest.miles}mi from nearest yard (${nearest.yard.name}). Refused politely.`, `out_of_area_${Date.now()}`)
+        const firstName = (conv.customer_name || "").split(/\s+/)[0]
+        const greeting = firstName ? `${firstName}, ` : ""
+        reply = validate(`${greeting}I really appreciate you reaching out but unfortunately we don't service ${geo.city} — we only deliver within ${SERVICE_RADIUS_MILES} miles of Dallas, Fort Worth, or Denver. If you have a project in any of those areas in the future just text me back and I'll get you taken care of`, lastOut)
+        await saveConv(phone, { ...conv, ...updates }, readAt)
+        await logMsg(phone, reply, "outbound", `out_of_area_${sid}`)
+        return reply
+      }
       updates.delivery_address = body.trim()
       updates.delivery_city = geo.city
       updates.delivery_lat = geo.lat
       updates.delivery_lng = geo.lng
-      const nearest = nearestYard(geo.lat, geo.lng)
       updates.distance_miles = nearest.miles
       const zone = ZONES.find(z => nearest.miles >= z.min && (nearest.miles < z.max || (z.zone === "C" && nearest.miles <= z.max)))
       updates.zone = zone?.zone || null
       if (!zone) {
-        // Address geocoded but outside 60 miles — notify admin in case geocode was wrong
-        await notifyAdmin(`Customer ${conv.customer_name || phone} address "${body.trim()}" geocoded to ${geo.lat},${geo.lng} (${geo.city}) — ${nearest.miles}mi from nearest yard, outside all zones. Verify this is correct.`, `zone_miss_${Date.now()}`)
+        // 60-100mi: in service but outside priced zones — admin manually quotes via safeFallbackQuote path
+        await notifyAdmin(`OUTER ZONE: ${conv.customer_name || phone} address "${body.trim()}" geocoded to ${geo.lat},${geo.lng} (${geo.city}) — ${nearest.miles}mi from nearest yard. Within service area but needs manual quote.`, `outer_zone_${Date.now()}`)
       }
     } else {
       // Geocode completely failed — save the address text so we don't lose it, alert admin
@@ -2062,7 +2087,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     } else {
       // ── NEVER STUCK PATH ──
       // getDualQuote returned null. This happens when geocoding failed (no
-      // coords) or the customer is genuinely outside the 60-mile service zone.
+      // coords) or the customer is genuinely outside the service area.
       // We do NOT loop or say "having a little trouble." We present a safe
       // fallback quote, mark the conversation for manual confirmation, and
       // alert admin loudly so a human can lock in the exact figure.
@@ -2080,7 +2105,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.state = "QUOTING"
       const reasonHuman = reason === "no_coordinates"
         ? `geocoding failed for "${merged.delivery_address}"`
-        : `address is outside the 60-mile service zone`
+        : `address is outside the service area`
       const fbMsg = `${conv.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(merged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`
       await notifyAdmin(`MANUAL CONFIRM NEEDED: ${fbMsg}`, `fallback_${Date.now()}`)
       await flagPendingAction(phone, "MANUAL_QUOTE", fbMsg)
@@ -2168,7 +2193,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.state = "QUOTING"
       const reasonHuman = reason === "no_coordinates"
         ? `geocoding failed for "${qMerged.delivery_address}"`
-        : `address is outside the 60-mile service zone`
+        : `address is outside the service area`
       const fbMsg2 = `${qMerged.customer_name || phone} — ${reasonHuman}. Presented fallback quote ${fmt$(fb.totalCents)} (${fmt$(fb.perYardCents)}/yard zone ${fb.zone}) for ${fb.billableYards}yds ${fmtMaterial(qMerged.material_type||"fill_dirt")}. Confirm exact pricing and text customer.`
       await notifyAdmin(`MANUAL CONFIRM NEEDED: ${fbMsg2}`, `fallback2_${Date.now()}`)
       await flagPendingAction(phone, "MANUAL_QUOTE", fbMsg2)
