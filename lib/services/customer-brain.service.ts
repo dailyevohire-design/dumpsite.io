@@ -185,16 +185,24 @@ async function geocode(address: string): Promise<{ lat: number; lng: number; cit
 // CODE-BASED EXTRACTION — AI never sets these fields
 // ─────────────────────────────────────────────────────────
 function extractYards(text: string, allowBareNumber: boolean = true): number | null {
-  // First try explicit yards mention: "20 yards", "100 cy", "50 cubic yards"
+  return extractYardsDetailed(text, allowBareNumber)?.value ?? null
+}
+
+// Returns the parsed yards AND whether it was explicit ("100 yards"/"100 cy") vs
+// inferred ("about 100" / bare "100"). Explicit mentions are unambiguous and
+// must always overwrite stale yards_needed; inferred mentions are gated by
+// needYards. CRITICAL: silent drop of explicit yards caused 100→10 fake orders.
+function extractYardsDetailed(text: string, allowBareNumber: boolean = true): { value: number; explicit: boolean } | null {
+  // Explicit yards mention: "20 yards", "100 cy", "50 cubic yards"
   const explicit = text.match(/(\d+)\s*(cubic\s*)?(yards?|yds?|cy)\b/i)
-  if (explicit) return parseInt(explicit[1])
+  if (explicit) return { value: parseInt(explicit[1]), explicit: true }
   // "about/around/roughly/maybe/probably/like N" — common casual patterns
   const approx = text.match(/\b(?:about|around|roughly|maybe|probably|like|need|want|thinking)\s+(\d+)\b/i)
-  if (approx && allowBareNumber) return parseInt(approx[1])
+  if (approx && allowBareNumber) return { value: parseInt(approx[1]), explicit: false }
   // Bare number (e.g. "100") — only when we're expecting yards
   if (allowBareNumber) {
     const bare = text.match(/^\s*(\d+)\s*$/)
-    if (bare) return parseInt(bare[1])
+    if (bare) return { value: parseInt(bare[1]), explicit: false }
   }
   return null
 }
@@ -376,6 +384,7 @@ type PendingActionType =
   | "BRAIN_CRASH"            // the customer brain threw mid-handler
   | "MANUAL_CITY"            // delivery_city not in cities table
   | "NO_DRIVERS"             // out-of-area / no available drivers
+  | "DISPATCH_MISSING_FIELDS" // customer said yes but critical fields missing — refused to dispatch
 
 async function flagPendingAction(phone: string, type: PendingActionType, message: string): Promise<void> {
   // Inserts a queryable row into customer_sms_logs that the command-center
@@ -416,6 +425,24 @@ async function notifyAdmin(msg: string, sid: string) {
 
 async function createDispatchOrder(conv: any, phone: string): Promise<string | null> {
   try {
+    // HARD GUARD: never accept a dispatch with missing critical fields. Falling
+    // back silently caused fake 10-yard orders to ship to drivers. Caller must
+    // pre-validate, but defense in depth — refuse here too.
+    if (!conv.yards_needed || conv.yards_needed <= 0) {
+      console.error(`[customer dispatch] REFUSED — yards_needed missing/zero for ${phone}`)
+      await notifyAdmin(`DISPATCH REFUSED at createDispatchOrder for ${phone}: yards_needed=${conv.yards_needed}. Caller bug — should have been caught upstream.`, `dispatch_no_yards_${Date.now()}`)
+      return null
+    }
+    if (!conv.material_type) {
+      console.error(`[customer dispatch] REFUSED — material_type missing for ${phone}`)
+      await notifyAdmin(`DISPATCH REFUSED at createDispatchOrder for ${phone}: material_type missing.`, `dispatch_no_material_${Date.now()}`)
+      return null
+    }
+    if (!conv.total_price_cents || conv.total_price_cents <= 0) {
+      console.error(`[customer dispatch] REFUSED — total_price_cents missing/zero for ${phone}`)
+      await notifyAdmin(`DISPATCH REFUSED at createDispatchOrder for ${phone}: total_price_cents=${conv.total_price_cents}.`, `dispatch_no_price_${Date.now()}`)
+      return null
+    }
     const sb = createAdminSupabase()
 
     // Resolve city_id from delivery_city — this ensures correct region dispatch
@@ -460,11 +487,11 @@ async function createDispatchOrder(conv: any, phone: string): Promise<string | n
       // Fallback: insert directly so order isn't lost
       const { data } = await sb.from("dispatch_orders").insert({
         client_phone: phone, client_name: conv.customer_name || "Customer",
-        client_address: conv.delivery_address, yards_needed: conv.yards_needed || MIN_YARDS,
+        client_address: conv.delivery_address, yards_needed: conv.yards_needed,
         price_quoted_cents: conv.total_price_cents, driver_pay_cents: 4000,
         status: "dispatching", source: "web_form",
         delivery_latitude: conv.delivery_lat || null, delivery_longitude: conv.delivery_lng || null,
-        notes: `${fmtMaterial(conv.material_type || "fill_dirt")} | ${conv.access_type || "dump truck"} access | ${conv.delivery_date || "Flexible"} | Source: FillDirtNearMe SMS | NEEDS MANUAL CITY ASSIGNMENT`,
+        notes: `${fmtMaterial(conv.material_type)} | ${conv.access_type || "dump truck"} access | ${conv.delivery_date || "Flexible"} | Source: FillDirtNearMe SMS | NEEDS MANUAL CITY ASSIGNMENT`,
         ...(conv.agent_id ? { agent_id: conv.agent_id } : {}),
         ...(conv.source_number ? { source_number: conv.source_number } : {}),
       }).select("id").single()
@@ -479,10 +506,10 @@ async function createDispatchOrder(conv: any, phone: string): Promise<string | n
       clientPhone: phone,
       clientAddress: conv.delivery_address,
       cityId,
-      yardsNeeded: conv.yards_needed || MIN_YARDS,
-      priceQuotedCents: conv.total_price_cents || 0,
+      yardsNeeded: conv.yards_needed,
+      priceQuotedCents: conv.total_price_cents,
       truckTypeNeeded: truckType,
-      notes: `${fmtMaterial(conv.material_type || "fill_dirt")} | ${conv.access_type || "dump truck"} access | ${conv.delivery_date || "Flexible"} | Source: FillDirtNearMe SMS`,
+      notes: `${fmtMaterial(conv.material_type)} | ${conv.access_type || "dump truck"} access | ${conv.delivery_date || "Flexible"} | Source: FillDirtNearMe SMS`,
       urgency: "standard",
       source: "web_form",
       agentId: conv.agent_id || null,
@@ -975,7 +1002,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // ── INLINE EXTRACTION (code always does this, not AI) ──
   // Only accept bare numbers as yards if we're past material collection (otherwise "100" could be anything)
   const hasMaterialContext = conv.material_type != null && conv.material_type !== "" || conv.material_purpose != null && conv.material_purpose !== ""
-  const inlineYards = extractYards(body, hasMaterialContext)
+  const inlineYardsDetail = extractYardsDetailed(body, hasMaterialContext)
+  const inlineYards = inlineYardsDetail?.value ?? null
+  const inlineYardsExplicit = inlineYardsDetail?.explicit === true
   const inlineDims = extractDimensions(body)
   const inlineEmail = extractEmail(body)
   const inlineMaterial = extractMaterialFromPurpose(body)
@@ -1507,18 +1536,40 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         }
       } else {
         // STANDARD — existing flow, pay after delivery
+        // ── HARD REFUSAL: never confirm an order with missing/invalid critical fields ──
+        // Falling back to MIN_YARDS or default material caused fake 10-yard orders.
+        // If anything is missing, refuse, alert admin loudly, and ask the customer.
+        const missingFields: string[] = []
+        if (!has(conv.yards_needed) || conv.yards_needed <= 0) missingFields.push("yards_needed")
+        if (!has(conv.material_type)) missingFields.push("material_type")
+        if (!has(conv.total_price_cents) || conv.total_price_cents <= 0) missingFields.push("total_price_cents")
+        if (!has(conv.delivery_city)) missingFields.push("delivery_city")
+        if (missingFields.length > 0) {
+          console.error(`[customer dispatch] REFUSED to confirm — missing: ${missingFields.join(",")} for ${phone}`)
+          await notifyAdmin(`DISPATCH REFUSED for ${conv.customer_name || phone}: customer said yes but missing [${missingFields.join(", ")}]. Conversation state: ${conv.state}. Manual follow-up required — DO NOT let order ship as-is.`, `dispatch_refused_${Date.now()}`)
+          await flagPendingAction(phone, "DISPATCH_MISSING_FIELDS", `Missing: ${missingFields.join(",")}`)
+          updates.state = "COLLECTING"
+          const askFor = missingFields[0] === "yards_needed"
+            ? "Quick check before I lock this in — how many cubic yards do you need exactly"
+            : missingFields[0] === "material_type"
+            ? "Quick check before I lock this in — what material is this for again"
+            : "Hey one second, let me double check the details before I lock this in. Someone will text you right back"
+          reply = validate(askFor, lastOut)
+          await saveConv(phone, { ...conv, ...updates }, readAt)
+          await logMsg(phone, reply, "outbound", `dispatch_refused_${sid}`)
+          return reply
+        }
         // Idempotency guard: if this conversation already has a dispatch_order_id,
         // a previous "yes" already placed the order. A second rapid "yes" would
         // double-dispatch. Re-confirm instead.
         if (conv.dispatch_order_id) {
           console.warn(`[customer dispatch] Duplicate yes for ${phone} — already has order ${conv.dispatch_order_id}, not re-dispatching`)
-          const yards = conv.yards_needed || MIN_YARDS
           reply = validate(presentStandardConfirmText({
             firstName: (conv.customer_name || "").split(/\s+/)[0],
-            yards,
-            material: fmtMaterial(conv.material_type || "fill_dirt"),
-            city: conv.delivery_city || "",
-            totalCents: conv.total_price_cents || 0,
+            yards: conv.yards_needed,
+            material: fmtMaterial(conv.material_type),
+            city: conv.delivery_city,
+            totalCents: conv.total_price_cents,
             delivery_date: conv.delivery_date,
           }), lastOut)
           await saveConv(phone, { ...conv, ...updates }, readAt)
@@ -1535,20 +1586,20 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         if (orderId) {
           updates.state = "ORDER_PLACED"
           updates.dispatch_order_id = orderId
-          const yards = conv.yards_needed || MIN_YARDS
-          await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
+          const yards = conv.yards_needed
+          await notifyAdmin(`New order: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type)} | ${conv.delivery_city} | ${fmt$(conv.total_price_cents)}`, sid)
           if (yards >= LARGE_ORDER) await notifyAdmin(`LARGE ORDER ${yards}yds — ${conv.customer_name} ${conv.delivery_city}`, sid)
           // Notify sales agent
           const orderAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
-          if (orderAgent) await notifyAgent(orderAgent, `New order received: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type||"fill_dirt")} to ${conv.delivery_city} | ${fmt$(conv.total_price_cents||0)}`, sid)
+          if (orderAgent) await notifyAgent(orderAgent, `New order received: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type)} to ${conv.delivery_city} | ${fmt$(conv.total_price_cents)}`, sid)
           // DETERMINISTIC confirmation — never let Sarah drift on the moment
-          // we tell the customer their order is locked in.
+          // we tell the customer their order is locked in. All fields validated above.
           reply = validate(presentStandardConfirmText({
             firstName: (conv.customer_name || "").split(/\s+/)[0],
             yards,
-            material: fmtMaterial(conv.material_type || "fill_dirt"),
-            city: conv.delivery_city || "",
-            totalCents: conv.total_price_cents || 0,
+            material: fmtMaterial(conv.material_type),
+            city: conv.delivery_city,
+            totalCents: conv.total_price_cents,
             delivery_date: conv.delivery_date,
           }), lastOut)
         } else {
@@ -1574,9 +1625,22 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const s = await callSarah(body, conv, history, "Customer wants to think about it. Be totally cool with that. Tell them you'll check back tomorrow and they can text anytime")
       reply = validate(s.response, lastOut)
     } else {
-      // Question about the quote, negotiation, etc
-      const s = await callSarah(body, conv, history, `Customer was quoted ${fmt$(conv.total_price_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")}. They said something other than yes/no. Answer their question or concern, then ask if they'd like to move forward`)
-      reply = validate(s.response, lastOut)
+      // Question about the quote, negotiation, etc.
+      // CRITICAL: Sarah must NEVER ad-lib new pricing language like "want a full quote"
+      // here. The deterministic quote was already presented; her job is only to answer
+      // the question and end with the SAME deterministic close ("Want me to get that
+      // scheduled"). We give her tightly-worded instructions and append the canonical
+      // close, regardless of what she says.
+      const s = await callSarah(body, conv, history,
+        `Customer was already quoted ${fmt$(conv.total_price_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")}. They asked a question or made a comment instead of saying yes/no. Answer their question briefly (one or two sentences). DO NOT mention pricing again, DO NOT say "full quote" or "formal quote" or "complete quote", DO NOT change the price. End with exactly: "Want me to get that scheduled"`)
+      let r = validate(s.response, lastOut)
+      // Hard guarantee: strip any "full quote" / "formal quote" phrasing if Sarah leaks it,
+      // and force the canonical close.
+      r = r.replace(/\b(full|formal|complete|official|written)\s+quote\b/gi, "quote")
+      if (!/want me to get that scheduled/i.test(r)) {
+        r = r.replace(/[?.!]?\s*$/, "") + ". Want me to get that scheduled"
+      }
+      reply = r
     }
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -1716,8 +1780,19 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
   }
 
-  if (inlineYards && needYards) {
+  // Explicit "N yards" / "N cy" / "N cubic yards" ALWAYS wins, even if conv
+  // already has a stale yards value. Inferred bare numbers still gated by needYards.
+  // ROOT CAUSE FIX: prior code silently dropped "100 yards" when conv had a stale 10,
+  // causing the brain to dispatch a 10-yard order for a customer who asked for 100.
+  if (inlineYards && (needYards || inlineYardsExplicit)) {
     updates.yards_needed = inlineYards
+    // If this overwrites a prior quote, invalidate the price so we re-quote on the
+    // new yards before confirming an order.
+    if (inlineYardsExplicit && has(conv.yards_needed) && conv.yards_needed !== inlineYards && has(conv.total_price_cents)) {
+      updates.total_price_cents = null as any
+      updates.price_per_yard_cents = null as any
+      updates.state = "COLLECTING"
+    }
   }
 
   if (inlineDims && needYards) {
