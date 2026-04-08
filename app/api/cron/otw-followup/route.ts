@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
+
 
 function getTwilioAuth(): { sid: string; key: string; secret: string } {
   const rawSid = process.env.TWILIO_ACCOUNT_SID || ''

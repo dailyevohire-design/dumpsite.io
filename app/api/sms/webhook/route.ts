@@ -23,11 +23,46 @@ function getTwilioAuth(): { sid: string; key: string; secret: string } {
   return { sid: rawSid, key: rawSid, secret: authToken || '' }
 }
 
+async function alertAdminViaTwilio(message: string) {
+  const adminPhone = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
+  if (!adminPhone || process.env.PAUSE_ADMIN_SMS === 'true') return
+  try {
+    const { sid, key, secret } = getTwilioAuth()
+    const from = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
+    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ To: `+1${adminPhone}`, From: from, Body: message.slice(0, 300) }).toString(),
+    })
+  } catch (err) {
+    console.error('[admin alert failed]', err)
+  }
+}
+
 async function sendViaTwilioAPI(to: string, body: string) {
   const { sid, key, secret } = getTwilioAuth()
   const from = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
   const digits = to.replace(/\D/g, '')
   const toE164 = digits.length === 10 ? `+1${digits}` : digits.length === 11 && digits.startsWith('1') ? `+${digits}` : `+1${digits}`
+
+  // Outbound dedup: never send the exact same body twice in a row to the same driver.
+  // Stops repeat-message bugs that have burned us before.
+  try {
+    const supabase = createAdminSupabase()
+    const { data: lastOut } = await supabase.from('sms_logs')
+      .select('body').eq('phone', digits).eq('direction', 'outbound')
+      .order('created_at', { ascending: false }).limit(1)
+    if (lastOut?.[0]?.body && lastOut[0].body.trim() === body.trim()) {
+      console.warn('[delayed SMS] DEDUP — skipping repeat send to', toE164, ':', body.slice(0, 60))
+      return
+    }
+  } catch (err) {
+    console.error('[delayed SMS] dedup check failed:', err)
+  }
+
   const resp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
     method: 'POST',
     headers: {
@@ -45,6 +80,8 @@ async function sendViaTwilioAPI(to: string, body: string) {
         direction: "error", message_sid: `twilio_err_${Date.now()}`,
       })
     } catch {}
+    // NEVER silent fail — alert admin so we know SMS is broken
+    await alertAdminViaTwilio(`⚠ TWILIO SEND FAILED to ${toE164}: ${data.error_code} ${data.message || ''} — body: ${body.slice(0, 100)}`)
   }
   else console.log('[delayed SMS] sent to', toE164, 'SID:', data.sid)
 }

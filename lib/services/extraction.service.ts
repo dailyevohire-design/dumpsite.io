@@ -20,6 +20,7 @@ export async function extractIntent(
   hasMedia: boolean,
   context: { activeJobId?: string; lastKnownCity?: string; isAdmin?: boolean; isCustomer?: boolean }
 ): Promise<ExtractionResult> {
+  let _rawForLog = ""
   try {
     const systemPrompt = `You extract structured data from dirt hauling SMS messages. Return ONLY valid JSON.
 
@@ -72,6 +73,7 @@ Rules:
 
     const block = response.content[0]
     const raw = block.type === 'text' ? block.text : '{}'
+    _rawForLog = raw
     const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim())
 
     // Override hasPhoto if media was attached
@@ -92,7 +94,7 @@ Rules:
 
     return parsed as ExtractionResult
   } catch (err: any) {
-    console.error('[extraction] error:', err?.message)
+    console.error('[extraction] parse failed', { raw: _rawForLog, err: err?.message || err })
     // Fallback: simple keyword detection
     const lower = text.toLowerCase()
     const result: ExtractionResult = {

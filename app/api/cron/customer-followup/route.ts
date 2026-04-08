@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import twilio from "twilio"
+if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
+
 
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER!

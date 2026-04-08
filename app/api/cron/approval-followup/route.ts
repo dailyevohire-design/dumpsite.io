@@ -2,6 +2,8 @@ import { NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import { makeVoiceCallToCustomer } from "@/lib/services/approval.service"
 import twilio from "twilio"
+if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
+
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"
 
@@ -46,14 +48,20 @@ export async function GET(request: Request) {
     const driverName = profile?.first_name || "driver"
     const approvalCode = `DS-${order.id.replace(/-/g,"").slice(0,6).toUpperCase()}`
 
-    // 2 min: voice call
+    // 2 min: voice call. Conditional update locks via DB so two cron runs can't both call.
     if (!conv.voice_call_made && conv.approval_sent_at < twoMinAgo) {
-      await makeVoiceCallToCustomer(
-        order.client_phone.replace(/\D/g,"").replace(/^1/,""),
-        driverName, order.yards_needed, approvalCode
-      ).catch(() => {})
-      await sb.from("conversations").update({ voice_call_made: true }).eq("phone", conv.phone)
-      voiceCalls++
+      const { data: lockRows } = await sb.from("conversations")
+        .update({ voice_call_made: true })
+        .eq("phone", conv.phone)
+        .eq("voice_call_made", false)
+        .select("phone")
+      if (lockRows && lockRows.length === 1) {
+        await makeVoiceCallToCustomer(
+          order.client_phone.replace(/\D/g,"").replace(/^1/,""),
+          driverName, order.yards_needed, approvalCode
+        ).catch(() => {})
+        voiceCalls++
+      }
     }
 
     // 3 min: email escalation + admin SMS

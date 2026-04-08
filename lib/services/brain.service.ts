@@ -12,8 +12,16 @@ import twilio from "twilio"
 import crypto from "crypto"
 
 const anthropic = new Anthropic()
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
+const _ADMIN_PHONE_RAW = (process.env.ADMIN_PHONE || "").replace(/\D/g, "")
+if (_ADMIN_PHONE_RAW.length < 10) {
+  throw new Error("ADMIN_PHONE env var missing or invalid (must normalize to 10+ digits)")
+}
+const ADMIN_PHONE = _ADMIN_PHONE_RAW
 const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
+// Per-phone in-process lock — serializes concurrent inbound from same driver
+const _phoneLocks = new Map<string, Promise<string>>()
+// sendAdminAlert dedup — hash(body+to) → expiry timestamp
+const _adminAlertDedup = new Map<string, number>()
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"
 const LARGE_JOB_YARDS = 500
 const DFW_CITIES = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale","Venus","Ponder","Justin","Boyd","Blum","Gainesville","Hutchins","Everman","Hillsboro","Matador","Elizabeth"]
@@ -163,14 +171,17 @@ function parseYardsFromText(text: string): number | null {
   }
   return null
 }
+// Sentinel for "load count out of range" — caller should NOT record payment
+export const LOAD_COUNT_OVERFLOW = -2
 function parseLoads(text: string): number | null {
   const t = text.trim()
   if (/^(done|finished|all done|wrapped|that.?s it|terminamos)$/i.test(t)) return -1
-  if (/^\d+$/.test(t)) return Math.min(parseInt(t), 50)
+  const checkOverflow = (n: number) => (n > 50 ? LOAD_COUNT_OVERFLOW : n)
+  if (/^\d+$/.test(t)) return checkOverflow(parseInt(t))
   const m1 = t.match(/(\d+)\s*(down|loads?|total|done|delivered|drops?|cargas?)/i)
-  if (m1) return Math.min(parseInt(m1[1]), 50)
+  if (m1) return checkOverflow(parseInt(m1[1]))
   const m2 = t.match(/(done|delivered|dropped|terminé|tiramos)\s*(\d+)/i)
-  if (m2) return Math.min(parseInt(m2[2]), 50)
+  if (m2) return checkOverflow(parseInt(m2[2]))
   return null
 }
 function isOTW(text: string): boolean {
@@ -226,6 +237,7 @@ async function resetConv(phone: string) {
     pending_approval_order_id: null, reservation_id: null, extracted_city: null,
     extracted_yards: null, extracted_truck_type: null, extracted_material: null,
     photo_storage_path: null, photo_public_url: null, approval_sent_at: null, voice_call_made: null,
+    pending_pay_dollars: null,
   }).eq("phone", phone)
 }
 async function isDuplicate(sid: string): Promise<boolean> {
@@ -262,6 +274,16 @@ async function sendSMS(toPhone: string, body: string) {
 }
 async function sendAdminAlert(msg: string) {
   if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Driver admin: ${msg.slice(0, 80)}`); return }
+  // Dedup: skip if same body sent in last 60s
+  const key = crypto.createHash("sha1").update(`${ADMIN_PHONE}:${msg}`).digest("hex")
+  const now = Date.now()
+  // GC stale entries
+  for (const [k, exp] of _adminAlertDedup) { if (exp < now) _adminAlertDedup.delete(k) }
+  if (_adminAlertDedup.has(key)) {
+    console.log(`[adminAlert dedup] skipping duplicate within 60s: ${msg.slice(0, 60)}`)
+    return
+  }
+  _adminAlertDedup.set(key, now + 60_000)
   await sendSMS(ADMIN_PHONE, msg)
   if (ADMIN_PHONE_2) { try { await sendSMS(ADMIN_PHONE_2, msg) } catch {} }
 }
@@ -360,8 +382,12 @@ async function sendJobLink(
   // Save state
   await saveConv(driverPhone, { ...conv, state: "ACTIVE", active_order_id: job.id })
 
+  // Send address as a SEPARATE SMS so iOS/Android map-link previews don't get crowded by the summary text
+  try { await sendSMS(driverPhone, `${job.client_address}`) } catch {}
+  // Small delay so the address arrives first in driver inbox before the summary
+  await new Promise(r => setTimeout(r, 400))
+
   const lines = [
-    `${job.client_address}`,
     `${city} — ${job.yards_needed} yds — $${pay}/load`,
   ]
   if (job.notes) lines.push(`Note: ${job.notes}`)
@@ -742,9 +768,8 @@ function tryTemplate(
   }
 
   // ── CROSS STREETS ──
-  if (/\b\w+\s+(and|&|y)\s+\w+\b/i.test(lower) && !/\d/.test(body) && (state === "ASKING_ADDRESS" || !hasCity) && body.length < 40) {
-    return { response: pick(["I need the full street address with the number, not just cross streets","send me the actual address like 1234 Main St Dallas"]), updates: {}, action: "NONE" }
-  }
+  // Cross streets are now handled by the location extraction block below — Google geocodes
+  // intersections fine. We only fall back to asking for an address if geocoding fails.
 
   // ── "HELP" — actual help request, not reset ──
   if (/^help$/i.test(lower)) {
@@ -1489,6 +1514,21 @@ async function handlePayment(phone: string, body: string, conv: any, lang: "en"|
 // MAIN ENTRY
 // ─────────────────────────────────────────────────────────────
 export async function handleConversation(sms: IncomingSMS): Promise<string> {
+  const _lockPhone = normalizePhone(sms.from)
+  const _prior = _phoneLocks.get(_lockPhone)
+  const _run = (async () => {
+    if (_prior) { try { await _prior } catch {} }
+    return await _handleConversationInner(sms)
+  })()
+  _phoneLocks.set(_lockPhone, _run)
+  try {
+    return await _run
+  } finally {
+    if (_phoneLocks.get(_lockPhone) === _run) _phoneLocks.delete(_lockPhone)
+  }
+}
+
+async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
   const phone = normalizePhone(sms.from)
   const body = (sms.body || "").trim()
   const mediaType = sms.mediaContentType || ""
@@ -1500,9 +1540,51 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
 
   if (await isDuplicate(sid)) return ""
 
+  // Multi-photo MMS — Twilio sends MediaUrl0..MediaUrlN, we only process MediaUrl0.
+  // Tell driver to send one at a time so they don't think the rest were "received".
+  if ((sms.numMedia || 0) > 1 && isPhoto) {
+    const reply = "got it, send em one at a time so I dont miss anything"
+    await logMsg(phone, body || "[multi-photo]", "inbound", sid)
+    await logMsg(phone, reply, "outbound", `multiphoto_${sid}`)
+    return reply
+  }
+
   // Rapid-fire protection — wait 1.5s, then grab any additional messages and combine them
   const sb = createAdminSupabase()
   await logMsg(phone, body || (hasPhoto ? "[photo]" : isNonPhotoMedia ? "[voice/video]" : ""), "inbound", sid)
+
+  // APPROVAL_PENDING watchdog — if we sent the customer an approval request more than
+  // 6 hours ago and they never replied, the driver is stuck. Auto-reset and tell them.
+  // Without this, a stale approval can lock a driver out of new jobs indefinitely.
+  try {
+    const { data: stuckCheck } = await sb.from("conversations")
+      .select("state, approval_sent_at, pending_approval_order_id")
+      .eq("phone", phone).maybeSingle()
+    // Reservation expiry: if pending_approval_order_id set in JOB_PRESENTED/PHOTO_PENDING and idle 30+ min, reset
+    const { data: reservCheck } = await sb.from("conversations")
+      .select("state, pending_approval_order_id, updated_at")
+      .eq("phone", phone).maybeSingle()
+    if (reservCheck?.pending_approval_order_id &&
+        ["JOB_PRESENTED", "PHOTO_PENDING"].includes(reservCheck.state) &&
+        reservCheck.updated_at && (Date.now() - new Date(reservCheck.updated_at).getTime() > 30 * 60 * 1000)) {
+      console.warn(`[reservation expired] resetting ${reservCheck.state} for ${phone}`)
+      await resetConv(phone)
+      const expiredMsg = "hey that last job timed out, you got more dirt today"
+      try { await sendSMS(phone, expiredMsg); await logMsg(phone, expiredMsg, "outbound", `expire_${sid}`) } catch {}
+    }
+    if (stuckCheck?.state === "APPROVAL_PENDING" && stuckCheck.approval_sent_at) {
+      const ageMs = Date.now() - new Date(stuckCheck.approval_sent_at).getTime()
+      // Per fix #9: 2h reaper for APPROVAL_PENDING (was 6h)
+      if (ageMs > 2 * 60 * 60 * 1000) {
+        console.warn(`[watchdog] resetting stale APPROVAL_PENDING for ${phone}, age=${Math.round(ageMs/3600000)}h`)
+        await sendAdminAlert(`⚠ STALE APPROVAL: ${phone} stuck in APPROVAL_PENDING for ${Math.round(ageMs/3600000)}h on order ${stuckCheck.pending_approval_order_id}. Auto-resetting.`)
+        await resetConv(phone)
+        // Continue processing the new message in fresh DISCOVERY state
+      }
+    }
+  } catch (err) {
+    console.error("[watchdog]", err)
+  }
 
   if (!hasPhoto && body.length < 20) {
     // Short messages often come in bursts — wait briefly to combine
@@ -1519,7 +1601,7 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
         const lastSid = recentMsgs[recentMsgs.length - 1].message_sid
         if (lastSid !== sid) return "" // Let the last message handle the combined text
         // This IS the last message — use combined body
-        return await handleConversation({ ...sms, body: combined, messageSid: sid + "_combined" })
+        return await _handleConversationInner({ ...sms, body: combined, messageSid: sid + "_combined" })
       }
     }
   }
@@ -1556,10 +1638,19 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   const [profile, conv, history] = await Promise.all([getProfile(phone), getConv(phone), getHistory(phone)])
   if (profile?.sms_opted_out) return ""
 
-  // Sticky language: once Spanish detected in any message, stay Spanish entire conversation
-  const detectedLang = detectLanguage(body)
-  const historyHasSpanish = history.some(m => detectLanguage(m.content) === "es")
-  const lang: "en"|"es" = detectedLang === "es" || historyHasSpanish ? "es" : "en"
+  // Sticky language: prefer driver_profiles.preferred_language; only run detector if null.
+  // Once detected, persist back to driver_profiles for future messages.
+  let lang: "en"|"es"
+  if (profile?.preferred_language === "es" || profile?.preferred_language === "en") {
+    lang = profile.preferred_language
+  } else {
+    const detectedLang = detectLanguage(body)
+    const historyHasSpanish = history.some(m => detectLanguage(m.content) === "es")
+    lang = detectedLang === "es" || historyHasSpanish ? "es" : "en"
+    if (profile?.user_id) {
+      try { await createAdminSupabase().from("driver_profiles").update({ preferred_language: lang }).eq("phone", phone) } catch {}
+    }
+  }
   const isKnownDriver = profile ? (await getCompletedCount(profile.user_id)) >= 2 : false
   const convState = conv?.state || "DISCOVERY"
 
@@ -1778,6 +1869,11 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     }
     const loads = parseLoads(body)
     if (loads === -1) return lang==="es" ? "cuantas cargas tiraste" : "how many loads total"
+    if (loads === LOAD_COUNT_OVERFLOW) {
+      return lang === "es"
+        ? "whoa son muchas cargas, mandame 50 primero y luego seguimos con el resto"
+        : "whoa thats a lot of loads, lemme split that up — send me 50 first then we'll do the rest"
+    }
     if (loads !== null && loads > 0) return await handleDelivery(phone, conv, profile, activeJob, loads, lang)
     return `You got ${generateJobNumber(activeJob.id)} active. Text load count when done`
   }
@@ -1798,12 +1894,29 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
 
   // Detect if driver sent a full address (has numbers + street words)
   const looksLikeAddress = /\d{2,}\s+\w+\s+(st|ave|blvd|dr|rd|ln|way|ct|pl|pkwy|hwy|fm|loop)\b/i.test(body) ||
-    /\d{2,}\s+[nsew]\.?\s+\w+/i.test(body)
-  // FIX #11: Detect GPS location pin (e.g. "32.7767,-96.797" or Google Maps link)
-  const gpsMatch = body.match(/(-?\d{2,3}\.\d{3,})[,\s]+(-?\d{2,3}\.\d{3,})/)
-  const mapsLink = body.match(/maps\.google\.com|goo\.gl\/maps|maps\.app\.goo\.gl/i)
+    /\d{2,}\s+[nsew]\.?\s+\w+/i.test(body) ||
+    // Texas Farm-to-Market / state highway: "900 FM 1709", "1500 SH 121", "2200 US 75"
+    /\d{2,}\s+(fm|sh|us|hwy|highway)\s+\d+/i.test(body)
+  // GPS coord pair (e.g. "32.7767,-96.797") — bypasses geocoder downstream
+  const gpsMatch = body.match(/(-?\d{1,3}\.\d{3,})[,\s]+(-?\d{1,3}\.\d{3,})/)
+  // Google Maps share link — resolved by routing.service.geocode()
+  const mapsLink = /https?:\/\/(?:www\.)?(?:maps\.google\.[a-z.]+|google\.[a-z.]+\/maps|goo\.gl\/maps|maps\.app\.goo\.gl|g\.co\/maps)\/?\S*/i.test(body)
+  // Cross-street intersection (e.g. "5th and Main", "Oak & Elm") — geocoder handles intersections
+  const crossStreetMatch = !looksLikeAddress && !gpsMatch && body.length < 80 &&
+    /\b[a-z0-9]+(?:\s+(?:st|street|ave|avenue|blvd|rd|road|ln|lane|dr|drive))?\s+(?:and|&)\s+[a-z0-9]+(?:\s+(?:st|street|ave|avenue|blvd|rd|road|ln|lane|dr|drive))?\b/i.test(lower) &&
+    // Avoid matching natural language like "yes and no" or "trash and debris"
+    !/\b(yes|no|ok|okay|maybe|trash|debris|concrete|asphalt|sand|clay|gravel|done|good|bad)\b/i.test(lower)
   const isLocationPin = !!(gpsMatch || mapsLink)
-  const driverLoadingAddress = looksLikeAddress ? body.trim() : isLocationPin ? body.trim() : null
+  // Build a routing-ready string. For cross streets, append the saved or detected city for accuracy.
+  let driverLoadingAddress: string | null = null
+  if (looksLikeAddress) driverLoadingAddress = body.trim()
+  else if (gpsMatch) driverLoadingAddress = `${gpsMatch[1]},${gpsMatch[2]}`
+  else if (isLocationPin) driverLoadingAddress = body.trim()
+  else if (crossStreetMatch) {
+    // Cross-street: pad with city + state so Google geocodes the intersection
+    const cityHint = (conv?.extracted_city || "Dallas") + ", TX"
+    driverLoadingAddress = `${body.trim()}, ${cityHint}`
+  }
 
   // ── INLINE CITY EXTRACTION — detect city mentioned in current message ──
   // Also resolve common typos to canonical city names
@@ -1852,14 +1965,82 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   }
   if (inlineTruck || inlineYards || storedPhotoUrl || driverLoadingAddress || inlineCity) await saveConv(phone, enriched)
 
-  // ── NEARBY JOBS — use full address when available, fall back to city from message or saved ──
-  let nearbyJobs: JobMatch[] = []
-  // Priority: new address in this message > saved address > new city in this message > saved city
-  const routingInput = driverLoadingAddress || enriched.extracted_material || inlineCity || enriched.extracted_city
-  if (routingInput) {
+  // CITY CHANGE — driver said a city that differs from the saved one. The COALESCE-based
+  // upsert_conversation RPC can't clear/replace fields with NULL, so a stale loading address
+  // from the OLD city would still drive routing. Force a direct UPDATE to clear stale state.
+  if (inlineCity && conv?.extracted_city && inlineCity !== conv.extracted_city &&
+      !["ACTIVE","OTW_PENDING","APPROVAL_PENDING","PHOTO_PENDING"].includes(convState)) {
+    console.log(`[brain] city change ${conv.extracted_city} → ${inlineCity}, clearing stale routing state`)
     try {
-      nearbyJobs = await findNearbyJobs(routingInput, enriched.extracted_truck_type || undefined)
-    } catch {}
+      await createAdminSupabase().from("conversations").update({
+        extracted_city: inlineCity,
+        extracted_material: driverLoadingAddress || null, // null clears stale address
+        state: driverLoadingAddress ? convState : "ASKING_ADDRESS",
+        pending_approval_order_id: null,
+        updated_at: new Date().toISOString(),
+      }).eq("phone", phone)
+      enriched.extracted_city = inlineCity
+      enriched.extracted_material = driverLoadingAddress || null
+    } catch (err) {
+      console.error("[city change update]", err)
+    }
+  }
+
+  // ── NEARBY JOBS ──
+  // CRITICAL: only route on REAL location data (street address / GPS / cross street), never on a
+  // city alone — city-centroid matches give bad "closest site" answers and the driver thinks
+  // we're guessing. If we only have a city, skip routing and ask for the loading address.
+  let nearbyJobs: JobMatch[] = []
+  const realLocation = driverLoadingAddress || (conv?.extracted_material && /\d/.test(conv.extracted_material) ? conv.extracted_material : null)
+  let routingFailed = false
+  if (realLocation) {
+    try {
+      nearbyJobs = await findNearbyJobs(realLocation, enriched.extracted_truck_type || undefined)
+      if (!nearbyJobs.length) {
+        routingFailed = true
+        await sendAdminAlert(`⚠ NO NEARBY JOBS for driver ${phone}: tried "${realLocation.slice(0,80)}"`)
+      }
+    } catch (e: any) {
+      routingFailed = true
+      console.error("[brain] findNearbyJobs threw:", e?.message)
+      await sendAdminAlert(`⚠ ROUTING ERROR for ${phone}: ${e?.message?.slice(0,120) || "unknown"} — input "${realLocation.slice(0,60)}"`)
+    }
+  }
+  // City-only state: we know roughly where they are but not where they're loading from.
+  // Force the conversation into ASKING_ADDRESS so Sonnet/templates demand the exact address
+  // rather than presenting a centroid-based "closest" job.
+  const cityOnlyNoAddress = !realLocation && !!(inlineCity || enriched.extracted_city)
+  if (cityOnlyNoAddress && convState !== "ASKING_ADDRESS" && !["ACTIVE","OTW_PENDING","JOB_PRESENTED","APPROVAL_PENDING","PHOTO_PENDING"].includes(convState)) {
+    await saveConv(phone, { ...enriched, state: "ASKING_ADDRESS" })
+    const reply = pick([
+      `cool ${(inlineCity || enriched.extracted_city)} — whats the address you loading from so I can find whats closest`,
+      `bet, send me the loading address and I'll pull up the closest sites`,
+      `whats the street address you loading from`,
+    ])
+    await logMsg(phone, reply, "outbound", `cityonly_${sid}`)
+    return reply
+  }
+  // Zero-jobs template: city was extracted but no nearby jobs available — Jesse voice, no AI call
+  if (!nearbyJobs.length && (inlineCity || enriched.extracted_city) && realLocation && !activeJob) {
+    const cityName = inlineCity || enriched.extracted_city
+    const truckQ = !enriched.extracted_truck_type
+      ? (lang === "es" ? " — que tipo de camion tienes" : " — what truck you running")
+      : ""
+    const reply = lang === "es"
+      ? `nada en ${cityName} ahorita, te aviso apenas salga algo${truckQ}`
+      : `nothing in ${cityName} right now, I'll text you the second something opens up${truckQ}`
+    // Stay in DISCOVERY (or ASKING_TRUCK if we still need truck)
+    await saveConv(phone, { ...enriched, state: enriched.extracted_truck_type ? "DISCOVERY" : "ASKING_TRUCK" })
+    await logMsg(phone, reply, "outbound", `zerojobs_${sid}`)
+    return reply
+  }
+  if (routingFailed && realLocation) {
+    const reply = pick([
+      "cant find anything near that address, you sure thats right",
+      "hmm not pulling anything up, can you double check the address",
+    ])
+    await logMsg(phone, reply, "outbound", `routefail_${sid}`)
+    return reply
   }
 
   // ── CALL BRAIN ───────────────────────────────────────────────
@@ -1879,10 +2060,12 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
       return ""
     }
     
-    // Handle START
+    // Handle START — re-opt-in must wipe stale state. Otherwise a driver who STOPped
+    // mid-ACTIVE job weeks ago would resume into a dead order.
     if (tpl.action === "START") {
       const sb = createAdminSupabase()
       try { await sb.from("driver_profiles").update({ sms_opted_out: false }).eq("phone", phone) } catch {}
+      await resetConv(phone)
       await logMsg(phone, tpl.response, "outbound", `tpl_${sid}`)
       return tpl.response
     }
@@ -1998,9 +2181,14 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
     const newState = brain.updates.state
     // Prevent brain from jumping to payment/active states without proper preconditions
     const dangerousStates = ["PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING", "ACTIVE", "OTW_PENDING", "AWAITING_CUSTOMER_CONFIRM", "CLOSED"]
+    // Job-flow states that require a real order — Sonnet hallucinations have set these
+    // without any actual order, locking drivers into a fake job they can't escape.
+    const jobStates = ["JOB_PRESENTED", "PHOTO_PENDING", "APPROVAL_PENDING"]
+    const hasOrder = !!(toSave.pending_approval_order_id || toSave.active_order_id || conv?.pending_approval_order_id || conv?.active_order_id)
     if (dangerousStates.includes(newState) && !toSave.active_order_id && !conv?.active_order_id) {
-      // No active job — brain hallucinated a dangerous state, ignore it
       console.warn(`[Brain] blocked state transition to ${newState} — no active job`)
+    } else if (jobStates.includes(newState) && !hasOrder) {
+      console.warn(`[Brain] blocked state transition to ${newState} — no order id, brain hallucinated`)
     } else {
       toSave.state = newState
     }
@@ -2037,23 +2225,44 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
       } else {
       // FIX #5: Soft lock — create short reservation so other drivers see a different job
       try { await atomicClaimJob(orderId, phone, profile?.user_id || null) } catch {}
+      let photoStorageFailed = false
       if (photoUrl) {
         try {
           const stored = await downloadAndStorePhoto(photoUrl, phone, orderId)
           if (stored) toSave.photo_public_url = stored.publicUrl
-        } catch (e) { console.error("[photo store]", e) }
+          else photoStorageFailed = true
+        } catch (e) {
+          console.error("[photo store]", e)
+          photoStorageFailed = true
+        }
       }
-      
+
       const sb = createAdminSupabase()
       const { data: order } = await sb.from("dispatch_orders")
         .select("id, client_phone, client_name, yards_needed, driver_pay_cents")
         .eq("id", orderId).maybeSingle()
-      
+
       if (order?.client_phone) {
         const driverName = profile ? `${profile.first_name} ${profile.last_name || ""}`.trim() : phone
         const customerPhone = order.client_phone.replace(/\D/g, "").replace(/^1/, "")
         const approvalCode = crypto.randomBytes(4).toString("hex").toUpperCase()
         const photoToSend = toSave.photo_public_url || photoUrl || ""
+
+        // CRITICAL: never send a customer approval request without a photo. The customer
+        // approves dirt quality based on the image — a blank approval defeats the safety check.
+        // Escalate to admin for manual review and tell the driver to resend.
+        if (!photoToSend || photoStorageFailed) {
+          await sendAdminAlert(`⚠ PHOTO STORAGE FAILED: driver ${driverName} (${phone}) order ${generateJobNumber(orderId)} — photo could not be saved. Customer approval NOT sent. Manual review needed.`)
+          toSave.state = "PHOTO_PENDING"
+          toSave.pending_approval_order_id = orderId
+          brain.response = lang === "es"
+            ? "no me llego la foto bien, mandala otra vez porfa"
+            : "the photo didnt come thru, can you resend it"
+          // Skip the rest of approval-send logic for this turn
+          await saveConv(phone, toSave)
+          await logMsg(phone, brain.response, "outbound", `photofail_${sid}`)
+          return brain.response
+        }
 
         let approvalSent = false
         try {
@@ -2123,7 +2332,13 @@ export async function handleConversation(sms: IncomingSMS): Promise<string> {
   }
 
   if (brain.action === "COMPLETE_JOB" && activeJob) {
-    return await handleDelivery(phone, conv, profile, activeJob, parseLoads(body) || 1, lang)
+    const pl = parseLoads(body)
+    if (pl === LOAD_COUNT_OVERFLOW) {
+      return lang === "es"
+        ? "whoa son muchas cargas, mandame 50 primero y luego seguimos con el resto"
+        : "whoa thats a lot of loads, lemme split that up — send me 50 first then we'll do the rest"
+    }
+    return await handleDelivery(phone, conv, profile, activeJob, pl && pl > 0 ? pl : 1, lang)
   }
 
   // Photo approval handled above in SEND_FOR_APPROVAL block

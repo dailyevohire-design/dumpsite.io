@@ -7,7 +7,13 @@ const FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER 
 const ADMIN = process.env.ADMIN_PHONE || "7134439223"
 const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
-export async function GET() {
+if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
+
+export async function GET(request: Request) {
+  const authHeader = request.headers.get("authorization")
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 })
+  }
   const sb = createAdminSupabase()
   const todayStart = new Date()
   todayStart.setHours(0, 0, 0, 0)

@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-04-07T17:17:15.880Z
-> Commit: 1422b4d fix: never silently reply from wrong agent number + extract name parser
+> Auto-generated 2026-04-08T01:51:05.849Z
+> Commit: 74a91c2 Move bearer-token admin endpoints to /api/ops to bypass Supabase session proxy
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
@@ -10,8 +10,8 @@
 - GitHub: dailyevohire-design/dumpsite.io
 
 ## Live Stats
-- Open orders: 1
-- Active drivers: 134
+- Open orders: 13
+- Active drivers: 135
 - Active reservations: 0
 - Material photos: 11
 - Pending payouts: $0

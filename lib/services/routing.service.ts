@@ -23,13 +23,61 @@ interface GeoResult {
   formattedAddress?: string
 }
 
+// Parse raw "lat,lng" or a Google Maps share link → coordinates.
+// Returns null if input isn't a coordinate or maps link, or if link resolution fails.
+export async function parseCoordinatesOrMapsLink(input: string): Promise<GeoResult | null> {
+  // 1) Bare coordinate pair (covers "32.7767,-96.797" and "32.7767 -96.797")
+  const coordMatch = input.match(/(-?\d{1,3}\.\d{3,})\s*[,\s]\s*(-?\d{1,3}\.\d{3,})/)
+  if (coordMatch) {
+    const lat = parseFloat(coordMatch[1])
+    const lng = parseFloat(coordMatch[2])
+    if (lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
+      return { lat, lng, precision: 'address', formattedAddress: `${lat},${lng}` }
+    }
+  }
+  // 2) Google Maps share link — follow redirect, then pull coords from final URL
+  const urlMatch = input.match(/https?:\/\/(?:www\.)?(?:maps\.google\.[a-z.]+|google\.[a-z.]+\/maps|goo\.gl\/maps|maps\.app\.goo\.gl|g\.co\/maps)\/?\S*/i)
+  if (urlMatch) {
+    try {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 5000)
+      const resp = await fetch(urlMatch[0], { redirect: 'follow', signal: ctrl.signal })
+      clearTimeout(t)
+      const finalUrl = resp.url
+      // Pattern A: @lat,lng,zoom (modern maps URLs)
+      let m = finalUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/)
+      // Pattern B: !3d<lat>!4d<lng> (place URLs)
+      if (!m) m = finalUrl.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/)
+      // Pattern C: ?q=lat,lng or &q=lat,lng (legacy share format)
+      if (!m) m = finalUrl.match(/[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/)
+      if (m) {
+        const lat = parseFloat(m[1])
+        const lng = parseFloat(m[2])
+        return { lat, lng, precision: 'address', formattedAddress: `${lat},${lng}` }
+      }
+      console.warn('[parseMapsLink] could not extract coords from final URL:', finalUrl)
+    } catch (err) {
+      console.error('[parseMapsLink] fetch error:', err)
+    }
+  }
+  return null
+}
+
 async function geocode(input: string): Promise<GeoResult | null> {
+  // Try direct coordinate / Maps-link parsing first — bypasses external geocoder
+  const direct = await parseCoordinatesOrMapsLink(input)
+  if (direct) return direct
+
   // Try Google Maps first (address-level precision)
   if (GOOGLE_MAPS_KEY) {
     try {
       const q = encodeURIComponent(input.includes('TX') || input.includes('Texas') ? input : `${input}, Texas, USA`)
       const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${q}&key=${GOOGLE_MAPS_KEY}&components=country:US`
-      const r = await fetch(url)
+      // Hard 5s timeout — without it a slow Google response hangs the entire SMS webhook
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 5000)
+      const r = await fetch(url, { signal: ctrl.signal })
+      clearTimeout(t)
       const data = await r.json()
       if (data.status === 'OK' && data.results?.[0]) {
         const loc = data.results[0].geometry.location
@@ -52,10 +100,14 @@ async function geocode(input: string): Promise<GeoResult | null> {
 
   // Fallback: Nominatim (city-level only)
   try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 5000)
+    // Warmup delay sits INSIDE the abort window so a hung process can't bypass the 5s budget
     await new Promise(r => setTimeout(r, 300))
     const q = encodeURIComponent(input.includes('Texas') || input.includes('TX') ? input : `${input} Texas USA`)
     const url = `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`
-    const r = await fetch(url, { headers: { 'User-Agent': 'DumpSite.io/1.0' } })
+    const r = await fetch(url, { headers: { 'User-Agent': 'DumpSite.io/1.0' }, signal: ctrl.signal })
+    clearTimeout(t)
     const data = await r.json()
     if (data?.[0]) {
       return {
@@ -167,13 +219,24 @@ export async function findNearbyJobs(
       })
       .sort((a, b) => a.distanceMiles - b.distanceMiles)
 
-    // No minimum distance — a driver close to a dump site is ideal
-    // The dispatch address is the DUMP SITE, not the driver's loading address
-
-    // Try 15 miles, expand to 30 if nothing found, then just return closest 5
-    let nearby = withDistance.filter(o => o.distanceMiles <= maxMiles)
-    if (!nearby.length) nearby = withDistance.filter(o => o.distanceMiles <= 30)
-    if (!nearby.length) nearby = withDistance.slice(0, 5)
+    // Address-aware tiering — prefer same city as driver loading address before pure distance.
+    // Tier 1: same city as driver formattedAddress; Tier 2: within 25mi; Tier 3: further.
+    const driverCity = (driverGeo.formattedAddress || '')
+      .split(',').map(s => s.trim()).filter(Boolean)[1]?.toLowerCase() || ''
+    const tier1: typeof withDistance = []
+    const tier2: typeof withDistance = []
+    const tier3: typeof withDistance = []
+    for (const o of withDistance) {
+      const orderCity = ((o.cities as any)?.name || '').toLowerCase()
+      if (driverCity && orderCity && orderCity === driverCity) tier1.push(o)
+      else if (o.distanceMiles <= 25) tier2.push(o)
+      else tier3.push(o)
+    }
+    let tiered = tier1.length ? tier1 : tier2.length ? tier2 : tier3
+    // Within tier, also enforce maxMiles softness: try 15, then 30, then keep top 5
+    let nearby = tiered.filter(o => o.distanceMiles <= maxMiles)
+    if (!nearby.length) nearby = tiered.filter(o => o.distanceMiles <= 30)
+    if (!nearby.length) nearby = tiered.slice(0, 5)
     withDistance = nearby
   } else {
     // Geocoding completely failed — return nothing rather than fake 0-mile results
@@ -181,21 +244,24 @@ export async function findNearbyJobs(
     return []
   }
 
-  // Filter by truck type family
+  // Asymmetric truck access matrix:
+  //   - Dump trucks (tandem/tri/quad/super) go EVERYWHERE — no filter applied.
+  //   - 18-wheelers / end-dumps / transfers can only go to sites flagged for big-rig access.
+  //   - Sites with no `allows_eighteen_wheeler` flag are assumed dump-truck-only.
   if (truckType) {
     const dumpFamily = ['tandem_axle', 'tri_axle', 'quad_axle', 'super_dump']
-    const eighteenFamily = ['end_dump', 'belly_dump', 'side_dump', '18_wheeler', 'transfer']
-    const driverFamily = dumpFamily.includes(truckType) ? dumpFamily : eighteenFamily.includes(truckType) ? eighteenFamily : null
-    const truckFiltered = withDistance.filter(o => {
-      // Orders with no truck type default to dump truck access only
-      const orderTruck = o.truck_type_needed || 'tandem_axle'
-      if (orderTruck === truckType) return true
-      if (driverFamily && driverFamily.includes(orderTruck)) return true
-      if (dumpFamily.includes(orderTruck) && dumpFamily.includes(truckType)) return true
-      if (eighteenFamily.includes(orderTruck) && eighteenFamily.includes(truckType)) return true
-      return false
-    })
-    if (truckFiltered.length) withDistance = truckFiltered
+    const isDumpDriver = dumpFamily.includes(truckType)
+    if (!isDumpDriver) {
+      // 18-wheeler family driver — only sites whose own truck_type_needed is in the big-rig family
+      const eighteenFamily = ['end_dump', 'belly_dump', 'side_dump', '18_wheeler', 'transfer', 'semi']
+      const truckFiltered = withDistance.filter(o => {
+        const orderTruck = o.truck_type_needed || ''
+        return eighteenFamily.includes(orderTruck)
+      })
+      if (truckFiltered.length) withDistance = truckFiltered
+      else withDistance = []
+    }
+    // Dump truck driver — never block, allow everything
   }
 
   return withDistance.slice(0, 5).map(o => ({

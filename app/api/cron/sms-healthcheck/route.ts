@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import twilio from "twilio"
+if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
+
 
 // ─────────────────────────────────────────────────────────
 // SMS SYSTEM HEALTHCHECK — runs every 10-15 minutes

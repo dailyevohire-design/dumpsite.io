@@ -81,7 +81,15 @@ export async function downloadAndStorePhoto(
     }
 
     const contentType = response.headers.get('content-type') || 'image/jpeg'
-    const ext = contentType.includes('png') ? 'png' : contentType.includes('gif') ? 'gif' : 'jpg'
+    // Preserve original extension — iPhones send HEIC, Android sometimes WEBP. If we
+    // mislabel them as .jpg, the resigned URL Twilio fetches later will be a corrupt
+    // image and the customer sees a broken approval MMS.
+    const ext = contentType.includes('heic') ? 'heic'
+      : contentType.includes('heif') ? 'heif'
+      : contentType.includes('webp') ? 'webp'
+      : contentType.includes('png') ? 'png'
+      : contentType.includes('gif') ? 'gif'
+      : 'jpg'
     const buffer = await response.arrayBuffer()
     const storagePath = `${driverPhone}/${orderId}/${Date.now()}.${ext}`
 

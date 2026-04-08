@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import twilio from "twilio"
+if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
+
 
 const tw = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
@@ -45,6 +47,27 @@ export async function GET(request: NextRequest) {
       })
       await sb.from("sms_logs").insert({ phone: d.phone, body: `[NO-SHOW CHECK ${mins}min]`, direction: "outbound", message_sid: `noshow_${Date.now()}` })
     } catch {}
+  }
+
+  // 1b. APPROVAL_PENDING REAPER — approval_sent_at older than 2h, reset and notify driver
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+  const { data: staleApprovals } = await sb.from("conversations")
+    .select("phone, approval_sent_at, pending_approval_order_id")
+    .eq("state", "APPROVAL_PENDING")
+    .lt("approval_sent_at", twoHoursAgo)
+  for (const c of staleApprovals || []) {
+    try {
+      await sb.from("conversations").update({
+        state: "DISCOVERY", pending_approval_order_id: null, reservation_id: null,
+        approval_sent_at: null, voice_call_made: null,
+      }).eq("phone", c.phone)
+      await tw.messages.create({
+        body: "that one didn't pan out, lmk if you got more dirt today",
+        from: FROM, to: `+1${c.phone}`,
+      })
+      await sb.from("sms_logs").insert({ phone: c.phone, body: `[APPROVAL REAPER 2h]`, direction: "outbound", message_sid: `reaper_${Date.now()}` })
+      alerts.push(`APPROVAL REAPED: ${c.phone} APPROVAL_PENDING > 2h, reset to DISCOVERY`)
+    } catch (e) { console.error("[approval reaper]", e) }
   }
 
   // 2. STUCK DRIVER CONVERSATIONS — no update in 15+ min during active flow

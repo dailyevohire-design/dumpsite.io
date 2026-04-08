@@ -75,6 +75,12 @@ export async function recordLoadPayment(loadId: string, driverId: string): Promi
     .single()
 
   if (payErr || !payment) {
+    // Unique violation on (load_request_id, driver_id) — another concurrent insert won. Treat as success.
+    if (payErr && (payErr.code === '23505' || /duplicate|unique/i.test(payErr.message || ''))) {
+      const { data: existing } = await supabase
+        .from('driver_payments').select('id').eq('load_request_id', loadId).eq('driver_id', driverId).maybeSingle()
+      if (existing) return { success: true, payoutId: existing.id, amountCents, error: 'Payment already recorded' }
+    }
     console.error('Payment record error:', payErr)
     return { success: false, error: 'Failed to record payment' }
   }

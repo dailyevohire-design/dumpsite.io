@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import twilio from "twilio"
+if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
+
 
 const tw = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER || ""
@@ -8,9 +10,17 @@ const ADMIN_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_N
 const ADMIN = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
-async function alertAdmin(msg: string) {
+async function alertAdmin(msg: string, sb?: ReturnType<typeof createAdminSupabase>) {
   if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Payment alert: ${msg.slice(0, 80)}`); return }
-  try { await tw.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN}` }) } catch (e) { console.error("[pw-alert]", e) }
+  try {
+    await tw.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN}` })
+  } catch (e) {
+    console.error("[pw-alert]", e)
+    // Persist to retry queue so cron can re-attempt next run
+    if (sb) {
+      try { await sb.from("failed_admin_alerts").insert({ body: msg, attempts: 1, last_attempted_at: new Date().toISOString() }) } catch {}
+    }
+  }
   if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[pw-alert admin2]", e) } }
 }
 
@@ -20,6 +30,22 @@ export async function GET(request: NextRequest) {
     return new Response("Unauthorized", { status: 401 })
   }
   const sb = createAdminSupabase()
+
+  // Retry pending failed alerts FIRST
+  try {
+    const { data: failed } = await sb.from("failed_admin_alerts").select("id, body, attempts").order("created_at", { ascending: true }).limit(20)
+    for (const f of failed || []) {
+      try {
+        await tw.messages.create({ body: f.body, from: ADMIN_FROM, to: `+1${ADMIN}` })
+        await sb.from("failed_admin_alerts").delete().eq("id", f.id)
+      } catch (e) {
+        await sb.from("failed_admin_alerts").update({
+          attempts: (f.attempts || 0) + 1,
+          last_attempted_at: new Date().toISOString(),
+        }).eq("id", f.id)
+      }
+    }
+  } catch (e) { console.error("[pw retry queue]", e) }
   const now = Date.now()
   let actions = 0
 
@@ -51,7 +77,7 @@ export async function GET(request: NextRequest) {
           })
           await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 1h] First follow-up`, direction: "outbound", message_sid: `pw1h_${Date.now()}` })
         }
-        await alertAdmin(`UNPAID 1h: ${c.customer_name} (${c.phone}) owes ${total}`)
+        await alertAdmin(`UNPAID 1h: ${c.customer_name} (${c.phone}) owes ${total}`, sb)
         actions++
       } else if (hoursWaiting >= 4 && hoursWaiting < 5 && lastOutHoursAgo >= 2) {
         // 4 hours — second nudge
@@ -72,12 +98,12 @@ export async function GET(request: NextRequest) {
           })
           await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 24h] Final follow-up`, direction: "outbound", message_sid: `pw24h_${Date.now()}` })
         }
-        await alertAdmin(`UNPAID 24h — NEEDS MANUAL COLLECTION: ${c.customer_name} (${c.phone}) owes ${total}`)
+        await alertAdmin(`UNPAID 24h — NEEDS MANUAL COLLECTION: ${c.customer_name} (${c.phone}) owes ${total}`, sb)
         actions++
       } else if (hoursWaiting >= 48) {
         // 48h+ — close it out, admin handles manually
         await sb.from("customer_conversations").update({ state: "CLOSED" }).eq("phone", c.phone)
-        await alertAdmin(`UNPAID CLOSED 48h+: ${c.customer_name} (${c.phone}) ${total}. Manual collection needed.`)
+        await alertAdmin(`UNPAID CLOSED 48h+: ${c.customer_name} (${c.phone}) ${total}. Manual collection needed.`, sb)
         actions++
       }
     } catch (e) { console.error("[payment-watchdog]", e) }
@@ -92,7 +118,7 @@ export async function GET(request: NextRequest) {
 
   if (staleDriverPay && staleDriverPay.length > 0) {
     const total = staleDriverPay.reduce((s, p) => s + p.amount_cents / 100, 0)
-    await alertAdmin(`${staleDriverPay.length} driver payments pending 8h+, total $${Math.round(total)}. Process now.`)
+    await alertAdmin(`${staleDriverPay.length} driver payments pending 8h+, total $${Math.round(total)}. Process now.`, sb)
     actions++
   }
 

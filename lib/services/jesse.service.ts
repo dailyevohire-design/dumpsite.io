@@ -191,7 +191,7 @@ export async function generateJesseResponse(context: JesseContext): Promise<stri
     }
 
     // Safety: strip job codes, menus, and multiple questions
-    let cleaned = text.replace(/DS-[A-Z0-9]{4,}/g, "").replace(/\s{2,}/g, " ").trim()
+    let cleaned = text.replace(/DS-[A-Z0-9]{4,}/g, "your job").replace(/\s{2,}/g, " ").trim()
     if (/reply\s*:/i.test(cleaned) || /option\s+\d/i.test(cleaned) || /select\s+one/i.test(cleaned)) {
       return fallbackResponse(context.state);
     }
