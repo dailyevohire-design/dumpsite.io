@@ -206,25 +206,48 @@ function formatTruckAccess(truckType: string): string {
 // DB HELPERS
 // ─────────────────────────────────────────────────────────────
 async function getProfile(phone: string) {
-  const { data } = await createAdminSupabase().rpc("get_sms_driver", { p_phone: phone })
-  return data?.[0] || null
+  try {
+    const { data, error } = await createAdminSupabase().rpc("get_sms_driver", { p_phone: phone })
+    if (error) throw error
+    return data?.[0] || null
+  } catch (err: any) {
+    console.error("[getProfile] FAILED", phone, err?.message || err)
+    try { await sendAdminAlert(`⚠ DB FAIL get_sms_driver(${phone}): ${err?.code || ""} ${err?.message || err}`) } catch {}
+    return null
+  }
 }
 async function getConv(phone: string) {
-  const { data } = await createAdminSupabase().rpc("get_conversation", { p_phone: phone })
-  return data?.[0] || { state: "DISCOVERY" }
+  try {
+    const { data, error } = await createAdminSupabase().rpc("get_conversation", { p_phone: phone })
+    if (error) throw error
+    return data?.[0] || { state: "DISCOVERY" }
+  } catch (err: any) {
+    console.error("[getConv] FAILED", phone, err?.message || err)
+    try { await sendAdminAlert(`⚠ DB FAIL get_conversation(${phone}): ${err?.code || ""} ${err?.message || err}`) } catch {}
+    return { state: "DISCOVERY" }
+  }
 }
 async function saveConv(phone: string, u: Record<string, any>) {
-  await createAdminSupabase().rpc("upsert_conversation", {
-    p_phone: phone, p_state: u.state ?? null, p_job_state: u.job_state ?? null,
-    p_active_order_id: u.active_order_id ?? null, p_extracted_city: u.extracted_city ?? null,
-    p_extracted_yards: u.extracted_yards ?? null, p_extracted_truck_type: u.extracted_truck_type ?? null,
-    p_extracted_truck_count: u.extracted_truck_count ?? null,
-    p_extracted_material: u.extracted_material ?? null, p_photo_storage_path: u.photo_storage_path ?? null,
-    p_photo_public_url: u.photo_public_url ?? null, p_reservation_id: u.reservation_id ?? null,
-    p_pending_approval_order_id: u.pending_approval_order_id ?? null,
-    p_approval_sent_at: u.approval_sent_at ?? null, p_voice_call_made: u.voice_call_made ?? null,
-    p_last_message_sid: u.last_message_sid ?? null,
-  })
+  try {
+    const { error } = await createAdminSupabase().rpc("upsert_conversation", {
+      p_phone: phone, p_state: u.state ?? null, p_job_state: u.job_state ?? null,
+      p_active_order_id: u.active_order_id ?? null, p_extracted_city: u.extracted_city ?? null,
+      p_extracted_yards: u.extracted_yards ?? null, p_extracted_truck_type: u.extracted_truck_type ?? null,
+      p_extracted_truck_count: u.extracted_truck_count ?? null,
+      p_extracted_material: u.extracted_material ?? null, p_photo_storage_path: u.photo_storage_path ?? null,
+      p_photo_public_url: u.photo_public_url ?? null, p_reservation_id: u.reservation_id ?? null,
+      p_pending_approval_order_id: u.pending_approval_order_id ?? null,
+      p_approval_sent_at: u.approval_sent_at ?? null, p_voice_call_made: u.voice_call_made ?? null,
+      p_last_message_sid: u.last_message_sid ?? null,
+    })
+    if (error) throw error
+  } catch (err: any) {
+    console.error("[saveConv] FAILED", phone, u?.state, err?.message || err)
+    // NEVER silent fail — driver dispatch will loop without state persistence
+    try { await sendAdminAlert(`🚨 SAVECONV FAIL ${phone} state=${u?.state}: ${err?.code || ""} ${err?.message || err}`) } catch {}
+    // Re-throw so caller can decide. Webhook will return error fallback instead of looping the same reply.
+    throw err
+  }
 }
 async function resetConv(phone: string) {
   const sb = createAdminSupabase()

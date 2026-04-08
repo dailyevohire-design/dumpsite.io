@@ -125,6 +125,18 @@ export async function POST(request: Request) {
     // Human-like delay: scale with message complexity
     // Short acks (10.4, bet, copy) = 3-8s, medium = 6-15s, long/address = 10-25s
     const phone = from.replace(/\D/g, '').replace(/^1/, '')
+
+    // CENTRAL OUTBOUND LOG — every reply, every code path. Without this,
+    // brain.service.ts early-return branches (GETTING_NAME, after-hours, cancel,
+    // error fallback, etc.) bypass logging and the sendViaTwilioAPI dedup at L51-64
+    // can't stop repeats. This is the canonical record of "what we said".
+    try {
+      await createAdminSupabase().from('sms_logs').insert({
+        phone, body: reply, direction: 'outbound', message_sid: `wh_${messageSid}`,
+      })
+    } catch (logErr) {
+      console.error('[webhook] outbound log failed:', logErr)
+    }
     const replyLen = reply.length
     const baseDelay = replyLen < 20 ? 3000 : replyLen < 80 ? 6000 : 10000
     const jitter = replyLen < 20 ? 5000 : replyLen < 80 ? 9000 : 15000
