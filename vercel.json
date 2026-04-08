@@ -27,6 +27,10 @@
     {
       "path": "/api/cron/sms-healthcheck",
       "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/retry-pending-sms",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

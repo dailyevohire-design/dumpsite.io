@@ -11,7 +11,10 @@ const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
 function validateTwilioSignature(url: string, params: Record<string, string>, signature: string): boolean {
   const authToken = process.env.TWILIO_AUTH_TOKEN
-  if (!authToken) return process.env.NODE_ENV === "development"
+  if (!authToken) {
+    console.error("[Customer SMS] TWILIO_AUTH_TOKEN missing — refusing webhook")
+    return false
+  }
   const sortedKeys = Object.keys(params).sort()
   let data = url
   for (const key of sortedKeys) data += key + params[key]

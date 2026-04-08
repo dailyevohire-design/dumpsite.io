@@ -1,0 +1,81 @@
+import { NextRequest, NextResponse } from "next/server"
+import { createAdminSupabase } from "@/lib/supabase"
+import twilio from "twilio"
+
+// ─────────────────────────────────────────────────────────
+// PENDING SMS RETRY CRON — runs every 5 minutes
+// The customer webhook drops a "pending_send" row in customer_sms_logs
+// before invoking after() to send the reply. On success the marker is
+// deleted. If after() crashes (Vercel function killed, Twilio outage,
+// etc.) the marker stays and the customer gets nothing.
+// This cron picks up any pending_send markers older than 3 minutes,
+// resends them, deletes the marker on success, and alerts admin if
+// the resend also fails.
+// ─────────────────────────────────────────────────────────
+
+export async function GET(req: NextRequest) {
+  const auth = req.headers.get("authorization")
+  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  const sb = createAdminSupabase()
+  const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString()
+  const { data: pending, error } = await sb
+    .from("customer_sms_logs")
+    .select("id, phone, body, message_sid, created_at")
+    .eq("direction", "pending_send")
+    .lt("created_at", cutoff)
+    .limit(50)
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+  if (!pending || pending.length === 0) {
+    return NextResponse.json({ ok: true, retried: 0 })
+  }
+
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
+  const adminFrom = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
+  const adminPhone = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
+  const results: { phone: string; ok: boolean; error?: string }[] = []
+
+  for (const row of pending) {
+    // Find the agent number for this customer to preserve attribution.
+    const { data: conv } = await sb
+      .from("customer_conversations")
+      .select("source_number")
+      .eq("phone", row.phone)
+      .maybeSingle()
+    const fromNumber = conv?.source_number
+      ? `+1${conv.source_number}`
+      : (process.env.CUSTOMER_TWILIO_NUMBER || adminFrom)
+
+    try {
+      const msg = await client.messages.create({
+        from: fromNumber,
+        to: `+1${row.phone}`,
+        body: row.body,
+      })
+      // Replace the pending marker with a real outbound entry
+      await sb.from("customer_sms_logs").delete().eq("id", row.id)
+      await sb.from("customer_sms_logs").insert({
+        phone: row.phone, body: row.body, direction: "outbound",
+        message_sid: msg.sid || `retry_${Date.now()}`,
+      })
+      results.push({ phone: row.phone, ok: true })
+    } catch (e) {
+      const errMsg = (e as any)?.message || "unknown"
+      results.push({ phone: row.phone, ok: false, error: errMsg })
+      // Alert admin — message has been pending for 3+ minutes AND retry failed
+      try {
+        await client.messages.create({
+          from: adminFrom,
+          to: `+1${adminPhone}`,
+          body: `RETRY FAILED for ${row.phone}: ${errMsg}. Reply lost: ${row.body.slice(0, 120)}`,
+        })
+      } catch {}
+    }
+  }
+
+  return NextResponse.json({ ok: true, retried: results.length, results })
+}

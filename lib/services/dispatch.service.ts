@@ -17,6 +17,8 @@ export interface CreateDispatchInput {
   source?: 'manual' | 'zapier' | 'web_form'
   zapierRowId?: string
   createdBy?: string
+  agentId?: string | null      // Sales agent attribution (multi-number tracking)
+  sourceNumber?: string | null // Twilio number the customer texted
 }
 
 export async function createDispatchOrder(input: CreateDispatchInput) {
@@ -105,6 +107,10 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
       status: 'dispatching',
       delivery_latitude: deliveryLat,
       delivery_longitude: deliveryLng,
+      // Optional sales-agent attribution columns; the migration in
+      // migrations/2026-04-07_dispatch_agent_attribution.sql adds them.
+      ...(input.agentId ? { agent_id: input.agentId } : {}),
+      ...(input.sourceNumber ? { source_number: input.sourceNumber } : {}),
     })
     .select()
     .single()
