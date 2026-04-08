@@ -38,6 +38,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <head>
         <meta name="theme-color" content="#F5A623" />
+        <script src="/shield.js" defer />
         <link rel="apple-touch-icon" href="/logo.png" />
         <script
           type="application/ld+json"

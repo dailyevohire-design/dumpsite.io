@@ -159,6 +159,22 @@ export async function sendAdminAlert(message: string) {
   return sendSMS(adminPhone, `DumpSite.io Alert: ${message}`, 'admin_alert')
 }
 
+export async function sendSecurityAlert(message: string) {
+  // Routes security incidents to SECURITY_ALERT_PHONE if set, else ADMIN_PHONE.
+  // Always wrapped — never crashes the caller.
+  try {
+    const securityPhone = process.env.SECURITY_ALERT_PHONE || process.env.ADMIN_PHONE
+    if (!securityPhone) {
+      console.error('[sendSecurityAlert] no SECURITY_ALERT_PHONE or ADMIN_PHONE set')
+      return { success: false, error: 'no recipient configured' }
+    }
+    return await sendSMS(securityPhone, `DumpSite.io SECURITY: ${message}`, 'security_alert')
+  } catch (e: any) {
+    console.error('[sendSecurityAlert] error:', e.message)
+    return { success: false, error: e.message }
+  }
+}
+
 export interface DispatchDriver {
   phone: string
   tierSlug: string
