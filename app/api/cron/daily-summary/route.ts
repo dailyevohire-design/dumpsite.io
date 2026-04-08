@@ -7,9 +7,10 @@ const FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER 
 const ADMIN = process.env.ADMIN_PHONE || "7134439223"
 const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
-if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
-
 export async function GET(request: Request) {
+  if (!process.env.CRON_SECRET) {
+    return new Response("CRON_SECRET not configured", { status: 500 })
+  }
   const authHeader = request.headers.get("authorization")
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return new Response("Unauthorized", { status: 401 })

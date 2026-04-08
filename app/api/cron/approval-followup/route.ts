@@ -2,12 +2,14 @@ import { NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import { makeVoiceCallToCustomer } from "@/lib/services/approval.service"
 import twilio from "twilio"
-if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
 
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"
 
 export async function GET(request: Request) {
+  if (!process.env.CRON_SECRET) {
+    return new Response("CRON_SECRET not configured", { status: 500 })
+  }
   const authHeader = request.headers.get("authorization")
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return new Response("Unauthorized", { status: 401 })

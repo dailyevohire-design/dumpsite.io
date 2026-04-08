@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
-if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
 
 
 function getTwilioAuth(): { sid: string; key: string; secret: string } {
@@ -28,6 +27,9 @@ async function sendSMS(to: string, body: string) {
 }
 
 export async function GET(request: Request) {
+  if (!process.env.CRON_SECRET) {
+    return new Response("CRON_SECRET not configured", { status: 500 })
+  }
   const authHeader = request.headers.get("authorization")
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return new Response("Unauthorized", { status: 401 })

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import twilio from "twilio"
-if (!process.env.CRON_SECRET) throw new Error("CRON_SECRET env var must be set")
 
 
 // ─────────────────────────────────────────────────────────
@@ -20,6 +19,9 @@ const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const HEALTHCHECK_PHONE = "0000000000" // Synthetic phone, never a real customer
 
 export async function GET(req: NextRequest) {
+  if (!process.env.CRON_SECRET) {
+    return NextResponse.json({ error: "CRON_SECRET not configured" }, { status: 500 })
+  }
   const auth = req.headers.get("authorization")
   if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
