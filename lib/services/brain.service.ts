@@ -1609,7 +1609,12 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
     console.error("[watchdog]", err)
   }
 
-  if (!hasPhoto && body.length < 20) {
+  // Skip rapid-fire combine when we just asked for a name — the next message
+  // IS the name, never merge it with the prior burst (otherwise we end up with
+  // first_name="I" from "I have 500 yds tomorrow Hello" mashups).
+  const _convForBurst = await getConv(phone)
+  const _inGettingName = _convForBurst?.state === "GETTING_NAME"
+  if (!hasPhoto && body.length < 20 && !_inGettingName) {
     // Short messages often come in bursts — wait briefly to combine
     await new Promise(r => setTimeout(r, 1500))
     const cutoff = new Date(Date.now() - 3000).toISOString()
@@ -1710,13 +1715,20 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
         ? (ack ? `${ack}como te llamas` : "Hola, como te llamas")
         : (ack ? `${ack}whats your name` : "Hey whats your name")
     }
-    // FIX B (lite): reject obvious non-names so we don't create driver named "Hello"
+    // FIX B: reject obvious non-names so we don't create driver named "Hello" or "I"
     const cleaned = body.trim().replace(/[^a-zA-Z\s'-]/g, "").trim()
-    const NON_NAMES = /^(hello|hi|hey|yo|sup|yes|yea|yeah|nope|no|ok|okay|10-?4|copy|bet|cool|thanks|thx|wtf|huh|what|who|dirt|load|loads|yards?|tomorrow|today)$/i
-    if (!cleaned || cleaned.length < 2 || NON_NAMES.test(cleaned) || /^\d/.test(body.trim())) {
+    const NON_NAMES = /^(hello|hi|hey|yo|sup|yes|yea|yeah|nope|no|ok|okay|10-?4|copy|bet|cool|thanks|thx|wtf|huh|what|who|dirt|load|loads|yards?|tomorrow|today|have|need|got|im|am|in|on|at|of|the|a|an|and|or|but|to|from|for|with|by|is|it|me|my|we|us|you|your|they|them|this|that|here|there|when|where|why|how)$/i
+    const partsRaw = cleaned.split(/\s+/).filter(Boolean)
+    const firstWord = partsRaw[0] || ""
+    // Reject: empty, starts w/ digit, full string a non-name, first word < 2 chars,
+    // first word in non-name list, or message looks like a job offer (mentions yds/load/dirt)
+    const looksLikeJobOffer = /\b(yd|yds|yard|yards|load|loads|dirt|truck|haul)\b/i.test(body)
+    if (!cleaned || cleaned.length < 2 || NON_NAMES.test(cleaned) ||
+        /^\d/.test(body.trim()) || firstWord.length < 2 || NON_NAMES.test(firstWord) ||
+        looksLikeJobOffer) {
       return lang==="es" ? "perdon, como te llamas" : "my bad — whats your name"
     }
-    const parts = cleaned.split(/\s+/)
+    const parts = partsRaw
     const first = parts[0]
     const last = parts.slice(1).join(" ") || ""
     await createAdminSupabase().rpc("create_sms_driver", { p_phone: phone, p_first_name: first, p_last_name: last })
