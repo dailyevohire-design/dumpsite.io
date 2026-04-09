@@ -50,3 +50,4 @@ dumpsite_part_*
 part_aa
 env-vercel.zip
 *.zip
+.gstack/

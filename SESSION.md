@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-04-08T01:51:05.849Z
-> Commit: 74a91c2 Move bearer-token admin endpoints to /api/ops to bypass Supabase session proxy
+> Auto-generated 2026-04-09T00:04:19.265Z
+> Commit: c392c3c fix(customer-brain): unbreakable hardening pass
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
@@ -10,7 +10,7 @@
 - GitHub: dailyevohire-design/dumpsite.io
 
 ## Live Stats
-- Open orders: 13
+- Open orders: 18
 - Active drivers: 135
 - Active reservations: 0
 - Material photos: 11
