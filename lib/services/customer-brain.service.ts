@@ -201,6 +201,10 @@ function extractYardsDetailed(text: string, allowBareNumber: boolean = true): { 
   // Explicit yards mention: "20 yards", "100 cy", "50 cubic yards"
   const explicit = text.match(/(\d+)\s*(cubic\s*)?(yards?|yds?|cy)\b/i)
   if (explicit) return { value: parseInt(explicit[1]), explicit: true }
+  // "N loads/truckloads/trucks" — DO NOT auto-convert here. Yards depends on truck
+  // size (tandem 10 / triaxle 16 / end dump 18). Return null so the caller falls
+  // through to extractLoadCount() and asks the customer to clarify truck size.
+  if (/\b\d+\s*(truck\s*)?(loads?|truckloads?|trucks)\b/i.test(text)) return null
   // "about/around/roughly/maybe/probably/like N" — common casual patterns
   const approx = text.match(/\b(?:about|around|roughly|maybe|probably|like|need|want|thinking)\s+(\d+)\b/i)
   if (approx && allowBareNumber) return { value: parseInt(approx[1]), explicit: false }
@@ -209,6 +213,16 @@ function extractYardsDetailed(text: string, allowBareNumber: boolean = true): { 
     const bare = text.match(/^\s*(\d+)\s*$/)
     if (bare) return { value: parseInt(bare[1]), explicit: false }
   }
+  return null
+}
+
+// "N loads", "N truckloads", "50 trucks", "a couple loads" → load count.
+// We DON'T convert to yards because yards/load varies by truck type. The
+// caller uses this to ask the customer "tandem (10yd) or end dump (18yd)"
+// and only then sets yards_needed.
+function extractLoadCount(text: string): number | null {
+  const m = text.match(/\b(\d+)\s*(truck\s*)?(loads?|truckloads?|trucks)\b/i)
+  if (m) return parseInt(m[1])
   return null
 }
 
@@ -625,6 +639,17 @@ NEVER ASK FOR LOCATION INFO BEYOND THE ADDRESS:
 - NEVER ask for cross streets, landmarks, neighborhood, or "more details about the location." Once you have a street address you have what you need.
 - If the address came in incomplete (e.g. "1234 Main St" with no city), the system handles geocoding edge cases — DO NOT ask the customer to clarify. If pricing fails the system will route to manual confirmation, you don't need to chase the location.
 
+NO REACTION FLUFF — DEAD SERIOUS:
+Real people in dirt logistics do not react with awe to a customer's project size. They size the job and quote it. NEVER do any of these:
+- NEVER say "wow", "whoa", "amazing", "awesome", "incredible", "impressive", "nice", "sweet", "cool", "sick", "damn", "love it", "love that", "exciting", "great", "perfect" as a reaction.
+- NEVER comment on how big/small/serious/major/huge/large the project, job, order, or load is. "thats a big project", "thats a big one", "thats a serious haul", "thats a lot of dirt" — NONE of it. Customers know how big their project is. Reacting to it sounds fake and AI.
+- NEVER use emoji. Not one. Not even ":)" or "👍".
+- A customer says "I need 50 loads" → you respond with the NEXT operational question (truck size, address, what its for). You do NOT acknowledge the size.
+GOOD: "50 loads, you running tandems (10yd) or end dumps (18yd)"
+BAD: "Wow 50 loads thats a big project, what are you using it for"
+BAD: "Nice, 50 loads — where's it going"
+BAD: "Damn thats a serious haul"
+
 NO FAKE PLEASANTRIES — THIS IS THE MOST IMPORTANT TONE RULE:
 Real people texting do NOT open with greeting fluff. They respond directly. You MUST do the same.
 - NEVER start with "glad you reached out", "thanks for reaching out", "happy to help", "great to hear from you", "appreciate you contacting us", "thanks for your message", "thanks for getting in touch", "thank you for", "good to hear", or anything in that family. These sound like a customer service script, not a real person.
@@ -781,6 +806,10 @@ async function callSarah(
       const resp = await anthropic.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 250,
+        // Low temperature: Sonnet at 1.0 samples customer-service-script tokens
+        // ("happy to help", "wow thats amazing"). 0.3 keeps her on the rails
+        // while leaving room for natural rephrasing. Validated against test suite.
+        temperature: 0.3,
         system: SARAH_SYSTEM,
         messages: [...history.slice(-16), { role: "user" as const, content: ctx }],
       })
@@ -835,7 +864,26 @@ async function callSarah(
 // ─────────────────────────────────────────────────────────
 // VALIDATOR
 // ─────────────────────────────────────────────────────────
-function validate(r: string, lastOutbound: string): string {
+// Token-set Jaccard similarity. 1.0 = identical bag of words, 0 = disjoint.
+// Used to catch near-duplicate replies (paraphrased loops) that exact-string
+// dedup misses. "Whats your name" vs "Whats the name" → 0.66 → blocked.
+function jaccardSim(a: string, b: string): number {
+  const tok = (s: string) => new Set(
+    s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 2)
+  )
+  const A = tok(a), B = tok(b)
+  if (A.size === 0 || B.size === 0) return 0
+  let inter = 0
+  for (const w of A) if (B.has(w)) inter++
+  const union = A.size + B.size - inter
+  return union === 0 ? 0 : inter / union
+}
+
+function validate(r: string, lastOutboundArg: string | string[]): string {
+  const recentOutbounds: string[] = Array.isArray(lastOutboundArg)
+    ? lastOutboundArg.filter(s => s && s.length > 0)
+    : (lastOutboundArg ? [lastOutboundArg] : [])
+  const lastOutbound: string = recentOutbounds[0] || ""
   // Block AI admissions
   for (const p of ["i am an ai","i'm an ai","language model","claude","anthropic","i am a bot","i'm a bot","as an ai","artificial intelligence"]) {
     if (r.toLowerCase().includes(p)) return "This is Sarah with Fill Dirt Near Me, how can I help"
@@ -854,6 +902,19 @@ function validate(r: string, lastOutbound: string): string {
   r = r.replace(/^(hey|hi|hello)?\s*[,!]?\s*(thanks for (reaching out|getting in touch|texting|your message|contacting us|messaging)|thank you for (reaching out|getting in touch|texting|your message|contacting us|messaging)|glad you (reached out|texted|got in touch|messaged)|happy to help( you)?( with that)?|great to hear from you|appreciate you (reaching out|texting|contacting us)|i'?d (be )?(happy|glad|love) to (help|assist)( you)?( with that)?)\s*[,.!]?\s*/i, "").trim()
   // Strip standalone "Of course" / "Absolutely" / "Certainly" / "No problem" openers
   r = r.replace(/^(of course|absolutely|certainly|no problem|for sure)\s*[,!.]?\s*/i, "").trim()
+  // ── EXCITEMENT / REACTION STRIPPER ──
+  // Real people don't react with awe to numbers. "Wow 50 loads thats a big project"
+  // is the canonical AI-tell. Strip ALL of it: opening reactions and embedded
+  // excitement clauses. This is the #1 rule customers/testers catch.
+  r = r.replace(/^(wow|whoa|woah|oh wow|nice|sweet|awesome|amazing|cool|sick|damn|dang|gotcha|hmm|haha|interesting|great|perfect|love it|love that|exciting|impressive)[\s,!.]+/i, "").trim()
+  // Remove "thats a big/huge/large/major/serious project|job|order|one" anywhere in the message
+  r = r.replace(/\b(that.?s|that is)\s+(a\s+)?(huge|big|large|major|serious|massive|hefty|sizeable|sizable|nice|solid|good\s*sized?|decent\s*sized?)\s*(project|job|order|one|haul|load|amount|quantity)\b[.,!]*\s*/gi, "").trim()
+  // Remove standalone "wow", "amazing", emoji-style reactions inside the message
+  r = r.replace(/\b(wow|whoa|woah|amazing|awesome|incredible|fantastic|impressive)[!,.]*\s*/gi, "").trim()
+  // Strip ALL emoji — Sarah is texting from her phone but doesn't use emoji in this product
+  r = r.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}]/gu, "").trim()
+  // Collapse double spaces / leading punctuation left behind by stripping
+  r = r.replace(/^[,.!?\s]+/, "").replace(/\s{2,}/g, " ").trim()
   // ── ZIP/POSTAL/CITY ASK STRIPPER ──
   // Sarah's training data is full of customer-service scripts that ask for
   // zip code or postal code. We never need that — geocoding handles it. If
@@ -871,15 +932,26 @@ function validate(r: string, lastOutbound: string): string {
   r = r.replace(/\.\s*$/, "").trim()
   // Capitalize first letter if needed
   if (r.length > 0) r = r[0].toUpperCase() + r.slice(1)
-  // Dedup — don't send exact same message (use varied responses to avoid loops)
-  if (r.toLowerCase() === lastOutbound.toLowerCase() && r.length > 10) {
-    const dedupResponses = [
-      "Let me know if you have any other questions",
-      "Anything else I can help with",
-      "Just text me if you need anything",
-      "Im here if you need me",
-    ]
-    r = dedupResponses[Math.floor(Math.random() * dedupResponses.length)]
+  // ── DEDUP + NEAR-DUPLICATE GUARD ──
+  // Exact match is the easy case. The hard case is paraphrased loops:
+  // "whats your name" → "can i get your name" → "what should i call you".
+  // Token-set Jaccard catches these. Threshold 0.55 = >55% shared meaningful
+  // words against ANY of the last few outbounds.
+  if (r.length > 10) {
+    const exactDup = recentOutbounds.some(o => o.toLowerCase().trim() === r.toLowerCase().trim())
+    const nearDup = recentOutbounds.some(o => jaccardSim(o, r) >= 0.55)
+    if (exactDup || nearDup) {
+      console.warn(`[validate] near-duplicate blocked. reply="${r.slice(0,80)}" recents=${recentOutbounds.length}`)
+      const dedupResponses = [
+        "Let me know if you have any other questions",
+        "Anything else I can help with",
+        "Just text me if you need anything",
+        "Im here if you need me",
+      ]
+      // Pick one we haven't used recently
+      const fresh = dedupResponses.filter(d => !recentOutbounds.some(o => jaccardSim(o, d) >= 0.5))
+      r = (fresh.length > 0 ? fresh : dedupResponses)[Math.floor(Math.random() * (fresh.length || dedupResponses.length))]
+    }
   }
   return r || "Give me one sec"
 }
@@ -990,7 +1062,39 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (conv.opted_out) return ""
   const state = conv.state || "NEW"
   const history = await getHistory(phone)
-  const lastOut = history.filter(h => h.role === "assistant").slice(-1)[0]?.content || ""
+  // Last 5 outbounds for the near-duplicate guard. Passing the array (instead
+  // of a single string) lets validate() block paraphrased loops, not just
+  // exact repeats.
+  const recentOutbounds = history.filter(h => h.role === "assistant").slice(-5).reverse().map(h => h.content)
+  // `lastOut` is the array passed to validate() for the near-duplicate guard.
+  // `lastOutStr` is the single most-recent reply used by per-state regex
+  // checks ("did we just ask about timing/yards/access"). Two names so the
+  // regex sites stay typed as `string`.
+  const lastOut: string | string[] = recentOutbounds
+  const lastOutStr: string = recentOutbounds[0] || ""
+
+  // ── UNIVERSAL STUCK-LOOP ESCALATION ──
+  // Last resort safety net: if the brain has sent 3+ near-duplicate replies
+  // in a row (paraphrased loop), it's stuck. Hand off to a human INSTEAD of
+  // sending another paraphrase. This catches every loop type — name asks,
+  // address asks, payment asks, anything — without needing per-field guards.
+  if (recentOutbounds.length >= 3) {
+    const top3 = recentOutbounds.slice(0, 3)
+    let loopCount = 0
+    for (let i = 0; i < top3.length; i++) {
+      for (let j = i + 1; j < top3.length; j++) {
+        if (jaccardSim(top3[i], top3[j]) >= 0.55) loopCount++
+      }
+    }
+    if (loopCount >= 2) {
+      console.warn(`[STUCK LOOP] phone=${phone} state=${state} — last 3 outbounds are near-duplicates. Escalating.`)
+      await flagPendingAction(phone, "BRAIN_CRASH", `STUCK LOOP: ${conv.customer_name || phone} in state ${state}. Last 3 replies were paraphrased duplicates: ${top3.map(t => `"${t.slice(0,60)}"`).join(" | ")}. Brain handed off to human.`)
+      await notifyAdmin(`STUCK LOOP: ${conv.customer_name || phone} (${phone}) in ${state}. Brain repeating itself. CHECK COMMAND CENTER.`, `stuck_loop_${phone}_${Date.now()}`)
+      const handoff = "Let me get a teammate to jump in here, hang tight one sec"
+      await logMsg(phone, handoff, "outbound", `stuck_${sid}`)
+      return handoff
+    }
+  }
   const updates: Record<string, any> = {}
   let reply = ""
 
@@ -1010,6 +1114,11 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const inlineYardsDetail = extractYardsDetailed(body, hasMaterialContext)
   const inlineYards = inlineYardsDetail?.value ?? null
   const inlineYardsExplicit = inlineYardsDetail?.explicit === true
+  // Customer mentioned a truck-load count ("50 loads", "20 truckloads"). We
+  // never auto-convert to yards because yards/load varies by truck (tandem 10,
+  // triaxle 16, end dump 18). Used downstream to deterministically ask which
+  // truck size before quoting.
+  const inlineLoads = extractLoadCount(body)
   const inlineDims = extractDimensions(body)
   const inlineEmail = extractEmail(body)
   const inlineMaterial = extractMaterialFromPurpose(body)
@@ -1029,7 +1138,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // say — otherwise we'd loop forever asking "do you need it by a date or
   // are you flexible" because the regex below misses common phrasings like
   // "in two weeks", "end of the month", "weekend", "no specific date", etc.
-  const justAskedTiming = /\b(timeline|specific date|are you flexible|by when|need it by|when do you need|when would you|when did you|what.s your timeline|need this by|need that by|when are you|when you need)\b/i.test(lastOut || "")
+  const justAskedTiming = /\b(timeline|specific date|are you flexible|by when|need it by|when do you need|when would you|when did you|what.s your timeline|need this by|need that by|when are you|when you need)\b/i.test(lastOutStr)
   const inlineDate = (() => {
     if (/\b(today|hoy)\b/i.test(lower)) return "Today"
     if (/\b(tomorrow|manana|mañana)\b/i.test(lower)) return "Tomorrow"
@@ -1691,6 +1800,23 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // ── NEW CUSTOMER ──
   if (state === "NEW") {
     updates.state = "COLLECTING"
+    // ── DETERMINISTIC LOAD-COUNT REPLY ──
+    // Customer's first message mentions "N loads/truckloads/trucks". Bypass
+    // Sarah entirely — this is the canonical AI-tell trap ("wow 50 loads
+    // thats a big project"). Reply with a flat operational question about
+    // truck size, log it, save state, return.
+    if (inlineLoads && !inlineYards) {
+      const isAgentLeadL = agent !== null
+      const opener = isAgentLeadL ? "" : "Hey this is Sarah with Fill Dirt Near Me. "
+      // Sub 5 loads we just ask for yards directly; bigger we ask truck size
+      const question = inlineLoads >= 3
+        ? `${inlineLoads} loads, you running tandems (10 yards each) or end dumps (18 yards each)`
+        : `you running tandems (10 yards each) or end dumps (18 yards each)`
+      const reply2 = `${opener}${question}`
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply2, "outbound", `out_${sid}`)
+      return reply2
+    }
     // Extract anything useful from their first message before responding
     // so Sarah doesn't ask for info they already gave
     const firstMsgParts: string[] = []
@@ -1742,9 +1868,21 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // Code figures out what's missing, extracts data, gives Sonnet instructions
 
   // Try to extract data from whatever they said
+  // Name extraction — FIRST try the proper structured extractor (handles
+  // "im John", "this is John from Facebook", "John here", etc). If that
+  // misses, fall through to the crude single-word fallback below.
+  // ROOT CAUSE: prior code only ran the crude extractor in COLLECTING, which
+  // rejects 5-word messages. "this is John from Facebook" → name dropped →
+  // needName stays true → Sarah asks again forever (the Micah-test loop).
+  if (needName) {
+    const structuredName = extractCustomerName(body)
+    if (structuredName) {
+      updates.customer_name = structuredName
+    }
+  }
   // Name extraction — ONLY save if it actually looks like a name
   const NOT_A_NAME = /^(hey|hi|hello|yo|sup|whats up|what up|howdy|hola|good morning|good afternoon|good evening|morning|afternoon|evening|yes|yeah|yep|yea|no|nah|nope|ok|okay|sure|thanks|thank you|please|help|info|information|quote|price|pricing|how much|what|when|where|why|how|can you|do you|is this|are you|i need|i want|i'm looking|looking for|need|want|got|have|dirt|fill|topsoil|sand|gravel|delivery|deliver|dump|truck|yard|yards|cubic|material|project|estimate|cost|cheap|affordable|available|asap|urgent|ready|interested|question|stop|start|reset|menu|sounds good|sounds great|yes please|go ahead|book it|set it up|do it|im down|im in|lets do it|perfect|absolutely|definitely|for sure|right|correct|cancel|never mind|too much|expensive|not now|done|sent|paid|.)$/i
-  if (needName && body.trim().length > 1 && body.trim().length < 40 && !isAddress && !/\d{3}/.test(body) && !NOT_A_NAME.test(body.trim()) && !inlineMaterial && !isFollowUp && !isYes && !isNo && !isCancel && !isStatus && !isPaymentConfirm && !inlineAccess && !inlineDate) {
+  if (needName && !updates.customer_name && body.trim().length > 1 && body.trim().length < 40 && !isAddress && !/\d{3}/.test(body) && !NOT_A_NAME.test(body.trim()) && !inlineMaterial && !isFollowUp && !isYes && !isNo && !isCancel && !isStatus && !isPaymentConfirm && !inlineAccess && !inlineDate) {
     const trimmed = body.trim()
     const words = trimmed.split(/\s+/)
     // Accept lowercase single names (most people text lowercase)
@@ -1803,6 +1941,18 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       console.error("[customer geocode] FAILED for:", body.trim())
       await notifyAdmin(`GEOCODE FAILED for customer ${conv.customer_name || phone} address: "${body.trim()}". Address saved but no coords. May need manual zone assignment.`, `geocode_fail_${Date.now()}`)
     }
+  }
+
+  // ── DETERMINISTIC LOAD-COUNT REPLY (mid-conversation) ──
+  // Same trap as NEW: customer says "50 loads" mid-flow. Bypass Sarah, ask
+  // truck size flatly. Only fires if we don't already have yards.
+  if (inlineLoads && !inlineYards && !has(conv.yards_needed)) {
+    const firstNameL = (conv.customer_name || "").split(/\s+/)[0]
+    const greetL = firstNameL ? `${firstNameL}, ` : ""
+    const reply3 = `${greetL}${inlineLoads} loads, you running tandems (10 yards each) or end dumps (18 yards each)`
+    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await logMsg(phone, reply3, "outbound", `out_${sid}`)
+    return reply3
   }
 
   // Explicit "N yards" / "N cy" / "N cubic yards" ALWAYS wins, even if conv
@@ -1881,9 +2031,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     // Purpose given but material not auto-detected
     // Check if customer is CONFIRMING a material Sarah already recommended in the last message
     const isConfirm = isYes || /\b(that works|that sounds|sounds right|sounds good|go with that|that one|the one you said|what you said|recommended|yeah that|sure that|ok that|perfect|exactly)\b/i.test(lower)
-    if (isConfirm && lastOut) {
+    if (isConfirm && lastOutStr) {
       // Extract what material Sarah recommended from her last message
-      const lastMaterial = extractMaterialFromPurpose(lastOut)
+      const lastMaterial = extractMaterialFromPurpose(lastOutStr)
       if (lastMaterial) {
         updates.material_type = lastMaterial.key
         instruction = `They confirmed ${lastMaterial.name}. Now ask how many cubic yards they need. If they're not sure, you can help calculate from dimensions`
@@ -1904,7 +2054,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const nums = body.match(/(\d+\.?\d*)/g)
     // Detect if our last outbound was the yards question — used as the
     // never-stuck signal so we never re-ask the same thing forever.
-    const justAskedYards = /\b(cubic yards?|how many yards?|how much (dirt|fill|topsoil|sand|material)|how many do you need|how many cy|how many loads)\b/i.test(lastOut || "")
+    const justAskedYards = /\b(cubic yards?|how many yards?|how much (dirt|fill|topsoil|sand|material)|how many do you need|how many cy|how many loads)\b/i.test(lastOutStr)
     if (hasPartialDims && nums && nums.length === 2) {
       // They gave length x width but no depth — ask for depth, we'll calculate
       updates.state = "ASKING_DIMENSIONS"
@@ -1940,7 +2090,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     // DEFAULT to dump_truck_only rather than re-asking. Per the truck-access
     // rule: dump trucks go EVERYWHERE — only 18-wheelers need access. Picking
     // dump_truck_only is the safe inclusive choice and never blocks delivery.
-    const justAskedAccess = /\b(18.?wheeler|18 wheeler|big truck|big rig|semi|standard dump|regular dump|dump truck|access|fit|wider road|turn around|wider street|narrow|tight street)\b/i.test(lastOut || "")
+    const justAskedAccess = /\b(18.?wheeler|18 wheeler|big truck|big rig|semi|standard dump|regular dump|dump truck|access|fit|wider road|turn around|wider street|narrow|tight street)\b/i.test(lastOutStr)
     const mentions18Wheeler = /\b(18.?wheeler|18 wheeler|semi|big truck|big rig|tractor.?trailer|wheeler)\b/i.test(lower)
     const mentionsDumpTruckSpec = /\b(dump truck|dump trucks|regular truck|regular trucks|standard truck|standard trucks|tandem|triaxle|tri.?axle|quad axle|smaller truck|small truck|smaller trucks|small trucks|just dump|just standard|just the dump|just the standard|just regular|small ones|regular ones|standard ones|the dump ones)\b/i.test(lower)
     const positiveSignal = isYes || /\b(sure|yep|yeah|of course|definitely|absolutely|they can|it can|room|plenty|wide|wide open|open|no problem|no issue|no big deal|no sweat|fits|can fit|will fit|works|fine|easy|big enough|enough room|huge|large)\b/i.test(lower)
