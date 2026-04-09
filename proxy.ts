@@ -1,10 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerClient } from '@supabase/ssr'
+import { isBlocked } from '@/lib/ip-blocklist'
 
 const ADMIN_ROLES = new Set(['admin', 'superadmin'])
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
+
+  // IP blocklist — checked first so blocked IPs hit nothing else
+  const clientIp =
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    request.headers.get('x-real-ip') ||
+    'unknown'
+  if (await isBlocked(clientIp)) {
+    return new NextResponse('Blocked', { status: 403 })
+  }
+
   let response = NextResponse.next({ request })
 
   // Security headers

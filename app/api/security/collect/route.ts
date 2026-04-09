@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSupabase } from '@/lib/supabase'
 import { sendSecurityAlert } from '@/lib/sms'
+import { rateLimit } from '@/lib/rate-limit'
+import { blockIp } from '@/lib/ip-blocklist'
 
 const ALLOWED_TYPES = new Set([
   'fingerprint',
@@ -52,6 +54,11 @@ export async function POST(request: NextRequest) {
       request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
       request.headers.get('x-real-ip') ||
       'unknown'
+
+    // 60 events per IP per minute — generous for legit page sessions, kills floods
+    const rl = await rateLimit(`shield:${ip}`, 60, '1 m')
+    if (!rl.allowed) return rl.response!
+
     const userAgent = request.headers.get('user-agent') || null
     const country = request.headers.get('x-vercel-ip-country') || null
     const city = request.headers.get('x-vercel-ip-city') || null
@@ -117,6 +124,19 @@ export async function POST(request: NextRequest) {
     if (shouldAlert) {
       // Loud log so Sentry catches it too
       console.error('[security/collect] CRITICAL:', alertReason, { ip, url, eventType })
+
+      // Auto-block: 3+ critical events from this IP in the last hour
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+      const { count: critCount } = await supabase
+        .from('security_events')
+        .select('id', { count: 'exact', head: true })
+        .eq('ip', ip)
+        .in('event_type', ['honeypot_form', 'address_leak'])
+        .gte('created_at', oneHourAgo)
+      if ((critCount || 0) >= 3) {
+        await blockIp(ip, `auto: ${critCount} critical events in 1h`)
+        console.error('[security/collect] AUTO-BLOCKED IP', ip)
+      }
 
       // MUST await — Vercel kills unawaited promises (per CLAUDE.md)
       const summary =

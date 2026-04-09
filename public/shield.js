@@ -334,9 +334,18 @@
   // 6. INITIALIZE
   // =========================================
   function init() {
-    // Collect and send fingerprint immediately
+    // Collect fingerprint — only beacon if bot signals tripped (reduces noise)
     var fp = collectFingerprint();
-    sendToServer('fingerprint', fp);
+    var botSignals = [];
+    if (navigator.webdriver) botSignals.push('webdriver');
+    if (!navigator.languages || navigator.languages.length === 0) botSignals.push('no-languages');
+    if (/HeadlessChrome|PhantomJS|Selenium|puppeteer|playwright/i.test(navigator.userAgent)) botSignals.push('headless-ua');
+    if (window.outerWidth === 0 || window.outerHeight === 0) botSignals.push('zero-viewport');
+    if (navigator.plugins && navigator.plugins.length === 0 && !/Mobi/.test(navigator.userAgent)) botSignals.push('no-plugins');
+    if (botSignals.length > 0) {
+      fp.signals = botSignals;
+      sendToServer('fingerprint', fp);
+    }
 
     // Inject honeypot fields
     injectHoneypots();
