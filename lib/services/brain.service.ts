@@ -1680,15 +1680,58 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
   // ── ONBOARDING ───────────────────────────────────────────────
   if (!profile) {
     if (convState !== "GETTING_NAME") {
-      await saveConv(phone, { state: "GETTING_NAME" })
-      return lang==="es" ? "Hola, como te llamas" : "Hey whats your name"
+      // FIX A: Extract intent from first message and persist it so we don't drop
+      // load info on the floor while collecting the name. Driver may have led with
+      // "I have 500 yds tomorrow" — that has to survive onboarding.
+      let extractedYards: number | null = null
+      let extractedCity: string | null = null
+      let extractedTruckType: string | null = null
+      try {
+        const yMatch = body.match(/(\d{2,4})\s*(yd|yds|yard|yards|cy)\b/i)
+        if (yMatch) extractedYards = parseInt(yMatch[1])
+        const cityMatch = DFW_CITIES.find(c => new RegExp(`\\b${c}\\b`, "i").test(body))
+        if (cityMatch) extractedCity = cityMatch
+        if (/\b(dump\s*truck|tri\s*axle|tandem|10\s*wheel|18\s*wheel|belly\s*dump|end\s*dump)\b/i.test(body)) {
+          extractedTruckType = body.match(/\b(dump\s*truck|tri\s*axle|tandem|10\s*wheel|18\s*wheel|belly\s*dump|end\s*dump)\b/i)?.[0] || null
+        }
+      } catch {}
+      await saveConv(phone, {
+        state: "GETTING_NAME",
+        extracted_yards: extractedYards,
+        extracted_city: extractedCity,
+        extracted_truck_type: extractedTruckType,
+      })
+      // Acknowledge what they told us so they know we heard them
+      const ackParts: string[] = []
+      if (extractedYards) ackParts.push(`${extractedYards} yds`)
+      if (extractedCity) ackParts.push(`in ${extractedCity}`)
+      const ack = ackParts.length ? `10.4 ${ackParts.join(" ")} — ` : ""
+      return lang==="es"
+        ? (ack ? `${ack}como te llamas` : "Hola, como te llamas")
+        : (ack ? `${ack}whats your name` : "Hey whats your name")
     }
-    const parts = body.trim().split(/\s+/)
-    const first = parts[0] || "Driver"
+    // FIX B (lite): reject obvious non-names so we don't create driver named "Hello"
+    const cleaned = body.trim().replace(/[^a-zA-Z\s'-]/g, "").trim()
+    const NON_NAMES = /^(hello|hi|hey|yo|sup|yes|yea|yeah|nope|no|ok|okay|10-?4|copy|bet|cool|thanks|thx|wtf|huh|what|who|dirt|load|loads|yards?|tomorrow|today)$/i
+    if (!cleaned || cleaned.length < 2 || NON_NAMES.test(cleaned) || /^\d/.test(body.trim())) {
+      return lang==="es" ? "perdon, como te llamas" : "my bad — whats your name"
+    }
+    const parts = cleaned.split(/\s+/)
+    const first = parts[0]
     const last = parts.slice(1).join(" ") || ""
     await createAdminSupabase().rpc("create_sms_driver", { p_phone: phone, p_first_name: first, p_last_name: last })
     await saveConv(phone, { state: "DISCOVERY" })
     await logEvent("CONTACT_CREATED", { phone, firstName: first })
+    // If we already extracted load info during the previous turn, acknowledge and move forward
+    const yds = conv?.extracted_yards
+    const city = conv?.extracted_city
+    if (yds || city) {
+      const detail = [yds ? `${yds} yds` : null, city ? `in ${city}` : null].filter(Boolean).join(" ")
+      if (isAfterHours) {
+        return lang==="es" ? `${first} te tengo con ${detail}. Estamos cerrados ahorita, te busco algo en la manana` : `${first} got you with ${detail}. I'm off for the night, I'll line something up in the morning`
+      }
+      return lang==="es" ? `${first} te tengo con ${detail}. dejame ver que tengo cerca` : `${first} got you with ${detail}. lemme see what I got close by`
+    }
     if (isAfterHours) {
       return lang==="es" ? `${first} te tengo. Estamos cerrados ahorita, mandame texto en la manana` : `${first} got you. I'm off for the night, text me in the morning and I'll get you set up`
     }
