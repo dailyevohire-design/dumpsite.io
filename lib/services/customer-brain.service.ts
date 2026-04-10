@@ -33,6 +33,31 @@ async function loadAgents(): Promise<SalesAgent[]> {
   return agentCache.agents
 }
 
+// ─────────────────────────────────────────────────────────
+// BRAIN LEARNINGS — persistent memory from past bug fixes
+// Loaded from Supabase and cached for 10 minutes. Every time
+// we fix a brain bug, we insert a learning so it never repeats.
+// ─────────────────────────────────────────────────────────
+let learningsCache: { rules: string[]; loadedAt: number } = { rules: [], loadedAt: 0 }
+const LEARNINGS_CACHE_TTL = 10 * 60 * 1000 // 10 minutes
+
+async function loadLearnings(brain: "sarah" | "jesse"): Promise<string[]> {
+  if (Date.now() - learningsCache.loadedAt < LEARNINGS_CACHE_TTL && learningsCache.rules.length > 0) return learningsCache.rules
+  try {
+    const sb = createAdminSupabase()
+    const { data, error } = await sb.from("brain_learnings").select("rule, category").eq("brain", brain).eq("active", true).order("category")
+    if (error) {
+      console.error("[brain learnings] Failed to load:", error.message)
+      return learningsCache.rules // Return stale cache on error
+    }
+    learningsCache = { rules: (data || []).map(r => r.rule), loadedAt: Date.now() }
+    return learningsCache.rules
+  } catch (e) {
+    console.error("[brain learnings] Exception:", e)
+    return learningsCache.rules
+  }
+}
+
 async function lookupAgent(sourceNumber: string): Promise<SalesAgent | null> {
   if (!sourceNumber) return null
   const agents = await loadAgents()
@@ -927,6 +952,13 @@ async function callSarah(
       "Respond as Sarah. JSON only.",
     ].join("\n")
 
+    // Load persistent learnings and append to system prompt
+    const learnings = await loadLearnings("sarah")
+    const learningsBlock = learnings.length > 0
+      ? `\n\nLEARNED RULES (from past mistakes — follow these strictly):\n${learnings.map((r, i) => `${i+1}. ${r}`).join("\n")}`
+      : ""
+    const systemWithLearnings = SARAH_SYSTEM + learningsBlock
+
     const attemptSarah = async () => {
       const resp = await anthropic.messages.create({
         model: "claude-sonnet-4-6",
@@ -935,7 +967,7 @@ async function callSarah(
         // ("happy to help", "wow thats amazing"). 0.3 keeps her on the rails
         // while leaving room for natural rephrasing. Validated against test suite.
         temperature: 0.3,
-        system: SARAH_SYSTEM,
+        system: systemWithLearnings,
         messages: [...history.slice(-16), { role: "user" as const, content: ctx }],
       })
       const raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""
