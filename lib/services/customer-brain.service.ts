@@ -189,6 +189,45 @@ async function geocode(address: string): Promise<{ lat: number; lng: number; cit
 // ─────────────────────────────────────────────────────────
 // CODE-BASED EXTRACTION — AI never sets these fields
 // ─────────────────────────────────────────────────────────
+// ── TRUCK-TYPE YARD CAPACITIES ──
+// Tandem = 10 yards, tri-axle = 16 yards, end dump = 20 yards, side dump = 20 yards.
+// When a customer says "2 tandems" they mean 20 yards, NOT 2 yards.
+const TRUCK_YARDS: Record<string, number> = {
+  tandem: 10, tandems: 10,
+  "tri-axle": 16, triaxle: 16, "tri axle": 16,
+  "end dump": 20, "end dumps": 20,
+  "side dump": 20, "side dumps": 20,
+}
+// Regex to detect truck-unit expressions: "2 tandems", "3 end dumps", "a side dump"
+const TRUCK_UNIT_RE = /\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+(tandems?|tri-?axles?|tri axles?|end\s*dumps?|side\s*dumps?)\b/i
+const WORD_TO_NUM: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 }
+
+// "2 tandems" → 20 yards, "3 end dumps" → 60 yards, "a side dump" → 20 yards.
+// Returns yards directly — no need to ask truck size because the customer already told us.
+function extractTruckUnits(text: string): { yards: number; truckType: string; count: number } | null {
+  const m = text.match(TRUCK_UNIT_RE)
+  if (!m) return null
+  const countStr = m[1].toLowerCase()
+  const count = /^\d+$/.test(countStr) ? parseInt(countStr) : (WORD_TO_NUM[countStr] || 1)
+  const truckRaw = m[2].toLowerCase().replace(/s$/, "").replace(/\s+/g, " ")
+  // Normalize to lookup key
+  const key = truckRaw === "tri axle" ? "triaxle" : truckRaw === "end dump" ? "end dump" : truckRaw === "side dump" ? "side dump" : truckRaw
+  const perTruck = TRUCK_YARDS[key]
+  if (!perTruck) return null
+  return { yards: count * perTruck, truckType: key, count }
+}
+
+// Detect bare truck-type mentions without a count: "tandems", "end dumps", "side dumps"
+// Used when we asked "tandems or end dumps?" and they pick one — we still need load count.
+function extractBaretruckType(text: string): string | null {
+  const lower = text.toLowerCase()
+  if (/\b(end\s*dumps?)\b/i.test(lower)) return "end dump"
+  if (/\b(side\s*dumps?)\b/i.test(lower)) return "side dump"
+  if (/\b(tri-?axles?|tri axles?)\b/i.test(lower)) return "triaxle"
+  if (/\btandems?\b/i.test(lower)) return "tandem"
+  return null
+}
+
 function extractYards(text: string, allowBareNumber: boolean = true): number | null {
   return extractYardsDetailed(text, allowBareNumber)?.value ?? null
 }
@@ -198,13 +237,23 @@ function extractYards(text: string, allowBareNumber: boolean = true): number | n
 // must always overwrite stale yards_needed; inferred mentions are gated by
 // needYards. CRITICAL: silent drop of explicit yards caused 100→10 fake orders.
 function extractYardsDetailed(text: string, allowBareNumber: boolean = true): { value: number; explicit: boolean } | null {
+  // ── TRUCK-UNIT EXPRESSIONS WIN FIRST ──
+  // "2 tandems" = 20 yards, "3 end dumps" = 60 yards. This MUST fire before
+  // bare-number extraction or "2 tandems" becomes "2 yards".
+  const truckUnits = extractTruckUnits(text)
+  if (truckUnits) return { value: truckUnits.yards, explicit: true }
   // Explicit yards mention: "20 yards", "100 cy", "50 cubic yards"
-  const explicit = text.match(/(\d+)\s*(cubic\s*)?(yards?|yds?|cy)\b/i)
+  const explicit = text.match(/(\d+)\s*(cubic\s*)?(yards?|yds?|cy|yardas?)\b/i)
   if (explicit) return { value: parseInt(explicit[1]), explicit: true }
   // "N loads/truckloads/trucks" — DO NOT auto-convert here. Yards depends on truck
-  // size (tandem 10 / triaxle 16 / end dump 18). Return null so the caller falls
+  // size (tandem 10 / triaxle 16 / end dump 20). Return null so the caller falls
   // through to extractLoadCount() and asks the customer to clarify truck size.
   if (/\b\d+\s*(truck\s*)?(loads?|truckloads?|trucks)\b/i.test(text)) return null
+  // ── BLOCK bare-number extraction when a truck-type word is present ──
+  // "2 tandems" already handled above, but guard against partial regex misses:
+  // if the message mentions tandems/end dumps/side dumps/triaxles, don't grab
+  // the leading digit as a bare yard count.
+  if (/\b(tandems?|end\s*dumps?|side\s*dumps?|tri-?axles?|tri\s*axles?)\b/i.test(text)) return null
   // "about/around/roughly/maybe/probably/like N" — common casual patterns
   const approx = text.match(/\b(?:about|around|roughly|maybe|probably|like|need|want|thinking)\s+(\d+)\b/i)
   if (approx && allowBareNumber) return { value: parseInt(approx[1]), explicit: false }
@@ -217,10 +266,12 @@ function extractYardsDetailed(text: string, allowBareNumber: boolean = true): { 
 }
 
 // "N loads", "N truckloads", "50 trucks", "a couple loads" → load count.
-// We DON'T convert to yards because yards/load varies by truck type. The
-// caller uses this to ask the customer "tandem (10yd) or end dump (18yd)"
-// and only then sets yards_needed.
+// Also matches "N tandems", "N end dumps", "N side dumps" as load counts
+// so the downstream code can convert properly.
 function extractLoadCount(text: string): number | null {
+  // Truck-unit expressions: "2 tandems", "3 end dumps" — these are load counts too
+  const truckUnits = extractTruckUnits(text)
+  if (truckUnits) return truckUnits.count
   const m = text.match(/\b(\d+)\s*(truck\s*)?(loads?|truckloads?|trucks)\b/i)
   if (m) return parseInt(m[1])
   return null
@@ -248,11 +299,23 @@ function extractMaterialFromPurpose(purpose: string): { key: string; name: strin
   if (/\btopsoil\b|\bscreened\s*topsoil\b/i.test(p)) return { key: "screened_topsoil", name: "screened topsoil" }
   if (/\bfill\s*dirt\b/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
   if (/\bsand\b/i.test(p) && !/thousand|grand/i.test(p)) return { key: "sand", name: "sand" }
-  // Then check purpose keywords
+  // Then check purpose keywords (English)
   if (/pool|foundation|slab|footing|driveway|road|parking|pad|concrete|patio|sidewalk|compac/i.test(p)) return { key: "structural_fill", name: "structural fill" }
   if (/garden|flower|plant|landscap|sod|grass|lawn|raised bed|planter|grow|organic|mulch/i.test(p)) return { key: "screened_topsoil", name: "screened topsoil" }
   if (/sandbox|play.*area|play.*ground|septic|volleyball/i.test(p)) return { key: "sand", name: "sand" }
   if (/level|grad|fill|hole|low spot|uneven|slope|backfill|retaining|erosion|drain|trench|pipe/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
+  // ── SPANISH purpose keywords ──
+  // landscape / lawn / garden → screened topsoil
+  if (/paisaj|jard[ií]n|c[eé]sped|pasto|sembrar|plantar|plantas|huerto|flores|prado|grama/i.test(p)) return { key: "screened_topsoil", name: "screened topsoil" }
+  // foundation / slab / pool / driveway / construction → structural fill
+  if (/cimiento|fundaci[oó]n|losa|concreto|cemento|piscina|alberca|calzada|estacionamiento|construcci[oó]n|base|compactar/i.test(p)) return { key: "structural_fill", name: "structural fill" }
+  // sandbox / playground (Spanish)
+  if (/arenero|caja de arena|[aá]rea de juego/i.test(p)) return { key: "sand", name: "sand" }
+  // level / fill hole / drainage
+  if (/nivelar|nivelaci[oó]n|rellenar|relleno|hueco|hoyo|pendiente|desnivel|drenaje|terreno bajo|emparejar|tapar/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
+  // bare "tierra" or "terreno" with no other context — default fill dirt
+  if (/\btierra\b|\bterreno\b/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
+  if (/\barena\b/i.test(p)) return { key: "sand", name: "sand" }
   return null
 }
 
@@ -582,7 +645,8 @@ WHAT YOU KNOW ABOUT DIRT:
 - Screened Topsoil: nutrient-rich, great for growing things. Gardens, landscaping, sod prep, raised beds, lawn repair. $17-23/yard.
 - Sand: play areas, sandboxes, septic systems, drainage. $18-24/yard.
 - Minimum delivery is 10 cubic yards (about one tandem dump truck load).
-- Tandem dump truck = 10 yards, tri-axle = 16 yards, end dump = 18 yards.
+- Tandem dump truck = 10 yards, tri-axle = 16 yards, end dump = 20 yards, side dump = 20 yards.
+- Price per cubic yard is the SAME regardless of truck type. A tandem carrying 10 yards costs the same per yard as an end dump carrying 20. The only difference is how many yards each truck holds per trip.
 - Cubic yard formula: Length(ft) × Width(ft) × Depth(ft) ÷ 27.
 - A typical pool fill is 150-300 cubic yards depending on size.
 - A typical yard leveling job is 10-50 cubic yards.
@@ -630,6 +694,8 @@ CRITICAL RULES — NEVER BREAK:
 - NEVER say "I'll get back to you", "let me check and get back", "I'll follow up", or any promise to proactively text them later. You CANNOT initiate texts. If you say this, the customer waits forever and nobody follows up.
 - NEVER give price ranges or estimates from your general knowledge. Only share exact prices when the system gives you a specific quote to present in the TASK section.
 - NEVER say "let me get you the exact number", "let me pull up the price", "let me check on pricing", "give me a sec to get the price", "let me get you the price", or any variation. These are stall phrases. The system handles pricing — you handle conversation. If the TASK doesn't mention a price, just ask for the NEXT missing piece of info and DO NOT mention pricing at all. The customer must never hear you stall on a number.
+- SPANISH ANTI-STALL — same rule applies in Spanish, no exceptions: NEVER say "déjame conseguirte el precio", "déjame revisar", "dame un momento", "dame un segundo", "espera un momento", "espera un segundo", "un momento por favor", "te lo confirmo en breve", "en un momento te digo", "ahora te paso el precio", "déjame calcular", "déjame ver", or ANY variation. The brain hands you the exact price as a deterministic message — you never type a price stall in any language. If you don't see a price in the TASK, ask for the NEXT missing piece of info, do NOT mention pricing.
+- LANGUAGE MIRRORING: if the customer is texting in Spanish, you reply in Spanish — same rules, same brevity, same anti-stall. If they switch to English, switch with them. Do NOT translate the customer's words back at them. Do NOT introduce yourself in both languages.
 - ALWAYS follow the task instruction. The >>> YOUR TASK <<< section tells you exactly what to say. Do that FIRST, then add personality. Don't ignore the task to talk about something else.
 
 NEVER ASK FOR LOCATION INFO BEYOND THE ADDRESS:
@@ -645,7 +711,7 @@ Real people in dirt logistics do not react with awe to a customer's project size
 - NEVER comment on how big/small/serious/major/huge/large the project, job, order, or load is. "thats a big project", "thats a big one", "thats a serious haul", "thats a lot of dirt" — NONE of it. Customers know how big their project is. Reacting to it sounds fake and AI.
 - NEVER use emoji. Not one. Not even ":)" or "👍".
 - A customer says "I need 50 loads" → you respond with the NEXT operational question (truck size, address, what its for). You do NOT acknowledge the size.
-GOOD: "50 loads, you running tandems (10yd) or end dumps (18yd)"
+GOOD: "50 loads, you running tandems (10yd) or end dumps (20yd)"
 BAD: "Wow 50 loads thats a big project, what are you using it for"
 BAD: "Nice, 50 loads — where's it going"
 BAD: "Damn thats a serious haul"
@@ -712,6 +778,30 @@ function presentStandardConfirmText(opts: {
 // builds the price message itself, in plain text, and sends it as the
 // reply directly — no LLM in the loop for the moment of truth. Sarah is
 // for tone elsewhere; she never relays the dollar amount.
+// ─────────────────────────────────────────────────────────
+// LANGUAGE DETECTION
+// ─────────────────────────────────────────────────────────
+// Lightweight detector — counts Spanish-only stopwords and accented chars
+// across the customer's recent inbound messages. We DO NOT call an LLM for
+// this: language drift is the most common failure mode for the brain and
+// the deterministic-quote path needs a synchronous answer.
+function detectLanguage(
+  body: string,
+  history: { role: "user"|"assistant"; content: string }[],
+): "en" | "es" {
+  const samples: string[] = [body]
+  for (const h of history) if (h.role === "user") samples.push(h.content)
+  const text = samples.join(" ").toLowerCase()
+  if (text.length === 0) return "en"
+  // Spanish-only stopwords (these appear almost never in English)
+  const esHits = (text.match(/\b(hola|gracias|necesito|quiero|busco|para|por|que|de|en|un|una|el|la|los|las|mi|tu|su|estoy|interesad[oa]|cu[aá]nto|cu[aá]ntas?|d[oó]nde|c[oó]mo|cuando|porque|tierra|terreno|yardas?|paisajismo|c[eé]sped|pasto|jard[ií]n|construcci[oó]n|cami[oó]n|volqueta|precio|entrega|hoy|ma[ñn]ana|s[ií]|claro|dale|dame|muy|tambi[eé]n|antes|despu[eé]s)\b/gi) || []).length
+  const accentHits = (text.match(/[áéíóúñ¿¡]/gi) || []).length
+  // Strong English markers
+  const enHits = (text.match(/\b(the|and|need|want|looking|please|address|yards?|truck|dirt|fill|topsoil|sand|delivery|hello|thanks|how much|yes|no)\b/gi) || []).length
+  const score = esHits * 2 + accentHits * 3 - enHits
+  return score >= 2 ? "es" : "en"
+}
+
 function presentStandardQuoteText(opts: {
   firstName: string
   yards: number              // billable yards (after MIN_YARDS bump)
@@ -723,6 +813,7 @@ function presentStandardQuoteText(opts: {
   smallLoadFeeCents?: number // $50/truck if applicable
   dirtSubtotalCents?: number // dirt only, before small-load fee
   customerRequestedYards?: number  // what the customer originally said (optional)
+  language?: "en" | "es"
 }): string {
   const yards = opts.yards
   const mat = opts.material
@@ -731,6 +822,30 @@ function presentStandardQuoteText(opts: {
   const perYd = fmt$(opts.perYardCents)
   const fee = opts.smallLoadFeeCents || 0
   const dirtSubtotal = opts.dirtSubtotalCents ?? (opts.totalCents - fee)
+  const lang = opts.language || "en"
+
+  if (lang === "es") {
+    // Spanish-language deterministic quote — mirrors the English one exactly
+    // so the customer never gets stalled in the wrong language. Material name
+    // is left in the source form (e.g. "screened topsoil") since we don't
+    // translate the SKU label.
+    const esCity = opts.city || "tu ubicación"
+    const esDateLine = opts.delivery_date && !/flexible|whenever|sin\s*prisa|cuando\s*sea/i.test(opts.delivery_date)
+      ? ` para el ${opts.delivery_date}`
+      : ` con entrega estándar en 3-5 días hábiles`
+    const esGreeting = opts.firstName ? `${opts.firstName}, ` : ""
+    let esMinNote = ""
+    if (opts.customerRequestedYards && opts.customerRequestedYards < yards) {
+      esMinNote = ` el mínimo de entrega son ${yards} yardas (un camión completo), lo que no uses lo puedes amontonar donde quieras en la propiedad.`
+    }
+    let esBreakdown = ""
+    if (fee > 0) {
+      esBreakdown = ` son ${fmt$(dirtSubtotal)} por la tierra a ${perYd}/yarda más un cargo de ${fmt$(fee)} por carga pequeña porque es menos de 20 yardas.`
+    } else {
+      esBreakdown = ` (${perYd}/yarda)`
+    }
+    return `${esGreeting}${yards} yardas de ${mat} a ${esCity} sale en ${total}${esBreakdown}${esMinNote}${esDateLine}. ¿Quieres que te lo programe?`
+  }
 
   const dateLine = opts.delivery_date && !/flexible|whenever/i.test(opts.delivery_date)
     ? ` for ${opts.delivery_date}`
@@ -764,7 +879,16 @@ function presentDualQuoteText(opts: {
   priorityCents: number
   priorityPerYardCents: number
   guaranteedDate: string
+  language?: "en" | "es"
 }): string {
+  const lang = opts.language || "en"
+  if (lang === "es") {
+    const esCity = opts.city || "tu ubicación"
+    const greetingEs = opts.firstName
+      ? `${opts.firstName}, dos opciones para ${opts.yards} yardas de ${opts.material} a ${esCity}`
+      : `dos opciones para ${opts.yards} yardas de ${opts.material}`
+    return `${greetingEs}\n\nEntrega estándar: ${fmt$(opts.standardCents)} (${fmt$(opts.standardPerYardCents)}/yarda) 3-5 días hábiles\nGarantizada para el ${opts.guaranteedDate}: ${fmt$(opts.priorityCents)} (${fmt$(opts.priorityPerYardCents)}/yarda) pago por adelantado para asegurar la fecha\n\n¿Cuál te funciona mejor?`
+  }
   const greeting = opts.firstName ? `${opts.firstName} two options for ${opts.yards} yards of ${opts.material} to ${opts.city || "your location"}` : `two options for ${opts.yards} yards of ${opts.material}`
   return `${greeting}\n\nStandard delivery: ${fmt$(opts.standardCents)} (${fmt$(opts.standardPerYardCents)}/yard) 3-5 business days\nGuaranteed by ${opts.guaranteedDate}: ${fmt$(opts.priorityCents)} (${fmt$(opts.priorityPerYardCents)}/yard) payment upfront to lock the date\n\nWhich works better for you`
 }
@@ -924,6 +1048,16 @@ function validate(r: string, lastOutboundArg: string | string[]): string {
     .filter(sentence => !/\b(zip\s*code|zipcode|postal\s*code|what.?s your zip|whats your zip|need your zip|need a zip|whats the zip|what.s the zip|cross street|nearest cross|landmark|neighborhood)\b/i.test(sentence))
     .join(" ")
     .trim()
+  // ── SPANISH STALL STRIPPER ──
+  // Same rule as the English stall list above — Sarah leaks "déjame
+  // conseguirte el precio", "te lo confirmo en breve", "dame un momento",
+  // etc. when mirroring a Spanish customer. The brain handles all pricing
+  // deterministically, so any stall phrase here is wrong. Remove the
+  // sentence containing the stall and let the next sentence carry the reply.
+  r = r.split(/(?<=[.?!])\s+|\n+/)
+    .filter(sentence => !/d[eé]jame\s+(conseguirte|calcular|ver|revisar|chequear)|d[aá]me\s+(un\s+)?(momento|momentito|segundo|segundito|minuto|poco|poquito)|espera\s+(un\s+)?(momento|momentito|segundo|segundito|poco|poquito)|un\s+momento\s+por\s+favor|te\s+(lo\s+)?confirmo\s+en\s+breve|en\s+(un\s+)?momento\s+te\s+(digo|paso|mando|envio|env[ií]o)|ahora\s+te\s+(paso|mando|env[ií]o|digo)\s+el\s+precio|enseguida\s+te\s+(paso|mando|env[ií]o|digo)/i.test(sentence))
+    .join(" ")
+    .trim()
   // If after stripping we're left with nothing, send a safe ask-next-thing
   if (r.length < 3) r = "Let me get you the exact number, one sec"
   // Truncate if too long
@@ -1062,6 +1196,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (conv.opted_out) return ""
   const state = conv.state || "NEW"
   const history = await getHistory(phone)
+  // Detect customer language ONCE per request — used by deterministic quote
+  // text and the validate() Spanish anti-stall pass. Defaults to English.
+  const customerLang: "en" | "es" = detectLanguage(sms.body, history)
   // Last 5 outbounds for the near-duplicate guard. Passing the array (instead
   // of a single string) lets validate() block paraphrased loops, not just
   // exact repeats.
@@ -1116,7 +1253,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const inlineYardsExplicit = inlineYardsDetail?.explicit === true
   // Customer mentioned a truck-load count ("50 loads", "20 truckloads"). We
   // never auto-convert to yards because yards/load varies by truck (tandem 10,
-  // triaxle 16, end dump 18). Used downstream to deterministically ask which
+  // triaxle 16, end dump 20, side dump 20). Used downstream to deterministically ask which
   // truck size before quoting.
   const inlineLoads = extractLoadCount(body)
   const inlineDims = extractDimensions(body)
@@ -1125,10 +1262,34 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const isAddress = looksLikeAddress(body)
   const isFollowUp = looksLikeFollowUp(lower)
 
+  // ── TRUCK PRICE-DIFFERENCE QUESTION DETECTION ──
+  // "what is price difference between dump truck and 18 wheeler", "how many dump trucks vs 18 wheeler",
+  // "cost difference", "price comparison" — customer is asking about truck pricing, not answering access.
+  const isTruckComparisonQuestion = /\b(price|cost|pricing|difference|vs\.?|versus|compar|how many.*vs)\b/i.test(lower)
+    && /\b(dump\s*truck|18.?wheel|end\s*dump|tandem|semi|side\s*dump)\b/i.test(lower)
+
   // ── ACCESS TYPE EXTRACTION ──
+  // When the message is a truck comparison question ("what is price difference
+  // dump truck vs 18 wheeler"), the mentions of truck types are informational,
+  // not an access answer. BUT — the customer may ALSO state a preference in
+  // the same message ("dump truck is probably best... what is price
+  // difference"). We check for explicit preference language FIRST.
   const inlineAccess = (() => {
-    if (/\b(18.?wheel|big rig|semi|tractor|wide open|plenty of room|lots of room|big truck|any size|all good|both|end dump|large|biggest)\b/i.test(lower)) return "dump_truck_and_18wheeler"
-    if (/\b(just dump|dump truck only|no.*(18|semi|big)|tight|narrow|small street|residential|driveway only|only dump|regular|standard|normal|tandem|small(er)?(\s+truck)?|basic|just a dump|regular dump|standard dump|regular size|normal size)\b/i.test(lower)) return "dump_truck_only"
+    // Explicit preference overrides the comparison-question guard:
+    // "dump truck is probably best", "I'll go with dump trucks", "dump truck for sure"
+    const explicitDumpPref = /\b(dump\s*truck)\s*(is\s*)?(probably\s+)?(best|better|fine|good|for sure|for me|works|easiest)\b/i.test(lower)
+      || /\b(go with|stick with|use|prefer|ill take|i'll take|i want)\s+(dump\s*truck|regular|standard|tandem)/i.test(lower)
+    const explicit18Pref = /\b(go with|stick with|use|prefer|ill take|i'll take|i want)\s+(18.?wheel|end\s*dump|semi|big\s*truck)/i.test(lower)
+      || /\b(18.?wheel|end\s*dump)\s*(is\s*)?(probably\s+)?(best|better|fine|good|for sure|for me|works)\b/i.test(lower)
+
+    if (explicitDumpPref) return "dump_truck_only"
+    if (explicit18Pref) return "dump_truck_and_18wheeler"
+
+    // If this is a comparison question with no explicit preference, don't classify
+    if (isTruckComparisonQuestion) return null
+
+    if (/\b(18.?wheel|big rig|semi|tractor|wide open|plenty of room|lots of room|big truck|any size|all good|both|end dump|large|biggest|18\s*ruedas|cami[oó]n\s*grande|tr[aá]iler|tracto.?cami[oó]n|grandes?\s*cami|cualquier\s*cami|cualquier\s*tama)\b/i.test(lower)) return "dump_truck_and_18wheeler"
+    if (/\b(just dump|dump truck only|no.*(18|semi|big)|tight|narrow|small street|residential|driveway only|only dump|regular|standard|normal|small(er)?(\s+truck)?|basic|just a dump|regular dump|standard dump|regular size|normal size|cami[oó]n\s*peque[ñn]o|peque[ñn]os?\s*cami|estrecho|angosto|residencial|calle\s*chica|solo\s*volqueta|s[oó]lo\s*volqueta|volqueta\s*peque)\b/i.test(lower)) return "dump_truck_only"
     return null
   })()
 
@@ -1147,7 +1308,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     if (/\b(next week|next weekend)\b/i.test(lower)) return "Next week"
     if (/\b(next month|in a month|end of (the )?month)\b/i.test(lower)) return "Next month"
     if (/\b(in (a )?(few|couple|two|three|2|3) (weeks|days)|in (\d+) (weeks|days))\b/i.test(lower)) return body.trim().slice(0, 60)
-    if (/\b(flexible|whenever|no rush|no hurry|not urgent|when.?ever|no specific|any.?time|any day|doesn.?t matter|don.?t care|up to you)\b/i.test(lower)) return "Flexible"
+    if (/\b(flexible|whenever|no rush|no hurry|not urgent|when.?ever|no specific|any.?time|any day|doesn.?t matter|don.?t care|up to you|sin\s*prisa|no\s*tengo\s*prisa|cuando\s*sea|cuando\s*puedan|cuando\s*quieran|no\s*urge|cualquier\s*momento|cualquier\s*d[ií]a|cualquier\s*fecha|no\s*importa(\s*la\s*fecha)?|flexible\s*con\s*el\s*tiempo|sin\s*apuro|me\s*da\s*igual)\b/i.test(lower)) return "Flexible"
     // Try to match a date like "April 5" or "4/5" or "monday"
     const dateMatch = body.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i)
     if (dateMatch) return dateMatch[0]
@@ -1810,8 +1971,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const opener = isAgentLeadL ? "" : "Hey this is Sarah with Fill Dirt Near Me. "
       // Sub 5 loads we just ask for yards directly; bigger we ask truck size
       const question = inlineLoads >= 3
-        ? `${inlineLoads} loads, you running tandems (10 yards each) or end dumps (18 yards each)`
-        : `you running tandems (10 yards each) or end dumps (18 yards each)`
+        ? `${inlineLoads} loads, you running tandems (10 yards each) or end dumps (20 yards each)`
+        : `you running tandems (10 yards each) or end dumps (20 yards each)`
       const reply2 = `${opener}${question}`
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply2, "outbound", `out_${sid}`)
@@ -1881,16 +2042,20 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
   }
   // Name extraction — ONLY save if it actually looks like a name
-  const NOT_A_NAME = /^(hey|hi|hello|yo|sup|whats up|what up|howdy|hola|good morning|good afternoon|good evening|morning|afternoon|evening|yes|yeah|yep|yea|no|nah|nope|ok|okay|sure|thanks|thank you|please|help|info|information|quote|price|pricing|how much|what|when|where|why|how|can you|do you|is this|are you|i need|i want|i'm looking|looking for|need|want|got|have|dirt|fill|topsoil|sand|gravel|delivery|deliver|dump|truck|yard|yards|cubic|material|project|estimate|cost|cheap|affordable|available|asap|urgent|ready|interested|question|stop|start|reset|menu|sounds good|sounds great|yes please|go ahead|book it|set it up|do it|im down|im in|lets do it|perfect|absolutely|definitely|for sure|right|correct|cancel|never mind|too much|expensive|not now|done|sent|paid|.)$/i
-  if (needName && !updates.customer_name && body.trim().length > 1 && body.trim().length < 40 && !isAddress && !/\d{3}/.test(body) && !NOT_A_NAME.test(body.trim()) && !inlineMaterial && !isFollowUp && !isYes && !isNo && !isCancel && !isStatus && !isPaymentConfirm && !inlineAccess && !inlineDate) {
+  const NOT_A_NAME = /^(hey|hi|hello|yo|sup|whats up|what up|howdy|hola|good morning|good afternoon|good evening|morning|afternoon|evening|yes|yeah|yep|yea|no|nah|nope|ok|okay|sure|thanks|thank you|please|help|info|information|quote|price|pricing|how much|what|when|where|why|how|can you|do you|is this|are you|i need|i want|i'm looking|looking for|need|want|got|have|dirt|fill|topsoil|sand|gravel|delivery|deliver|dump|truck|yard|yards|cubic|material|project|estimate|cost|cheap|affordable|available|asap|urgent|ready|interested|question|stop|start|reset|menu|sounds good|sounds great|yes please|go ahead|book it|set it up|do it|im down|im in|lets do it|perfect|absolutely|definitely|for sure|right|correct|cancel|never mind|too much|expensive|not now|done|sent|paid|hola|gracias|buenos\s*d[ií]as|buenas|si|s[ií]|claro|tierra|terreno|paisajismo|paisaje|c[eé]sped|pasto|jard[ií]n|yardas?|yarda|construcci[oó]n|necesito|quiero|busco|estoy\s*interesad[oa]|cu[aá]nto\s*cuesta|.)$/i
+  if (needName && !updates.customer_name && body.trim().length > 1 && body.trim().length < 60 && !isAddress && !/\d{3}/.test(body) && !NOT_A_NAME.test(body.trim()) && !inlineMaterial && !inlineYards && !inlineLoads && !isFollowUp && !isYes && !isNo && !isCancel && !isStatus && !isPaymentConfirm && !inlineAccess && !inlineDate) {
     const trimmed = body.trim()
     const words = trimmed.split(/\s+/)
     // Accept lowercase single names (most people text lowercase)
     // But filter out common non-name words
     // Filter common English words BUT allow real names that overlap (will, art, grace, may, mark, etc.)
-    const COMMON_NON_NAMES = /^(the|a|an|is|it|at|in|on|to|so|or|do|go|and|but|for|not|just|also|too|very|all|any|some|my|our|this|that|its|get|got|can|has|had|was|are|been|have|from|with|they|them|what|when|how|who|which|where|here|there|then|than|more|much|many|most|other|only|still|even|well|back|over|such|after|into|made|like|long|out|way|day|each|new|now|old|see|let|say|own|why|try)$/i
-    const hasLetters = /[a-zA-ZÀ-ÿ]/.test(trimmed) // Must contain at least one letter (blocks emoji-only)
-    const isLikelyName = hasLetters && words.length <= 3 && words[0].length >= 2 && !COMMON_NON_NAMES.test(words[0]) && !/\b(dirt|fill|sand|topsoil|gravel|delivery|truck|dump|yard|slab|pool|concrete|driveway|garden|level|grade|material|project|quote|price|checking|update|status|estimate|question|interested|waiting|nothing|something|everything|anything|hello|thanks|cool|great|awesome|sweet|nice|fine|good|bad|maybe|probably|already|next|last|first|just|another)\b/i.test(trimmed)
+    const COMMON_NON_NAMES = /^(the|a|an|is|it|at|in|on|to|so|or|do|go|and|but|for|not|just|also|too|very|all|any|some|my|our|this|that|its|get|got|can|has|had|was|are|been|have|from|with|they|them|what|when|how|who|which|where|here|there|then|than|more|much|many|most|other|only|still|even|well|back|over|such|after|into|made|like|long|out|way|day|each|new|now|old|see|let|say|own|why|try|hola|gracias|si|s[ií]|no|para|por|el|la|los|las|que|de|en|un|una|mi|tu|su|este|esta|necesito|quiero|busco)$/i
+    const hasLetters = /[a-zA-ZÀ-ÿñÑ]/.test(trimmed) // Must contain at least one letter (blocks emoji-only)
+    // Allow up to 5 tokens for full Latino names like "Antony Andrés alemán peña"
+    // Block any token that looks like a quantity/unit/material in EN or ES
+    const TOKEN_BLOCK = /^(yards?|yds?|cy|cubic|yardas?|loads?|truckloads?|tierra|terreno|dirt|fill|sand|topsoil|gravel|paisajismo|c[eé]sped|pasto|jard[ií]n|construcci[oó]n)$/i
+    const noBlockedTokens = words.every(t => !TOKEN_BLOCK.test(t)) && !/\d/.test(trimmed)
+    const isLikelyName = hasLetters && words.length <= 5 && words[0].length >= 2 && noBlockedTokens && !COMMON_NON_NAMES.test(words[0]) && !/\b(dirt|fill|sand|topsoil|gravel|delivery|truck|dump|yard|slab|pool|concrete|driveway|garden|level|grade|material|project|quote|price|checking|update|status|estimate|question|interested|waiting|nothing|something|everything|anything|hello|thanks|cool|great|awesome|sweet|nice|fine|good|bad|maybe|probably|already|next|last|first|just|another|tierra|terreno|yardas?|paisajismo|c[eé]sped|pasto|jard[ií]n|construcci[oó]n)\b/i.test(trimmed)
     if (isLikelyName) {
       updates.customer_name = trimmed
     }
@@ -1943,13 +2108,35 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
   }
 
+  // ── DETERMINISTIC TRUCK COMPARISON ANSWER ──
+  // Customer asks "what is price difference between dump truck and 18 wheeler"
+  // or "how many dump trucks vs end dumps". Answer deterministically: same
+  // price per yard, only difference is capacity per load. Also save any
+  // explicit access preference from the same message.
+  if (isTruckComparisonQuestion) {
+    const firstNameTC = (conv.customer_name || "").split(/\s+/)[0]
+    const greetTC = firstNameTC ? `${firstNameTC}, ` : ""
+    // Save access preference if they also stated one
+    if (inlineAccess) updates.access_type = inlineAccess
+    let truckAnswer = `${greetTC}price per yard is the same no matter what truck we send. only difference is how much each one carries, a tandem holds 10 yards and an end dump holds 20 yards`
+    // If access was just resolved, tack on the next question
+    if (updates.access_type && !has(conv.delivery_date) && !has(updates.delivery_date)) {
+      truckAnswer += `. do you need it by a specific date or are you flexible`
+    } else if (!updates.access_type && !has(conv.access_type)) {
+      truckAnswer += `. can an 18-wheeler get to your property or should we stick with standard dump trucks`
+    }
+    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await logMsg(phone, truckAnswer, "outbound", `out_${sid}`)
+    return truckAnswer
+  }
+
   // ── DETERMINISTIC LOAD-COUNT REPLY (mid-conversation) ──
   // Same trap as NEW: customer says "50 loads" mid-flow. Bypass Sarah, ask
   // truck size flatly. Only fires if we don't already have yards.
   if (inlineLoads && !inlineYards && !has(conv.yards_needed)) {
     const firstNameL = (conv.customer_name || "").split(/\s+/)[0]
     const greetL = firstNameL ? `${firstNameL}, ` : ""
-    const reply3 = `${greetL}${inlineLoads} loads, you running tandems (10 yards each) or end dumps (18 yards each)`
+    const reply3 = `${greetL}${inlineLoads} loads, you running tandems (10 yards each) or end dumps (20 yards each)`
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply3, "outbound", `out_${sid}`)
     return reply3
@@ -2195,6 +2382,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           priorityCents: dualQuote.priority.totalCents,
           priorityPerYardCents: dualQuote.priority.perYardCents,
           guaranteedDate: dualQuote.priority.guaranteedDate,
+          language: customerLang,
         })
         instruction = "__DETERMINISTIC_REPLY__"
       } else if (needsPriorityQuote && !dualQuote.priority) {
@@ -2211,7 +2399,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           smallLoadFeeCents: dualQuote.standard.smallLoadFeeCents,
           dirtSubtotalCents: dualQuote.standard.dirtSubtotalCents,
           customerRequestedYards: merged.yards_needed,
-        }) + `. for guaranteed by ${merged.delivery_date} specifically someone will text you the exact upcharge in a couple minutes`
+          language: customerLang,
+        }) + (customerLang === "es"
+          ? `. para garantizada el ${merged.delivery_date} en específico alguien te enviará el costo extra exacto en unos minutos`
+          : `. for guaranteed by ${merged.delivery_date} specifically someone will text you the exact upcharge in a couple minutes`)
         instruction = "__DETERMINISTIC_REPLY__"
         const msg = `${conv.customer_name || phone} wants guaranteed delivery by "${merged.delivery_date}" — no quarry pricing available for ${fmtMaterial(merged.material_type||"fill_dirt")}. Standard quote ${fmt$(dualQuote.standard.totalCents)} was presented. Confirm exact upcharge and text customer.`
         await notifyAdmin(`MANUAL PRIORITY NEEDED: ${msg}`, `manual_prio_${Date.now()}`)
@@ -2231,6 +2422,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           smallLoadFeeCents: dualQuote.standard.smallLoadFeeCents,
           dirtSubtotalCents: dualQuote.standard.dirtSubtotalCents,
           customerRequestedYards: merged.yards_needed,
+          language: customerLang,
         })
         instruction = "__DETERMINISTIC_REPLY__"
       }
@@ -2270,6 +2462,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         smallLoadFeeCents: fb.smallLoadFeeCents,
         dirtSubtotalCents: fb.dirtSubtotalCents,
         customerRequestedYards: merged.yards_needed,
+        language: customerLang,
       })
       instruction = "__DETERMINISTIC_REPLY__"
     }
@@ -2311,6 +2504,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           priorityCents: dualQuote.priority.totalCents,
           priorityPerYardCents: dualQuote.priority.perYardCents,
           guaranteedDate: dualQuote.priority.guaranteedDate,
+          language: customerLang,
         })
       } else {
         reply = presentStandardQuoteText({
@@ -2324,6 +2518,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           smallLoadFeeCents: dualQuote.standard.smallLoadFeeCents,
           dirtSubtotalCents: dualQuote.standard.dirtSubtotalCents,
           customerRequestedYards: qMerged.yards_needed,
+          language: customerLang,
         })
       }
       instruction = "__DETERMINISTIC_REPLY__"
@@ -2357,6 +2552,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         smallLoadFeeCents: fb.smallLoadFeeCents,
         dirtSubtotalCents: fb.dirtSubtotalCents,
         customerRequestedYards: qMerged.yards_needed,
+        language: customerLang,
       })
       instruction = "__DETERMINISTIC_REPLY__"
     }
