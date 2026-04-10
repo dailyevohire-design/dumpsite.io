@@ -1084,6 +1084,37 @@ function jaccardSim(a: string, b: string): number {
   return union === 0 ? 0 : inter / union
 }
 
+// ── VALIDATE VIOLATION TRACKER ──
+// Counts how many times Sonnet generates specific bad patterns that validate()
+// has to strip. After enough violations of the same type, auto-inserts a
+// learning rule so Sonnet stops generating that pattern. This is the feedback
+// loop: Sonnet generates slop → validate strips it → counter increments →
+// threshold hit → learning inserted → Sonnet sees the rule → stops generating it.
+const violationCounts: Record<string, number> = {}
+const VIOLATION_THRESHOLD = 5 // After 5 violations of same type, write a learning
+
+async function trackViolation(type: string, example: string): Promise<void> {
+  violationCounts[type] = (violationCounts[type] || 0) + 1
+  if (violationCounts[type] === VIOLATION_THRESHOLD) {
+    const ruleMap: Record<string, string> = {
+      ai_admission: `Sonnet keeps generating AI admissions like "${example}". You are Sarah, a REAL PERSON. NEVER include phrases like "I am an AI", "language model", "as an AI", "I'm a bot". Not even to deny being AI — the phrasing itself is the tell.`,
+      live_person_protest: `Sonnet keeps generating "I'm a live person" or "I am a real person". Real people NEVER say this. If accused of being AI, say "im real" casually or just ignore it and continue. The protest itself sounds robotic.`,
+      excitement_reaction: `Sonnet keeps reacting with excitement ("${example}"). NEVER use wow, amazing, nice, awesome, cool, great, perfect, love it, or any similar reaction. Size the job and move on — real dirt people dont react to project size.`,
+      apology: `Sonnet keeps apologizing ("${example}"). Sarah NEVER apologizes. No sorry, my bad, oops, apologies. She has nothing to be sorry for.`,
+      service_opener: `Sonnet keeps generating customer service openers ("${example}"). NEVER start with "thanks for reaching out", "happy to help", "glad you texted", "appreciate you contacting us". Real people texting dont say these things.`,
+      stall_phrase: `Sonnet keeps generating price stall phrases ("${example}"). NEVER say "let me get you the exact number", "let me check pricing", "give me a sec to get the price". The system handles pricing deterministically — if no price is in the task, ask for the next missing field.`,
+      near_duplicate: `Sonnet keeps generating near-duplicate replies that get blocked. Vary your responses — if you asked about something and the customer responded, do NOT rephrase the same question. Acknowledge what they said and move to the NEXT thing.`,
+    }
+    const rule = ruleMap[type]
+    if (rule) {
+      // Fire and forget — don't block the response
+      addLearning("sarah", type, rule).catch(() => {})
+    }
+    // Reset so we don't keep inserting (dedup in addLearning handles true dupes)
+    violationCounts[type] = 0
+  }
+}
+
 function validate(r: string, lastOutboundArg: string | string[]): string {
   const recentOutbounds: string[] = Array.isArray(lastOutboundArg)
     ? lastOutboundArg.filter(s => s && s.length > 0)
@@ -1091,11 +1122,15 @@ function validate(r: string, lastOutboundArg: string | string[]): string {
   const lastOutbound: string = recentOutbounds[0] || ""
   // Block AI admissions AND over-the-top "I'm human" protests (real people don't say these)
   for (const p of ["i am an ai","i'm an ai","language model","claude","anthropic","i am a bot","i'm a bot","as an ai","artificial intelligence"]) {
-    if (r.toLowerCase().includes(p)) return "This is Sarah with Fill Dirt Near Me, how can I help"
+    if (r.toLowerCase().includes(p)) {
+      trackViolation("ai_admission", p)
+      return "This is Sarah with Fill Dirt Near Me, how can I help"
+    }
   }
   // "I'm a live person" / "I am a real human" — nobody says this. Real people
   // just say "im real" or ignore the accusation entirely. Strip the protest
   // sentence so only the useful part of the response remains.
+  const beforeLivePerson = r
   r = r.split(/(?<=[.?!])\s+|\n+/)
     .map(sentence => {
       if (/\b(i.?m a live person|i am a live person|i.?m a real (person|human)|i am a real (person|human)|i.?m a live (human|agent)|live person here|real person here|actual (person|human) here|not a (bot|robot|ai|machine)|not an (ai|bot))\b/i.test(sentence)) {
@@ -1106,29 +1141,36 @@ function validate(r: string, lastOutboundArg: string | string[]): string {
     .filter(s => s.trim().length > 0)
     .join(" ")
     .trim()
+  if (r !== beforeLivePerson) trackViolation("live_person_protest", "I'm a live person")
   // Strip em dashes, en dashes — replace with comma or nothing
   r = r.replace(/\s*[—–]\s*/g, ", ").replace(/,\s*,/g, ",").trim()
   // Strip exclamation marks — real people texting don't use these
   r = r.replace(/!/g, "")
   // Strip "Ha " / "Haha " / "Lol " openers — sounds fake.
   // \b is critical: without it, "Happy" → "ppy" because "Ha" matches.
+  const beforeApology = r
   r = r.replace(/^(ha|haha|hehe|lol|oops|sorry|my bad|apologies)\b\s*,?\s*/i, "").trim()
   // Never apologize — Sarah has nothing to be sorry for
   r = r.replace(/\b(sorry about that|my apologies|I apologize|sorry for)\b/gi, "").replace(/\s{2,}/g, " ").trim()
+  if (r !== beforeApology) trackViolation("apology", beforeApology.slice(0, 40))
   // Strip robotic customer-service openers — these make Sarah sound like a script,
   // not a real person texting from her phone. Belt-and-suspenders for the prompt rule.
+  const beforeServiceOpener = r
   r = r.replace(/^(hey|hi|hello)?\s*[,!]?\s*(thanks for (reaching out|getting in touch|texting|your message|contacting us|messaging)|thank you for (reaching out|getting in touch|texting|your message|contacting us|messaging)|glad you (reached out|texted|got in touch|messaged)|happy to help( you)?( with that)?|great to hear from you|appreciate you (reaching out|texting|contacting us)|i'?d (be )?(happy|glad|love) to (help|assist)( you)?( with that)?)\s*[,.!]?\s*/i, "").trim()
+  if (r !== beforeServiceOpener) trackViolation("service_opener", beforeServiceOpener.slice(0, 40))
   // Strip standalone "Of course" / "Absolutely" / "Certainly" / "No problem" openers
   r = r.replace(/^(of course|absolutely|certainly|no problem|for sure)\s*[,!.]?\s*/i, "").trim()
   // ── EXCITEMENT / REACTION STRIPPER ──
   // Real people don't react with awe to numbers. "Wow 50 loads thats a big project"
   // is the canonical AI-tell. Strip ALL of it: opening reactions and embedded
   // excitement clauses. This is the #1 rule customers/testers catch.
+  const beforeExcitement = r
   r = r.replace(/^(wow|whoa|woah|oh wow|nice|sweet|awesome|amazing|cool|sick|damn|dang|gotcha|hmm|haha|interesting|great|perfect|love it|love that|exciting|impressive)[\s,!.]+/i, "").trim()
   // Remove "thats a big/huge/large/major/serious project|job|order|one" anywhere in the message
   r = r.replace(/\b(that.?s|that is)\s+(a\s+)?(huge|big|large|major|serious|massive|hefty|sizeable|sizable|nice|solid|good\s*sized?|decent\s*sized?)\s*(project|job|order|one|haul|load|amount|quantity)\b[.,!]*\s*/gi, "").trim()
   // Remove standalone "wow", "amazing", emoji-style reactions inside the message
   r = r.replace(/\b(wow|whoa|woah|amazing|awesome|incredible|fantastic|impressive)[!,.]*\s*/gi, "").trim()
+  if (r !== beforeExcitement) trackViolation("excitement_reaction", beforeExcitement.slice(0, 40))
   // Strip ALL emoji — Sarah is texting from her phone but doesn't use emoji in this product
   r = r.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}]/gu, "").trim()
   // Collapse double spaces / leading punctuation left behind by stripping
@@ -1170,6 +1212,7 @@ function validate(r: string, lastOutboundArg: string | string[]): string {
     const nearDup = recentOutbounds.some(o => jaccardSim(o, r) >= 0.55)
     if (exactDup || nearDup) {
       console.warn(`[validate] near-duplicate blocked. reply="${r.slice(0,80)}" recents=${recentOutbounds.length}`)
+      trackViolation("near_duplicate", r.slice(0, 40))
       const dedupResponses = [
         "Let me know if you have any other questions",
         "Anything else I can help with",
