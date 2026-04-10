@@ -154,7 +154,20 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
     }
   })
 
-  const { sent, failed } = await batchDispatchSMS(dispatchDrivers)
+  // ── DRIVER NOTIFICATION KILLSWITCH ──
+  // Set PAUSE_DRIVER_DISPATCH_SMS=true to stop all driver SMS + push notifications.
+  // Orders still get created and tracked — drivers just don't get texted.
+  // Use this when testing the customer brain or when driver supply isn't ready.
+  const driverSMSPaused = process.env.PAUSE_DRIVER_DISPATCH_SMS === "true"
+
+  let sent = 0, failed = 0
+  if (driverSMSPaused) {
+    console.log(`[dispatch] DRIVER SMS PAUSED — skipping ${dispatchDrivers.length} driver notifications for order ${order.id}`)
+  } else {
+    const result = await batchDispatchSMS(dispatchDrivers)
+    sent = result.sent
+    failed = result.failed
+  }
 
   // Update with tier-specific counts (columns may not exist yet — graceful fallback)
   const tierUpdate: Record<string, any> = { drivers_notified: sent }
@@ -169,17 +182,19 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
     await supabase.from('dispatch_orders').update({ drivers_notified: sent }).eq('id', order.id)
   }
 
-  // Send push notifications to drivers in this city
-  try {
-    const { sendPushToCity } = await import('../push-notifications')
-    const payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 35
-    await sendPushToCity(
-      input.cityId,
-      `New Job in ${city.name}`,
-      `$${payDollars}/load · ${input.yardsNeeded} yards needed`,
-      'https://dumpsite.io/dashboard'
-    )
-  } catch {}
+  // Send push notifications to drivers in this city (also paused by killswitch)
+  if (!driverSMSPaused) {
+    try {
+      const { sendPushToCity } = await import('../push-notifications')
+      const payDollars = order.driver_pay_cents ? Math.round(order.driver_pay_cents / 100) : 35
+      await sendPushToCity(
+        input.cityId,
+        `New Job in ${city.name}`,
+        `$${payDollars}/load · ${input.yardsNeeded} yards needed`,
+        'https://dumpsite.io/dashboard'
+      )
+    } catch {}
+  }
 
   await supabase.from('audit_logs').insert({
     action: 'dispatch_order.created',

@@ -3,6 +3,45 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { createBrowserSupabase } from '@/lib/supabase'
 import ErrorBoundary from '@/components/ErrorBoundary'
 
+// ── Executive KPI Bar ── fetches from command-center API
+function ExecBar() {
+  const [d, setD] = useState<any>(null)
+  useEffect(() => {
+    fetch("/api/command-center").then(r => r.ok ? r.json() : null).then(setD).catch(() => {})
+    const iv = setInterval(() => {
+      fetch("/api/command-center").then(r => r.ok ? r.json() : null).then(setD).catch(() => {})
+    }, 60000)
+    return () => clearInterval(iv)
+  }, [])
+  if (!d) return null
+  const fmt$ = (n: number) => "$" + n.toLocaleString()
+  const fmtK = (c: number) => { const d2 = c/100; return d2 >= 1000 ? "$"+(d2/1000).toFixed(1)+"k" : "$"+d2.toFixed(0) }
+  const alerts = d.alerts?.staleOrders + d.alerts?.driverNoShows + d.alerts?.stuckCustomerConvs + d.alerts?.stuckDriverConvs + (d.pendingActions?.length || 0)
+  return (
+    <div style={{padding:'10px 20px',borderBottom:'1px solid #272B33',display:'flex',gap:10,overflowX:'auto',background:'#0d0e11'}}>
+      {[
+        { label: "Today Rev", value: fmt$(d.revenue?.today?.revenue || 0), color: "#10b981" },
+        { label: "Today Margin", value: fmt$(d.revenue?.today?.margin || 0), color: d.revenue?.today?.margin > 0 ? "#10b981" : "#ef4444" },
+        { label: "Week Rev", value: fmt$(d.revenue?.week?.revenue || 0), color: "#3b82f6" },
+        { label: "Pipeline", value: fmtK(d.financial?.pipelineCents || 0), color: "#f59e0b" },
+        { label: "Outstanding", value: fmtK(d.financial?.outstandingCents || 0), color: "#f97316" },
+        { label: "Collected", value: fmtK(d.financial?.collectedCents || 0), color: "#22c55e" },
+      ].map(kpi => (
+        <div key={kpi.label} style={{background:'#111316',border:'1px solid #1a1d22',borderRadius:6,padding:'8px 14px',minWidth:100}}>
+          <div style={{fontSize:9,color:'#666',textTransform:'uppercase',letterSpacing:1}}>{kpi.label}</div>
+          <div style={{fontSize:18,fontWeight:700,color:kpi.color,marginTop:2}}>{kpi.value}</div>
+        </div>
+      ))}
+      {alerts > 0 && (
+        <a href="/admin/command-center" style={{background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.3)',borderRadius:6,padding:'8px 14px',minWidth:80,textDecoration:'none',display:'flex',flexDirection:'column',justifyContent:'center'}}>
+          <div style={{fontSize:9,color:'#ef4444',textTransform:'uppercase',letterSpacing:1}}>Alerts</div>
+          <div style={{fontSize:18,fontWeight:700,color:'#ef4444',marginTop:2}}>{alerts}</div>
+        </a>
+      )}
+    </div>
+  )
+}
+
 export default function AdminDashboard() {
   // Auth enforced by proxy — RBAC handled server-side
   const [loads, setLoads] = useState<any[]>([])
@@ -144,11 +183,13 @@ export default function AdminDashboard() {
         </div>
         <div style={{display:'flex',gap:'10px',alignItems:'center'}}>
           <span style={{fontSize:'12px',color:'#606670'}}>{total} {activeTab} requests</span>
+          <a href="/admin/command-center" style={{background:'transparent',border:'1px solid rgba(139,92,246,0.3)',color:'#8b5cf6',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px'}}>Command Center</a>
           <a href="/admin/live" style={{background:'transparent',border:'1px solid rgba(34,197,94,0.3)',color:'#22c55e',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px'}}>Live Dispatch</a>
           <a href="/admin/tracking" style={{background:'transparent',border:'1px solid rgba(59,138,232,0.3)',color:'#3A8AE8',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px'}}>Tracking</a>
           <a href="/admin/dispatch" style={{background:'#F5A623',color:'#111',padding:'9px 18px',borderRadius:'8px',textDecoration:'none',fontWeight:'800',fontSize:'13px',textTransform:'uppercase'}}>+ New Dispatch</a>
         </div>
       </div>
+      <ExecBar />
 
       {message&&(
         <div style={{margin:'12px 20px',padding:'12px 16px',borderRadius:'9px',background:message.type==='success'?'rgba(39,174,96,0.12)':'rgba(231,76,60,0.12)',border:`1px solid ${message.type==='success'?'rgba(39,174,96,0.3)':'rgba(231,76,60,0.3)'}`,color:message.type==='success'?'#27AE60':'#E74C3C',fontWeight:'600',fontSize:'13px'}}>
