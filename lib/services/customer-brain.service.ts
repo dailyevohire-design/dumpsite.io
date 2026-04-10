@@ -696,6 +696,7 @@ CRITICAL RULES — NEVER BREAK:
 - NEVER say "let me get you the exact number", "let me pull up the price", "let me check on pricing", "give me a sec to get the price", "let me get you the price", or any variation. These are stall phrases. The system handles pricing — you handle conversation. If the TASK doesn't mention a price, just ask for the NEXT missing piece of info and DO NOT mention pricing at all. The customer must never hear you stall on a number.
 - SPANISH ANTI-STALL — same rule applies in Spanish, no exceptions: NEVER say "déjame conseguirte el precio", "déjame revisar", "dame un momento", "dame un segundo", "espera un momento", "espera un segundo", "un momento por favor", "te lo confirmo en breve", "en un momento te digo", "ahora te paso el precio", "déjame calcular", "déjame ver", or ANY variation. The brain hands you the exact price as a deterministic message — you never type a price stall in any language. If you don't see a price in the TASK, ask for the NEXT missing piece of info, do NOT mention pricing.
 - LANGUAGE MIRRORING: if the customer is texting in Spanish, you reply in Spanish — same rules, same brevity, same anti-stall. If they switch to English, switch with them. Do NOT translate the customer's words back at them. Do NOT introduce yourself in both languages.
+- NEVER call our ads "misleading", "confusing", "dishonest", or any negative word about our own marketing. Our Facebook ads say "free dirt, only pay delivery" — that is ACCURATE. The dirt IS free. The customer pays for trucking and delivery only. If a customer pushes back on this, explain it confidently: "the dirt is free, the price covers trucking and delivery." Do NOT apologize for our pricing or our ads. Do NOT say "I understand the frustration" or "I hear you" about the ad. Stand behind it — because it's true.
 - ALWAYS follow the task instruction. The >>> YOUR TASK <<< section tells you exactly what to say. Do that FIRST, then add personality. Don't ignore the task to talk about something else.
 
 NEVER ASK FOR LOCATION INFO BEYOND THE ADDRESS:
@@ -1698,6 +1699,26 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
+    // ── "FREE DIRT" AD OBJECTION ──
+    // Facebook ads say "free dirt, only pay delivery." When a customer pushes back
+    // ("ad said free", "listing says free", "dishonest", "misleading"), we answer
+    // deterministically. NEVER apologize, NEVER call our ad misleading, NEVER
+    // throw our own marketing under the bus.
+    const isFreeDirtObjection = /\b(said.*free|says.*free|ad.*free|listing.*free|free.*dirt|free.*delivery|was.*free|it.*free|supposed.*free|thought.*free|advertised.*free|dishonest|misleading|false advertis|bait.?and.?switch|lied|lying|rip.?off|scam|false|fake ad|fraud)\b/i.test(lower)
+      && !isYes
+    if (isFreeDirtObjection) {
+      const firstName = (conv.customer_name || "").split(/\s+/)[0]
+      const greeting = firstName ? `${firstName}, ` : ""
+      const yards = conv.yards_needed || null
+      const material = fmtMaterial(conv.material_type || "fill_dirt")
+      const priceContext = conv.total_price_cents
+        ? ` your ${yards || MIN_YARDS} yards of ${material} to ${conv.delivery_city || "your area"} is ${fmt$(conv.total_price_cents)} and that covers everything, the dirt, the trucking, and delivery to your door`
+        : ""
+      reply = validate(`${greeting}the dirt is free, you're only paying for the trucking and delivery to get it to you. thats what the ${fmt$(conv.price_per_yard_cents || 1500)}/yard covers, the truck, the driver, the fuel, and getting it placed on your property.${priceContext} want me to get it scheduled`, lastOut)
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+
     // Customer asking "what's included" — answer deterministically
     const isAskingWhatsIncluded = /\b(what.?s included|whats included|what does that include|whats in it|does that include|do you spread|do you grade|do you level|is delivery included|delivery free|free delivery|drop off only|just drop|just delivery|spread it|spread the dirt|grade it|extra fees|hidden fees|any fees|any other charges|tax included|with tax|includes tax)\b/i.test(lower)
       && !isYes && !isNo
@@ -2106,6 +2127,26 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       console.error("[customer geocode] FAILED for:", body.trim())
       await notifyAdmin(`GEOCODE FAILED for customer ${conv.customer_name || phone} address: "${body.trim()}". Address saved but no coords. May need manual zone assignment.`, `geocode_fail_${Date.now()}`)
     }
+  }
+
+  // ── "FREE DIRT" OBJECTION (COLLECTING) ──
+  // Customer may say "ad said free" or "thought it was free" before we even
+  // quote. Same deterministic answer — dirt is free, you pay trucking only.
+  const isFreeDirtObjectionCollecting = /\b(said.*free|says.*free|ad.*free|listing.*free|free.*dirt|free.*delivery|was.*free|it.*free|supposed.*free|thought.*free|advertised.*free|dishonest|misleading|false advertis|bait.?and.?switch|lied|lying|rip.?off|scam|false|fake ad|fraud)\b/i.test(lower)
+    && !isYes
+  if (isFreeDirtObjectionCollecting) {
+    const firstName = (conv.customer_name || "").split(/\s+/)[0]
+    const greeting = firstName ? `${firstName}, ` : ""
+    // Figure out next missing field to chain into
+    let nextQ = ""
+    if (needAddress) nextQ = "whats the delivery address"
+    else if (needPurpose) nextQ = "what are you using the dirt for"
+    else if (needYards) nextQ = "how many yards you thinking"
+    else if (needAccess) nextQ = "can an 18-wheeler get to your property or should we stick with standard dump trucks"
+    else if (needDate) nextQ = "do you need it by a specific date or are you flexible"
+    reply = validate(`${greeting}the dirt itself is free, the price just covers trucking and delivery to get it to your property. the per yard rate covers the truck, the driver, the fuel, and getting it placed where you need it.${nextQ ? " " + nextQ : ""}`, lastOut)
+    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
   // ── DETERMINISTIC TRUCK COMPARISON ANSWER ──
