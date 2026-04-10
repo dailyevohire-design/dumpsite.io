@@ -35,7 +35,7 @@ interface CommandData {
 interface MapPin {
   lat: number; lng: number; name: string; phone: string
   city: string; address: string; state: string; yards: number
-  totalCents: number; material: string; hasOrder: boolean; updated: string
+  totalCents: number; material: string; hasOrder: boolean; agentName: string; updated: string
 }
 
 interface AgentPipeline {
@@ -298,7 +298,8 @@ function OrderMap({ pins }: { pins: MapPin[] }) {
             <a href="tel:+1${p.phone}" style="color:#3b82f6">${phone}</a><br>
             ${p.address || p.city || ""}<br>
             ${p.yards ? p.yards + "yd " : ""}${material} — <b>${price}</b><br>
-            <span style="color:${color};font-weight:600">${p.state}</span>
+            <span style="color:${color};font-weight:600">${p.state}</span><br>
+            <span style="color:#888;font-size:11px">Agent: ${p.agentName || "Unassigned"}</span>
           </div>
         `)
       }
