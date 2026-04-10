@@ -36,6 +36,7 @@ export async function GET() {
     { data: completedOrdersMonth },
     { data: brainCrashes },
     { data: dailyOrders },
+    { data: mapPinsRaw },
   ] = await Promise.all([
     // Orders today
     sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents, cities(name), created_at, agent_id, source_number").gte("created_at", since),
@@ -95,6 +96,10 @@ export async function GET() {
     // Daily order counts for sparkline (last 14 days)
     sb.from("dispatch_orders").select("id, status, price_quoted_cents, driver_pay_cents, created_at")
       .gte("created_at", new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString()),
+    // Map pins — all customer conversations with coordinates (30 days)
+    sb.from("customer_conversations").select("phone, customer_name, state, delivery_city, delivery_lat, delivery_lng, yards_needed, total_price_cents, material_type, delivery_address, dispatch_order_id, updated_at")
+      .not("delivery_lat", "is", null).not("delivery_lng", "is", null)
+      .gte("created_at", thirtyDaysAgo),
   ])
 
   // ═══════════════════════════════════════════════════════
@@ -378,6 +383,18 @@ export async function GET() {
       pendingActionsByType: actionTypeCounts,
       totalPendingActions: pendingActions.length,
     },
+
+    // Map pins for order visualization
+    mapPins: (mapPinsRaw || []).map((p: any) => ({
+      lat: p.delivery_lat, lng: p.delivery_lng,
+      name: p.customer_name, phone: p.phone,
+      city: p.delivery_city, address: p.delivery_address,
+      state: p.state, yards: p.yards_needed,
+      totalCents: p.total_price_cents,
+      material: p.material_type,
+      hasOrder: !!p.dispatch_order_id,
+      updated: p.updated_at,
+    })),
 
     // Lists
     staleOrders: staleOrders || [],

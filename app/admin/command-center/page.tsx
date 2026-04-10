@@ -29,6 +29,13 @@ interface CommandData {
   recentSms: any[]; recentCustSms: any[]
   driverCount: number
   pendingActions: PendingAction[]
+  mapPins: MapPin[]
+}
+
+interface MapPin {
+  lat: number; lng: number; name: string; phone: string
+  city: string; address: string; state: string; yards: number
+  totalCents: number; material: string; hasOrder: boolean; updated: string
 }
 
 interface AgentPipeline {
@@ -232,6 +239,109 @@ function CustomerRow({ c, smsHistory }: { c: any; smsHistory: any[] }) {
         </tr>
       )}
     </>
+  )
+}
+
+// ═══════════════════════════════════════════════════════
+// ORDER MAP — Leaflet via CDN, no API key needed
+// ═══════════════════════════════════════════════════════
+function OrderMap({ pins }: { pins: MapPin[] }) {
+  const mapRef = useRef<HTMLDivElement>(null)
+  const mapInstanceRef = useRef<any>(null)
+
+  useEffect(() => {
+    if (!mapRef.current || pins.length === 0) return
+    // Load Leaflet CSS
+    if (!document.getElementById("leaflet-css")) {
+      const link = document.createElement("link")
+      link.id = "leaflet-css"
+      link.rel = "stylesheet"
+      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      document.head.appendChild(link)
+    }
+    // Load Leaflet JS
+    const loadMap = () => {
+      const L = (window as any).L
+      if (!L || !mapRef.current) return
+
+      // Destroy previous instance
+      if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null }
+
+      const map = L.map(mapRef.current).setView([32.75, -97.33], 8) // DFW center
+      mapInstanceRef.current = map
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap",
+        maxZoom: 18,
+      }).addTo(map)
+
+      const pinColors: Record<string, string> = {
+        ORDER_PLACED: "#10b981", QUOTING: "#f59e0b", COLLECTING: "#3b82f6",
+        AWAITING_PAYMENT: "#8b5cf6", DELIVERED: "#22c55e", CLOSED: "#666",
+        OUT_OF_AREA: "#ef4444", FOLLOW_UP: "#f97316",
+      }
+
+      const bounds: [number, number][] = []
+      for (const p of pins) {
+        if (!p.lat || !p.lng) continue
+        bounds.push([p.lat, p.lng])
+        const color = pinColors[p.state] || "#888"
+        const radius = p.hasOrder ? 8 : 5
+        const circle = L.circleMarker([p.lat, p.lng], {
+          radius, color, fillColor: color, fillOpacity: 0.8, weight: p.hasOrder ? 2 : 1,
+        }).addTo(map)
+        const price = p.totalCents ? "$" + (p.totalCents / 100).toLocaleString() : "--"
+        const material = (p.material || "fill_dirt").replace(/_/g, " ")
+        const phone = p.phone?.replace(/(\d{3})(\d{3})(\d{4})/, "($1) $2-$3") || ""
+        circle.bindPopup(`
+          <div style="font-family:system-ui;font-size:13px;line-height:1.5;min-width:180px">
+            <b>${p.name || "Unknown"}</b><br>
+            <a href="tel:+1${p.phone}" style="color:#3b82f6">${phone}</a><br>
+            ${p.address || p.city || ""}<br>
+            ${p.yards ? p.yards + "yd " : ""}${material} — <b>${price}</b><br>
+            <span style="color:${color};font-weight:600">${p.state}</span>
+          </div>
+        `)
+      }
+      if (bounds.length > 0) map.fitBounds(bounds, { padding: [30, 30] })
+    }
+
+    if ((window as any).L) { loadMap() }
+    else {
+      if (!document.getElementById("leaflet-js")) {
+        const script = document.createElement("script")
+        script.id = "leaflet-js"
+        script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        script.onload = loadMap
+        document.head.appendChild(script)
+      } else {
+        // Script exists but not loaded yet — poll
+        const interval = setInterval(() => { if ((window as any).L) { clearInterval(interval); loadMap() } }, 100)
+        return () => clearInterval(interval)
+      }
+    }
+
+    return () => {
+      if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null }
+    }
+  }, [pins])
+
+  if (pins.length === 0) return <div style={{ color: "#444", fontStyle: "italic", padding: 20 }}>No geocoded orders to display</div>
+
+  return (
+    <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ padding: "10px 16px", fontSize: 13, fontWeight: 700, borderBottom: "1px solid #222", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>Order Map ({pins.length} pins)</span>
+        <div style={{ display: "flex", gap: 8, fontSize: 10 }}>
+          {[["ORDER_PLACED","#10b981"], ["QUOTING","#f59e0b"], ["COLLECTING","#3b82f6"], ["AWAITING_PAYMENT","#8b5cf6"], ["OTHER","#888"]].map(([label, color]) => (
+            <span key={label} style={{ display: "flex", alignItems: "center", gap: 3 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" }} />
+              {label}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div ref={mapRef} style={{ height: 500, width: "100%" }} />
+    </div>
   )
 }
 
@@ -488,6 +598,8 @@ export default function CommandCenter() {
 
         {/* ════════ CITIES ════════ */}
         {tab === "cities" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <OrderMap pins={d.mapPins || []} />
           <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, overflow: "hidden" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
@@ -507,6 +619,7 @@ export default function CommandCenter() {
                 {d.cityIntel.map(c => <CityRow key={c.name} c={c} />)}
               </tbody>
             </table>
+          </div>
           </div>
         )}
 
