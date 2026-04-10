@@ -194,7 +194,14 @@ function CustomerRow({ c, smsHistory }: { c: any; smsHistory: any[] }) {
     <>
       <tr onClick={() => setExpanded(!expanded)} style={{ borderBottom: "1px solid #1a1a1a", cursor: "pointer" }}>
         <td style={{ padding: "8px 12px", fontSize: 12, color: "#888" }}>{agentName}</td>
-        <td style={{ padding: "8px 8px", fontWeight: 500 }}>{c.customer_name || c.phone?.slice(-4)}</td>
+        <td style={{ padding: "8px 8px", fontWeight: 500 }}>
+          {c.customer_name || c.phone?.slice(-4)}
+          {c.phone && (
+            <a href={`tel:+1${c.phone.replace(/\D/g, "").replace(/^1/, "")}`} onClick={e => e.stopPropagation()} style={{ marginLeft: 8, fontSize: 11, color: "#3b82f6", textDecoration: "none", fontWeight: 400 }}>
+              {c.phone.replace(/\D/g, "").replace(/^1/, "").replace(/(\d{3})(\d{3})(\d{4})/, "($1) $2-$3")}
+            </a>
+          )}
+        </td>
         <td style={{ padding: "8px 8px", fontSize: 12 }}>
           {c.yards_needed && <span>{c.yards_needed}yd </span>}
           {material && <span style={{ color: "#888" }}>{material}</span>}
