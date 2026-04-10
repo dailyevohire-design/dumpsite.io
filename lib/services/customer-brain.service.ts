@@ -58,6 +58,37 @@ async function loadLearnings(brain: "sarah" | "jesse"): Promise<string[]> {
   }
 }
 
+// ─────────────────────────────────────────────────────────
+// AUTO-LEARNING — write new rules from live incidents
+// ─────────────────────────────────────────────────────────
+// When the brain encounters an incident (stuck loop, AI accusation,
+// customer frustration, data re-ask), it generates a learning rule
+// and inserts it. Deduplication: check if a similar rule already exists
+// before inserting. This is the feedback loop that makes the brain
+// smarter over time without manual intervention.
+async function addLearning(brain: "sarah" | "jesse", category: string, rule: string): Promise<void> {
+  try {
+    const sb = createAdminSupabase()
+    // Dedup: check if a rule with similar first 80 chars already exists
+    const rulePrefix = rule.slice(0, 80)
+    const { data: existing } = await sb.from("brain_learnings")
+      .select("id").eq("brain", brain).eq("active", true)
+      .ilike("rule", `${rulePrefix}%`).limit(1)
+    if (existing && existing.length > 0) return // Already learned this
+
+    const { error } = await sb.from("brain_learnings").insert({ brain, category, rule, active: true })
+    if (error) {
+      console.error("[addLearning] insert failed:", error.message)
+    } else {
+      console.log(`[addLearning] NEW ${brain}/${category}: ${rule.slice(0, 80)}`)
+      // Bust the cache so the next request picks up the new rule
+      learningsCache = { rules: [], loadedAt: 0 }
+    }
+  } catch (e) {
+    console.error("[addLearning] threw:", (e as any)?.message)
+  }
+}
+
 async function lookupAgent(sourceNumber: string): Promise<SalesAgent | null> {
   if (!sourceNumber) return null
   const agents = await loadAgents()
@@ -1290,6 +1321,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       console.warn(`[STUCK LOOP] phone=${phone} state=${state} — last 3 outbounds are near-duplicates. Escalating.`)
       await flagPendingAction(phone, "BRAIN_CRASH", `STUCK LOOP: ${conv.customer_name || phone} in state ${state}. Last 3 replies were paraphrased duplicates: ${top3.map(t => `"${t.slice(0,60)}"`).join(" | ")}. Brain handed off to human.`)
       await notifyAdmin(`STUCK LOOP: ${conv.customer_name || phone} (${phone}) in ${state}. Brain repeating itself. CHECK COMMAND CENTER.`, `stuck_loop_${phone}_${Date.now()}`)
+      // AUTO-LEARN: capture the stuck pattern so Sonnet avoids it next time
+      await addLearning("sarah", "anti_loop", `STUCK LOOP in state ${state}: brain repeated "${top3[0]?.slice(0, 60)}" 3 times. When in ${state} state, vary your response and never paraphrase the same question. If you already asked, try a different approach or acknowledge what the customer said.`)
       const handoff = "Let me get a teammate to jump in here, hang tight one sec"
       await logMsg(phone, handoff, "outbound", `stuck_${sid}`)
       return handoff
@@ -1470,6 +1503,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     reply = validate(freshExcuse + continuation, lastOut)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `ai_deny_${sid}`)
+    // AUTO-LEARN: customer suspected AI — capture what went wrong
+    await addLearning("sarah", "identity", `Customer in state ${state} asked if they were talking to AI. This happened because the brain was ${needAddress ? "re-asking for address" : needYards ? "re-asking for yards" : "repeating itself"}. When in ${state}, be extra careful to use data already collected and never re-ask for something the customer gave.`)
     return reply
   }
 
@@ -1546,6 +1581,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       reply = validate(recoveryMsg, lastOut)
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `recovery_${sid}`)
+      // AUTO-LEARN: customer frustration — what data was missed and recovered
+      const recoveredFields = [
+        updates.delivery_address ? "address" : null,
+        updates.yards_needed ? "yards" : null,
+        updates.dimensions_raw ? "dimensions" : null,
+      ].filter(Boolean).join(", ")
+      if (recoveredFields) {
+        await addLearning("sarah", "recovery", `Customer got frustrated because brain missed their ${recoveredFields} from a prior message and kept re-asking. In state ${state}, always check conversation history before asking for ${recoveredFields}. The data was there — the extractors just missed it.`)
+      }
       return reply
     }
     // If we couldn't recover data from history, fall through to normal flow
@@ -2984,6 +3028,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     console.error(`[brain LOOP DETECTED] phone=${phone} state=${state} repeating: "${newNorm}"`)
     await flagPendingAction(phone, "BRAIN_CRASH", `LOOP DETECTED — Sarah was about to repeat the same message a 3rd time. State: ${state}. Last customer msg: "${body.slice(0, 80)}". Repeated reply: "${reply.slice(0, 100)}". TAKE OVER MANUALLY.`)
     await notifyAdmin(`LOOP DETECTED for ${conv.customer_name || phone} — Sarah stuck repeating "${newNorm}". State: ${state}. TAKE OVER.`, `loop_${sid}`)
+    // AUTO-LEARN: exact-match loop — even more specific than the Jaccard loop above
+    await addLearning("sarah", "anti_loop", `Exact-match loop in state ${state}: brain tried to send "${newNorm.slice(0, 60)}" three times. Customer said: "${body.slice(0, 60)}". In this situation, acknowledge what the customer said instead of repeating your question.`)
     reply = "Hey, let me grab someone from the team to help you out — they'll text you in just a few minutes"
   }
 
