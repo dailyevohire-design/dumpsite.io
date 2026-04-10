@@ -70,8 +70,8 @@ export async function GET() {
       .eq("state", "OTW_PENDING").lt("updated_at", new Date(now - 3 * 60 * 60 * 1000).toISOString()),
     // Recent driver SMS
     sb.from("sms_logs").select("phone, body, direction, created_at").order("created_at", { ascending: false }).limit(30),
-    // Recent customer SMS
-    sb.from("customer_sms_logs").select("phone, body, direction, created_at").order("created_at", { ascending: false }).limit(30),
+    // Customer SMS — load enough to cover all active conversations (not just 30 globally)
+    sb.from("customer_sms_logs").select("phone, body, direction, created_at").order("created_at", { ascending: false }).limit(500),
     // Total active drivers
     sb.from("driver_profiles").select("id", { count: "exact", head: true }).eq("status", "active"),
     // Sales agents

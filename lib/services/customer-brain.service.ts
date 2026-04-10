@@ -387,7 +387,10 @@ function looksLikeAddress(text: string): boolean {
   // Require street number + street name + street suffix as a WHOLE WORD (not embedded in "driveway", "topsoil", etc.)
   // CRITICAL: include abbreviated suffixes (Pl, Cir, Trl, Ter, etc.) — missing "Pl" caused
   // "5949 Riverbend Pl" to fail address detection, creating an infinite address-ask loop.
+  // FM = Farm-to-Market (Texas), CR = County Road, RR = Ranch Road, SH = State Highway
+  // These are critical for rural Texas addresses like "8149 FM 121 Van Alstyne"
   const streetPattern = /\d+\s+\w+.*\b(st|ave|blvd|dr|rd|ln|ct|pl|cir|trl|ter|cv|pt|sq|lp|pkwy|hwy|street|avenue|boulevard|drive|road|lane|court|place|circle|trail|terrace|cove|point|square|loop|expressway|expy|way|run|pass|bend|vw|view|crossing|xing|spur|park|ridge|glen|knoll|hollow|creek|crk|manor|meadow|commons)\b/i.test(text)
+    || /\d+\s+(fm|cr|rr|sh|county\s+road|farm.?to.?market|ranch\s+road|state\s+hwy|state\s+highway)\s+\d+/i.test(text)
   // "way" embedded in "driveway" or "freeway" is NOT an address — require "way" at end or followed by comma/space+word
   if (streetPattern && /\bway\b/i.test(text) && !/\d+\s+\w+.*\bway\b\s*($|,|\d)/i.test(text)) {
     // Check if "way" is actually part of a street name vs "driveway"
@@ -2016,6 +2019,28 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const firstName = (conv.customer_name || "").split(/\s+/)[0]
       const greeting = firstName ? `${firstName} ` : ""
       reply = validate(`${greeting}standard delivery is 3-5 business days, sometimes sooner if we get a cancellation in your area. ${yards} yards of ${material} to ${conv.delivery_city || "your area"} at ${fmt$(conv.total_price_cents || 0)} total. Want me to get it scheduled`, lastOut)
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    }
+
+    // ── "SOONER" / "FASTER" / "EARLIER" — customer wants it before standard 3-5 days ──
+    // They already got a standard quote. They want a specific date. Ask WHAT date,
+    // then we can generate the guaranteed/priority pricing for that date.
+    const wantsSooner = /\b(sooner|earlier|faster|quicker|rush|asap|need it (by|before|this)|can you do it (by|before|this)|this week|tomorrow|next day|overnight|urgent|hurry|how soon|any sooner)\b/i.test(lower)
+      && !isYes && !isNo && !isPriority && !isStandard
+    if (wantsSooner) {
+      const firstName = (conv.customer_name || "").split(/\s+/)[0]
+      const greeting = firstName ? `${firstName}, ` : ""
+      // If they gave a specific date in the same message, capture it
+      const hasDateInMsg = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|this week|next week|\d{1,2}\/\d{1,2}|\d{1,2}(st|nd|rd|th))\b/i.test(lower)
+      if (hasDateInMsg) {
+        // They said something like "can you do it by Thursday" — save the date and re-quote
+        updates.delivery_date = body.trim()
+        updates.state = "COLLECTING" // Re-enter collecting so the quote engine re-runs with the specific date
+        reply = validate(`${greeting}let me pull the guaranteed pricing for ${body.trim()} and get that to you`, lastOut)
+      } else {
+        reply = validate(`${greeting}yeah we can do sooner than 3-5 days, what date do you need it by and Ill get you the guaranteed pricing for that`, lastOut)
+      }
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
