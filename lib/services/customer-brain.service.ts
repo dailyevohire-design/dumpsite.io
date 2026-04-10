@@ -955,7 +955,7 @@ async function callSarah(
     // Load persistent learnings and append to system prompt
     const learnings = await loadLearnings("sarah")
     const learningsBlock = learnings.length > 0
-      ? `\n\nLEARNED RULES (from past mistakes — follow these strictly):\n${learnings.map((r, i) => `${i+1}. ${r}`).join("\n")}`
+      ? `\n\nCRITICAL LEARNED RULES (never violate these):\n${learnings.map((r, i) => `${i+1}. ${r}`).join("\n")}`
       : ""
     const systemWithLearnings = SARAH_SYSTEM + learningsBlock
 
