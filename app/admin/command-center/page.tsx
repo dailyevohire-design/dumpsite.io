@@ -354,6 +354,7 @@ export default function CommandCenter() {
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<"overview" | "agents" | "customers" | "cities" | "brain" | "sms">("overview")
   const [resolving, setResolving] = useState<string | null>(null)
+  const [alertsOpen, setAlertsOpen] = useState(false)
   const intervalRef = useRef<any>(null)
 
   const fetchData = useCallback(async () => {
@@ -375,7 +376,9 @@ export default function CommandCenter() {
 
   useEffect(() => {
     fetchData()
-    intervalRef.current = setInterval(fetchData, tab === "customers" ? 10000 : 30000)
+    // Refresh every 5s — the command center is a live dashboard, not a status page.
+    // Customer orders that populate slowly are the #1 complaint, so we poll fast.
+    intervalRef.current = setInterval(fetchData, 5000)
     return () => clearInterval(intervalRef.current)
   }, [tab, fetchData])
 
@@ -403,9 +406,140 @@ export default function CommandCenter() {
           <a href="/admin/dispatch" style={{ fontSize: 12, color: "#3b82f6", textDecoration: "none" }}>+ Dispatch</a>
           <a href="/admin/driver-pay" style={{ fontSize: 12, color: "#3b82f6", textDecoration: "none" }}>Driver Pay</a>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {totalAlerts > 0 && <span style={{ background: "#ef4444", color: "#fff", padding: "2px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700 }}>{totalAlerts} alerts</span>}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, position: "relative" }}>
+          {totalAlerts > 0 && (
+            <button
+              onClick={() => setAlertsOpen(!alertsOpen)}
+              style={{
+                background: "#ef4444", color: "#fff", padding: "4px 12px", borderRadius: 10,
+                fontSize: 12, fontWeight: 700, border: "none", cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 6,
+              }}
+            >
+              <span style={{ fontSize: 14 }}>🔔</span>
+              {totalAlerts} alerts
+              <span style={{ fontSize: 10, marginLeft: 2 }}>{alertsOpen ? "▲" : "▼"}</span>
+            </button>
+          )}
           <span style={{ fontSize: 11, color: "#444" }}>Updated {ago(d.timestamp)}</span>
+
+          {/* Alert dropdown */}
+          {alertsOpen && totalAlerts > 0 && (
+            <>
+              {/* Click-away overlay */}
+              <div onClick={() => setAlertsOpen(false)} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 998 }} />
+              <div style={{
+                position: "absolute", top: "100%", right: 0, marginTop: 10,
+                width: 480, maxHeight: 600, overflowY: "auto",
+                background: "#0d0d0d", border: "1px solid #333", borderRadius: 8,
+                boxShadow: "0 10px 40px rgba(0,0,0,0.8)", zIndex: 999, padding: 12,
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#fff", marginBottom: 10, padding: "4px 8px", borderBottom: "1px solid #222", paddingBottom: 8 }}>
+                  All Alerts ({totalAlerts})
+                </div>
+
+                {d.pendingActions.length > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#ef4444", textTransform: "uppercase", padding: "4px 8px" }}>
+                      Needs Human Action ({d.pendingActions.length})
+                    </div>
+                    {d.pendingActions.slice(0, 10).map(a => (
+                      <div key={a.id} style={{ fontSize: 12, color: "#ccc", padding: "6px 8px", borderBottom: "1px solid #1a1a1a" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontWeight: 600, color: "#fff" }}>
+                              {a.customer_name || a.phone?.slice(-4)}
+                              <span style={{ color: "#888", fontWeight: 400, marginLeft: 6, fontSize: 11 }}>{a.type}</span>
+                            </div>
+                            <div style={{ color: "#888", fontSize: 11, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.message}</div>
+                          </div>
+                          <a href={`tel:+1${a.phone?.replace(/\D/g, "")}`} onClick={e => e.stopPropagation()} style={{ fontSize: 10, color: "#3b82f6", textDecoration: "none", flexShrink: 0 }}>call</a>
+                          <button onClick={() => resolveAction(a.id)} disabled={resolving === a.id} style={{ fontSize: 10, color: "#10b981", background: "none", border: "1px solid #10b981", borderRadius: 4, padding: "2px 6px", cursor: "pointer" }}>
+                            {resolving === a.id ? "..." : "clear"}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {d.alerts.stuckCustomerConvs > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", padding: "4px 8px" }}>
+                      Stuck Customer Conversations ({d.alerts.stuckCustomerConvs})
+                    </div>
+                    {d.stuckCustomers.slice(0, 8).map((c: any, i: number) => (
+                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
+                        <span style={{ fontWeight: 600, color: "#fff" }}>{c.customer_name || c.phone?.slice(-4)}</span>
+                        <span style={{ color: "#888", marginLeft: 6 }}>{c.state}</span>
+                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(c.updated_at)}</span>
+                        {c.total_price_cents && <span style={{ color: "#10b981", marginLeft: 6 }}>{fmt$(c.total_price_cents)}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {d.alerts.staleOrders > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", padding: "4px 8px" }}>
+                      Stale Orders 4h+ ({d.alerts.staleOrders})
+                    </div>
+                    {d.staleOrders.slice(0, 8).map((o: any, i: number) => (
+                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
+                        <span style={{ fontWeight: 600, color: "#fff" }}>{o.client_name}</span>
+                        <span style={{ color: "#888", marginLeft: 6 }}>{o.yards_needed}yd</span>
+                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(o.created_at)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {d.alerts.unpaidCustomers > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#f97316", textTransform: "uppercase", padding: "4px 8px" }}>
+                      Unpaid Deliveries ({d.alerts.unpaidCustomers})
+                    </div>
+                    {d.unpaidCustomers.slice(0, 8).map((c: any, i: number) => (
+                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
+                        <span style={{ fontWeight: 600, color: "#fff" }}>{c.customer_name || c.phone?.slice(-4)}</span>
+                        <span style={{ color: "#10b981", marginLeft: 6 }}>{fmt$(c.total_price_cents || 0)}</span>
+                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(c.updated_at)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {d.alerts.driverNoShows > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#ef4444", textTransform: "uppercase", padding: "4px 8px" }}>
+                      Driver No-Shows ({d.alerts.driverNoShows})
+                    </div>
+                    {d.noShows.slice(0, 8).map((n: any, i: number) => (
+                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
+                        <span style={{ fontWeight: 600, color: "#fff" }}>{n.phone?.slice(-4)}</span>
+                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(n.updated_at)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {d.alerts.stuckDriverConvs > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", padding: "4px 8px" }}>
+                      Stuck Driver Conversations ({d.alerts.stuckDriverConvs})
+                    </div>
+                    {d.stuckDrivers.slice(0, 8).map((c: any, i: number) => (
+                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
+                        <span style={{ fontWeight: 600, color: "#fff" }}>...{c.phone?.slice(-4)}</span>
+                        <span style={{ color: "#888", marginLeft: 6 }}>{c.state}</span>
+                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(c.updated_at)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
 

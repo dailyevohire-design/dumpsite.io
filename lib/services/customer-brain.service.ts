@@ -637,8 +637,15 @@ async function logMsg(phone: string, body: string, dir: "inbound"|"outbound"|"er
 }
 
 async function sendSMS(to: string, body: string, sid: string) {
-  const msg = await twilioClient.messages.create({ body, from: CUSTOMER_FROM, to: `+1${normalizePhone(to)}` })
-  await logMsg(normalizePhone(to), body, "outbound", msg.sid || `out_${sid}`)
+  const phone = normalizePhone(to)
+  // Skip Twilio for synthetic test numbers (+15555550xxx). Still logs to DB
+  // so the test harness can verify the conversation state, but no real send.
+  if (/^5555550\d{3}$/.test(phone)) {
+    await logMsg(phone, body, "outbound", `synth_${sid}`)
+    return
+  }
+  const msg = await twilioClient.messages.create({ body, from: CUSTOMER_FROM, to: `+1${phone}` })
+  await logMsg(phone, body, "outbound", msg.sid || `out_${sid}`)
 }
 
 const ADMIN_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""

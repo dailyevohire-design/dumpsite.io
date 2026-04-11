@@ -50,8 +50,8 @@ export async function GET() {
       .order("updated_at", { ascending: false }).limit(20),
     // Active customer conversations — full data for pipeline
     sb.from("customer_conversations").select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents, material_type, agent_id, source_number, payment_status, order_type, priority_total_cents, dispatch_order_id, created_at, updated_at")
-      .in("state", ["COLLECTING", "QUOTING", "ASKING_DIMENSIONS", "ORDER_PLACED", "AWAITING_PAYMENT", "AWAITING_PRIORITY_PAYMENT", "FOLLOW_UP"])
-      .order("updated_at", { ascending: false }).limit(100),
+      .in("state", ["NEW", "COLLECTING", "QUOTING", "ASKING_DIMENSIONS", "ORDER_PLACED", "AWAITING_PAYMENT", "AWAITING_PRIORITY_PAYMENT", "FOLLOW_UP"])
+      .order("updated_at", { ascending: false }).limit(300),
     // Stale orders (dispatching 4h+)
     sb.from("dispatch_orders").select("id, client_name, yards_needed, driver_pay_cents, price_quoted_cents, cities(name), created_at")
       .eq("status", "dispatching").lt("created_at", fourHoursAgo),
