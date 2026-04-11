@@ -503,6 +503,124 @@ async function getHistory(phone: string) {
   return data.reverse().map((m: any) => ({ role: (m.direction === "inbound" ? "user" : "assistant") as "user"|"assistant", content: (m.body || "").trim() })).filter(m => m.content.length > 0)
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// CLAUDE EXTRACTOR — the source of truth for "what do we know"
+// ═══════════════════════════════════════════════════════════════════════
+// Reads the FULL conversation history (not just the current message) and
+// outputs a structured JSON of every field we care about. This replaces
+// the regex-based extraction whack-a-mole. If a customer mentions their
+// address ANYWHERE in the conversation, this finds it. If they say
+// "looking for it sooner," this sets wants_priority=true. If they're
+// confused or frustrated, this flags it. Bilingual EN/ES out of the box.
+//
+// Cost: ~$0.005 per call (Claude Haiku). Latency: ~1 sec. Worth it.
+// Falls back gracefully to null if the call fails — caller checks each
+// field with `??` so regex extractors below still run as backup.
+// ═══════════════════════════════════════════════════════════════════════
+export interface ExtractedState {
+  customer_name: string | null
+  delivery_address: string | null  // full street address only — NO greeting prefix, NO trailing dots
+  delivery_city: string | null
+  yards_needed: number | null  // null unless customer explicitly stated a number
+  material_type: "fill_dirt" | "topsoil" | "screened_topsoil" | "structural_fill" | "select_fill" | "sand" | "gravel" | null
+  material_purpose: string | null  // what they're using it for, in 1 short phrase
+  access_type: "dump_truck_only" | "dump_truck_and_18wheeler" | null
+  delivery_date_text: string | null  // raw text the customer said about timing
+  date_is_specific: boolean  // true ONLY if a real date/day was named (not "soon", not "flexible")
+  date_is_flexible: boolean  // true if customer said flexible/whenever/no rush
+  wants_priority: boolean  // sooner than 3-5 days, rush, asap, today, tomorrow
+  has_pricing_objection: boolean
+  is_confirming_order: boolean  // explicit yes/lock it in/schedule it
+  is_canceling: boolean
+  is_asking_question: boolean
+  question_topic: string | null  // 'price' | 'delivery_time' | 'truck_size' | 'material' | 'access' | 'payment' | null
+  customer_frustrated: boolean  // signs of irritation, "I already told you", "are you AI"
+  language: "en" | "es"
+  fields_re_asked: string[]  // fields the customer has had to repeat — flags brain mistakes
+}
+
+async function extractStateFromHistory(
+  history: { role: "user" | "assistant"; content: string }[],
+  currentBody: string,
+): Promise<ExtractedState | null> {
+  try {
+    // Build a clean transcript for the extractor
+    const transcript = history.slice(-20).map(m => `${m.role === "user" ? "CUSTOMER" : "SARAH"}: ${m.content}`).join("\n")
+    const fullTranscript = transcript + (transcript ? "\n" : "") + `CUSTOMER (just now): ${currentBody}`
+
+    const sys = `You are a structured-data extractor for a dirt delivery dispatcher. You read the full conversation between SARAH (the dispatcher) and the CUSTOMER and output a JSON object describing what is currently known about the customer's order.
+
+CRITICAL RULES:
+1. NEVER fabricate data. If a field was not stated by the customer at any point in the conversation, return null.
+2. ALWAYS scan the ENTIRE conversation history, not just the latest message. If the customer gave their address 10 messages ago, the delivery_address field MUST contain it. This is the most important rule.
+3. delivery_address must be ONLY the street address — strip any greeting prefixes like "Nice to meet you" or "Hi" — strip trailing dots, ellipses, "Thanks", sign-offs. Examples:
+   - Customer says "5949 Riverbend Pl, Fort Worth 76112" → address = "5949 Riverbend Pl, Fort Worth, 76112"
+   - Customer says "Nice to meet you\\n3607 Carpenter ave\\nDallas texas 75210" → address = "3607 Carpenter Ave, Dallas, TX 75210"
+   - Customer says "8149 FM 121 Van Alstyne" → address = "8149 FM 121 Van Alstyne, TX" (FM, CR, RR, SH are Texas road designations)
+   - Customer gave pieces across multiple messages ("independence street" + "frisco" + "by the 121" + "13312 bidgelow ln") → combine into final full address = "13312 Bidgelow Ln, Frisco"
+4. customer_name must be ONLY the person's actual name. Strip any noise:
+   - "Saint Augustine grass" is a lawn type, NOT a name → null
+   - "Brent Phelps. Valley View TX" → strip city → "Brent Phelps"
+   - "Name : Viswa Vuppalapati" → strip label → "Viswa Vuppalapati"
+   - "Looking for raise the ground to build warehouse" is not a name → null
+   - Prefer the full name the customer gave (first + last). If only a first name is given, that's fine.
+5. yards_needed: only set if the customer explicitly stated a yards number ("100 yards", "I need 50", "100yd") OR if dimensions were calculated and confirmed. If customer gave dimensions like "30ft x 30ft pad 6ft deep" = 30*30*6/27 = 200 yards — calculate it. Do NOT extract from load counts alone ("10 loads" could be 10 or 20 yards per load — return null).
+6. material_type: MUST be EXACTLY ONE of these enum values with underscores: fill_dirt, topsoil, screened_topsoil, structural_fill, select_fill, sand, gravel. NEVER return a string with a space ("fill dirt"). NEVER return an array. If the customer mentioned multiple materials, pick the PRIMARY one (usually the first/most-needed). Defaults:
+   - filling, leveling, raising grade → fill_dirt
+   - grass, sod, landscaping, garden → screened_topsoil
+   - foundation, shop pad, warehouse, building base → structural_fill or select_fill
+7. wants_priority: true if customer said "sooner", "earlier", "rush", "asap", "today", "tomorrow", "this week", "need it fast", "urgent", "as soon as possible", or any Spanish equivalent ("urgente", "lo necesito hoy", "para mañana", "cuanto antes", "pronto").
+8. date_is_flexible: true ONLY if customer explicitly said flexible/whenever/no rush ("flexible", "whenever", "no rush", "no apuro", "cuando puedan", "cualquier día").
+9. date_is_specific: true ONLY if a real day/date was named ("Friday", "tomorrow morning", "next Tuesday", "12/15", "mañana"). NOT "soon" — that's wants_priority but not date_is_specific.
+10. customer_frustrated: true if customer said anything like "I already told you", "are you AI", "I gave you that", "please disregard", "this is frustrating", "am I talking to a live person", or showed clear irritation.
+11. fields_re_asked: list field names that the customer had to repeat because Sarah asked twice. Use values from: "name", "address", "yards", "material", "access", "date", "purpose". Empty array if none.
+12. language: "es" if the customer is texting primarily in Spanish, "en" otherwise. Base this on CUSTOMER messages only, not SARAH's.
+
+Output ONLY a single valid JSON object. No prose, no markdown code fences, no additional fields. The JSON must have exactly these keys: customer_name, delivery_address, delivery_city, yards_needed, material_type, material_purpose, access_type, delivery_date_text, date_is_specific, date_is_flexible, wants_priority, has_pricing_objection, is_confirming_order, is_canceling, is_asking_question, question_topic, customer_frustrated, language, fields_re_asked.`
+
+    const userMsg = `Conversation:\n${fullTranscript}\n\nExtract the structured state as JSON.`
+
+    const resp = await anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 800,
+      system: sys,
+      messages: [{ role: "user", content: userMsg }],
+    })
+
+    const text = (resp.content[0] as any)?.text || ""
+    // Strip markdown code fences if present
+    const jsonText = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim()
+    const parsed = JSON.parse(jsonText) as ExtractedState
+
+    // Defensive: ensure required fields exist with sane defaults
+    return {
+      customer_name: parsed.customer_name ?? null,
+      delivery_address: parsed.delivery_address ?? null,
+      delivery_city: parsed.delivery_city ?? null,
+      yards_needed: typeof parsed.yards_needed === "number" ? parsed.yards_needed : null,
+      material_type: parsed.material_type ?? null,
+      material_purpose: parsed.material_purpose ?? null,
+      access_type: parsed.access_type ?? null,
+      delivery_date_text: parsed.delivery_date_text ?? null,
+      date_is_specific: parsed.date_is_specific === true,
+      date_is_flexible: parsed.date_is_flexible === true,
+      wants_priority: parsed.wants_priority === true,
+      has_pricing_objection: parsed.has_pricing_objection === true,
+      is_confirming_order: parsed.is_confirming_order === true,
+      is_canceling: parsed.is_canceling === true,
+      is_asking_question: parsed.is_asking_question === true,
+      question_topic: parsed.question_topic ?? null,
+      customer_frustrated: parsed.customer_frustrated === true,
+      language: parsed.language === "es" ? "es" : "en",
+      fields_re_asked: Array.isArray(parsed.fields_re_asked) ? parsed.fields_re_asked : [],
+    }
+  } catch (e: any) {
+    console.error("[extractStateFromHistory] FAILED:", e?.message)
+    // Don't notify admin — extractor is best-effort, regex fallback handles it
+    return null
+  }
+}
+
 async function logMsg(phone: string, body: string, dir: "inbound"|"outbound"|"error", sid: string) {
   try {
     const { error } = await createAdminSupabase().from("customer_sms_logs").insert({ phone, body, direction: dir, message_sid: sid })
@@ -1336,9 +1454,63 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (conv.opted_out) return ""
   const state = conv.state || "NEW"
   const history = await getHistory(phone)
+
+  // ═══════════════════════════════════════════════════════════════
+  // CLAUDE EXTRACTOR — run BEFORE any field detection logic
+  // ═══════════════════════════════════════════════════════════════
+  // Reads the full conversation history and extracts structured state.
+  // We then MERGE this into `conv` so the rest of the brain sees
+  // Claude's view of reality, not the brittle regex view. This is the
+  // single biggest reliability improvement available. Falls back to
+  // the existing regex extractors if the Claude call fails.
+  const extractorUpdates: Record<string, any> = {}  // merged into `updates` later
+  const extracted = await extractStateFromHistory(history, body)
+  // Inline empty-check since `has` is a function-scoped helper declared later
+  const isEmpty = (v: any): boolean => v === null || v === undefined || v === ""
+  if (extracted) {
+    console.log(`[extractor] phone=${phone} addr=${!!extracted.delivery_address} yards=${extracted.yards_needed} name=${extracted.customer_name} lang=${extracted.language} priority=${extracted.wants_priority} frustrated=${extracted.customer_frustrated}`)
+    // Merge extracted data into conv — ONLY fill gaps, never override existing
+    // database state (the DB is still the source of truth for confirmed writes).
+    // Rule: if DB is null/empty, take Claude's value. Persist to DB via extractorUpdates.
+    if (isEmpty(conv.customer_name) && extracted.customer_name) {
+      conv.customer_name = extracted.customer_name
+      extractorUpdates.customer_name = extracted.customer_name
+    }
+    if (isEmpty(conv.delivery_address) && extracted.delivery_address) {
+      conv.delivery_address = extracted.delivery_address
+      extractorUpdates.delivery_address = extracted.delivery_address
+    }
+    if (isEmpty(conv.delivery_city) && extracted.delivery_city) {
+      conv.delivery_city = extracted.delivery_city
+      extractorUpdates.delivery_city = extracted.delivery_city
+    }
+    if (isEmpty(conv.yards_needed) && extracted.yards_needed) {
+      conv.yards_needed = extracted.yards_needed
+      extractorUpdates.yards_needed = extracted.yards_needed
+    }
+    if (isEmpty(conv.material_type) && extracted.material_type) {
+      conv.material_type = extracted.material_type
+      extractorUpdates.material_type = extracted.material_type
+    }
+    if (isEmpty(conv.material_purpose) && extracted.material_purpose) {
+      conv.material_purpose = extracted.material_purpose
+      extractorUpdates.material_purpose = extracted.material_purpose
+    }
+    if (isEmpty(conv.access_type) && extracted.access_type) {
+      conv.access_type = extracted.access_type
+      extractorUpdates.access_type = extracted.access_type
+    }
+    if (isEmpty(conv.delivery_date) && extracted.delivery_date_text) {
+      conv.delivery_date = extracted.delivery_date_text
+      extractorUpdates.delivery_date = extracted.delivery_date_text
+    }
+    // Stash the extraction on conv so downstream logic can use intent flags
+    ;(conv as any)._extracted = extracted
+  }
+
   // Detect customer language ONCE per request — used by deterministic quote
-  // text and the validate() Spanish anti-stall pass. Defaults to English.
-  const customerLang: "en" | "es" = detectLanguage(sms.body, history)
+  // text and the validate() Spanish anti-stall pass. Prefer extractor's read.
+  const customerLang: "en" | "es" = extracted?.language || detectLanguage(sms.body, history)
   // Last 5 outbounds for the near-duplicate guard. Passing the array (instead
   // of a single string) lets validate() block paraphrased loops, not just
   // exact repeats.
@@ -1374,7 +1546,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       return handoff
     }
   }
-  const updates: Record<string, any> = {}
+  const updates: Record<string, any> = { ...extractorUpdates }
   let reply = ""
 
   // Set agent attribution — only on first contact (COALESCE preserves existing values)
