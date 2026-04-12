@@ -48,10 +48,13 @@ export async function GET() {
     sb.from("conversations").select("phone, state, extracted_city, active_order_id, updated_at")
       .in("state", ["ACTIVE", "OTW_PENDING", "PHOTO_PENDING", "APPROVAL_PENDING", "JOB_PRESENTED", "ASKING_TRUCK", "ASKING_ADDRESS"])
       .order("updated_at", { ascending: false }).limit(20),
-    // Active customer conversations — full data for pipeline
-    sb.from("customer_conversations").select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents, material_type, agent_id, source_number, payment_status, order_type, priority_total_cents, dispatch_order_id, created_at, updated_at")
-      .in("state", ["NEW", "COLLECTING", "QUOTING", "ASKING_DIMENSIONS", "ORDER_PLACED", "AWAITING_PAYMENT", "AWAITING_PRIORITY_PAYMENT", "FOLLOW_UP"])
-      .order("updated_at", { ascending: false }).limit(300),
+    // ALL customer conversations in the last 30 days — no state filter.
+    // The dashboard is the source of truth for "what's happening with customers",
+    // so we never hide a conversation based on state. DELIVERED/CANCELED/CLOSED
+    // conversations still need to be visible with full context.
+    sb.from("customer_conversations").select("phone, customer_name, state, delivery_city, delivery_address, yards_needed, total_price_cents, material_type, agent_id, source_number, payment_status, order_type, priority_total_cents, dispatch_order_id, needs_human_review, created_at, updated_at")
+      .gte("created_at", thirtyDaysAgo)
+      .order("updated_at", { ascending: false }).limit(500),
     // Stale orders (dispatching 4h+)
     sb.from("dispatch_orders").select("id, client_name, yards_needed, driver_pay_cents, price_quoted_cents, cities(name), created_at")
       .eq("status", "dispatching").lt("created_at", fourHoursAgo),

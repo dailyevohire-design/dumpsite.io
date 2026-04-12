@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { after } from "next/server"
-import { handleCustomerSMS } from "@/lib/services/customer-brain.service"
+import { handleCustomerSMS, flushPendingViolations } from "@/lib/services/customer-brain.service"
 import { createAdminSupabase } from "@/lib/supabase"
 import crypto from "crypto"
 import twilio from "twilio"
@@ -153,11 +153,24 @@ export async function POST(req: NextRequest) {
     // Format as E.164 for Twilio FROM field
     const replyFromNumber = sourceNumber ? `+1${sourceNumber}` : undefined
 
-    // Human-like delay, then send with retry + admin alert on failure
-    const delay = 5000
+    // Human-like delay, then send with retry + admin alert on failure.
+    // A fixed 5 seconds is a tell: a 200-char message arriving exactly 5s
+    // after the customer texts is robotic. Real dispatchers take 20-40s to
+    // read + type that. Scale delay with message length so a 30-char
+    // acknowledgment arrives in ~3s and a 300-char quote arrives in ~20s.
+    // Floor 1500ms so nothing is instant, cap 30s so cold DB writes don't
+    // strand the reply in after().
+    const delay = Math.min(30000, Math.max(1500, 1500 + reply.length * 60))
 
     after(async () => {
       try {
+        // Drain queued validator violations to Postgres. Runs during the
+        // human-like delay window so it doesn't block the Twilio response.
+        // This is what turns the self-healing loop from a no-op into a real
+        // feedback system — see trackViolation() in customer-brain.service.ts
+        try { await flushPendingViolations() } catch (flushErr) {
+          console.error("[customer SMS] flushPendingViolations failed:", flushErr)
+        }
         await new Promise(r => setTimeout(r, delay))
         let result = await sendViaTwilioAPI(phone, reply, replyFromNumber)
 

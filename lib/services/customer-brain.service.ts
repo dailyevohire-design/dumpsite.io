@@ -21,6 +21,13 @@ type SalesAgent = { id: string; name: string; twilio_number: string; personal_nu
 let agentCache: { agents: SalesAgent[]; loadedAt: number } = { agents: [], loadedAt: 0 }
 const AGENT_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
+// Request-scoped — set at the top of handleCustomerSMS, read by validate()
+// to strip wrong-agent-name phrases ("im John" when Sarah is actually
+// attached to Micah). Not thread-safe across concurrent requests in the
+// same warm container, but the worst case is a valid agent name gets
+// stripped — not a correctness issue. Reset at the end of each handler.
+let currentRequestAgentFirstName: string | null = null
+
 async function loadAgents(): Promise<SalesAgent[]> {
   if (Date.now() - agentCache.loadedAt < AGENT_CACHE_TTL && agentCache.agents.length > 0) return agentCache.agents
   const sb = createAdminSupabase()
@@ -533,7 +540,7 @@ export interface ExtractedState {
   is_confirming_order: boolean  // explicit yes/lock it in/schedule it
   is_canceling: boolean
   is_asking_question: boolean
-  question_topic: string | null  // 'price' | 'delivery_time' | 'truck_size' | 'material' | 'access' | 'payment' | null
+  question_topic: string | null  // 'price' | 'delivery_time' | 'truck_size' | 'material' | 'access' | 'payment' | 'identity' | null
   customer_frustrated: boolean  // signs of irritation, "I already told you", "are you AI"
   language: "en" | "es"
   fields_re_asked: string[]  // fields the customer has had to repeat — flags brain mistakes
@@ -558,11 +565,18 @@ CRITICAL RULES:
    - Customer says "Nice to meet you\\n3607 Carpenter ave\\nDallas texas 75210" → address = "3607 Carpenter Ave, Dallas, TX 75210"
    - Customer says "8149 FM 121 Van Alstyne" → address = "8149 FM 121 Van Alstyne, TX" (FM, CR, RR, SH are Texas road designations)
    - Customer gave pieces across multiple messages ("independence street" + "frisco" + "by the 121" + "13312 bidgelow ln") → combine into final full address = "13312 Bidgelow Ln, Frisco"
-4. customer_name must be ONLY the person's actual name. Strip any noise:
+4. customer_name must be ONLY the CUSTOMER's actual name, and must NOT be extracted from a vocative (a name the customer uses to ADDRESS Sarah). Strip any noise:
    - "Saint Augustine grass" is a lawn type, NOT a name → null
    - "Brent Phelps. Valley View TX" → strip city → "Brent Phelps"
    - "Name : Viswa Vuppalapati" → strip label → "Viswa Vuppalapati"
    - "Looking for raise the ground to build warehouse" is not a name → null
+   - VOCATIVE RULE (CRITICAL): when a name follows "hey", "hi", "hello", "thanks", "thank you", "ok", "yo", "hola", "gracias", "buenos dias", "buenas", or any similar greeting / thanks — that name is the customer addressing SARAH, not introducing themselves. Do NOT extract it. Examples that MUST return null (or an existing known name, never the vocative):
+     - "Hey John, need 10 yards of dirt" → customer_name = null (John is Sarah's agent name, not the customer)
+     - "Hi Micah, how are you" → customer_name = null
+     - "Thanks John" → customer_name = null
+     - "Hola Sarah" → customer_name = null
+     - "Buenos días Micah" → customer_name = null
+   - A real self-introduction looks like: "my name is X", "this is X", "im X", "soy X", "me llamo X", "X here", "it's X", or a name on its own line in response to a name question. Only these patterns produce a customer_name.
    - Prefer the full name the customer gave (first + last). If only a first name is given, that's fine.
 5. yards_needed: only set if the customer explicitly stated a yards number ("100 yards", "I need 50", "100yd") OR if dimensions were calculated and confirmed. If customer gave dimensions like "30ft x 30ft pad 6ft deep" = 30*30*6/27 = 200 yards — calculate it. Do NOT extract from load counts alone ("10 loads" could be 10 or 20 yards per load — return null).
 6. material_type: MUST be EXACTLY ONE of these enum values with underscores: fill_dirt, topsoil, screened_topsoil, structural_fill, select_fill, sand, gravel. NEVER return a string with a space ("fill dirt"). NEVER return an array. If the customer mentioned multiple materials, pick the PRIMARY one (usually the first/most-needed). Defaults:
@@ -573,6 +587,14 @@ CRITICAL RULES:
 8. date_is_flexible: true ONLY if customer explicitly said flexible/whenever/no rush ("flexible", "whenever", "no rush", "no apuro", "cuando puedan", "cualquier día").
 9. date_is_specific: true ONLY if a real day/date was named ("Friday", "tomorrow morning", "next Tuesday", "12/15", "mañana"). NOT "soon" — that's wants_priority but not date_is_specific.
 10. customer_frustrated: true if customer said anything like "I already told you", "are you AI", "I gave you that", "please disregard", "this is frustrating", "am I talking to a live person", or showed clear irritation.
+10a. is_asking_question: true whenever the customer is asking Sarah a question that she needs to answer — about the order, price, timing, or about WHO she is. question_topic must be one of: 'price', 'delivery_time', 'truck_size', 'material', 'access', 'payment', 'identity' — or null when the question is something else. Use 'identity' for ANY question about whether Sarah is AI/bot/real/human, in English or Spanish. Examples:
+    - "Are you AI?" → is_asking_question=true, question_topic='identity'
+    - "Is this a real person?" → is_asking_question=true, question_topic='identity'
+    - "am i talking to a bot" → is_asking_question=true, question_topic='identity'
+    - "¿eres real?" → is_asking_question=true, question_topic='identity'
+    - "hay alguien real del otro lado" → is_asking_question=true, question_topic='identity'
+    - "how much for 20 yards" → is_asking_question=true, question_topic='price'
+    - "when can it arrive" → is_asking_question=true, question_topic='delivery_time'
 11. fields_re_asked: list field names that the customer had to repeat because Sarah asked twice. Use values from: "name", "address", "yards", "material", "access", "date", "purpose". Empty array if none.
 12. language: "es" if the customer is texting primarily in Spanish, "en" otherwise. Base this on CUSTOMER messages only, not SARAH's.
 
@@ -1218,28 +1240,129 @@ function jaccardSim(a: string, b: string): number {
 // learning rule so Sonnet stops generating that pattern. This is the feedback
 // loop: Sonnet generates slop → validate strips it → counter increments →
 // threshold hit → learning inserted → Sonnet sees the rule → stops generating it.
-const violationCounts: Record<string, number> = {}
+//
+// IMPORTANT: counts are persisted in brain_violation_counts (Postgres). An
+// earlier version used a module-level JS variable, but on Vercel serverless
+// every cold container started with {} so the threshold was never reached.
+// Two days of production traffic produced zero auto-learnings — that's why
+// Luis's conversation got 41 near-duplicate "Want me to get that scheduled"
+// messages without the learning loop ever firing.
+//
+// validate() must remain synchronous so its 57 callsites don't need to
+// cascade into async. Instead, trackViolation() synchronously pushes onto a
+// module-level queue, and flushPendingViolations() drains the queue to
+// Postgres. The webhook handler calls flushPendingViolations() from inside
+// after() so the DB writes run during the human-like delay window without
+// blocking the Twilio response.
 const VIOLATION_THRESHOLD = 5 // After 5 violations of same type, write a learning
 
-async function trackViolation(type: string, example: string): Promise<void> {
-  violationCounts[type] = (violationCounts[type] || 0) + 1
-  if (violationCounts[type] === VIOLATION_THRESHOLD) {
-    const ruleMap: Record<string, string> = {
-      ai_admission: `Sonnet keeps generating AI admissions like "${example}". You are Sarah, a REAL PERSON. NEVER include phrases like "I am an AI", "language model", "as an AI", "I'm a bot". Not even to deny being AI — the phrasing itself is the tell.`,
-      live_person_protest: `Sonnet keeps generating "I'm a live person" or "I am a real person". Real people NEVER say this. If accused of being AI, say "im real" casually or just ignore it and continue. The protest itself sounds robotic.`,
-      excitement_reaction: `Sonnet keeps reacting with excitement ("${example}"). NEVER use wow, amazing, nice, awesome, cool, great, perfect, love it, or any similar reaction. Size the job and move on — real dirt people dont react to project size.`,
-      apology: `Sonnet keeps apologizing ("${example}"). Sarah NEVER apologizes. No sorry, my bad, oops, apologies. She has nothing to be sorry for.`,
-      service_opener: `Sonnet keeps generating customer service openers ("${example}"). NEVER start with "thanks for reaching out", "happy to help", "glad you texted", "appreciate you contacting us". Real people texting dont say these things.`,
-      stall_phrase: `Sonnet keeps generating price stall phrases ("${example}"). NEVER say "let me get you the exact number", "let me check pricing", "give me a sec to get the price". The system handles pricing deterministically — if no price is in the task, ask for the next missing field.`,
-      near_duplicate: `Sonnet keeps generating near-duplicate replies that get blocked. Vary your responses — if you asked about something and the customer responded, do NOT rephrase the same question. Acknowledge what they said and move to the NEXT thing.`,
+interface PendingViolation { type: string; example: string }
+const pendingViolations: PendingViolation[] = []
+
+function trackViolation(type: string, example: string): void {
+  pendingViolations.push({ type, example: example.slice(0, 200) })
+}
+
+export async function flushPendingViolations(): Promise<void> {
+  if (pendingViolations.length === 0) return
+  // Drain the queue atomically so concurrent requests don't double-process
+  const drained = pendingViolations.splice(0, pendingViolations.length)
+
+  // Collapse duplicates within the same batch so we only read/upsert each
+  // (brain, type) once per flush — keeps DB traffic proportional to unique
+  // violation types, not raw violation count.
+  const grouped = new Map<string, { count: number; example: string }>()
+  for (const v of drained) {
+    const prev = grouped.get(v.type)
+    if (prev) {
+      prev.count += 1
+      prev.example = v.example // keep latest example
+    } else {
+      grouped.set(v.type, { count: 1, example: v.example })
     }
-    const rule = ruleMap[type]
-    if (rule) {
-      // Fire and forget — don't block the response
-      addLearning("sarah", type, rule).catch(() => {})
+  }
+
+  const sb = createAdminSupabase()
+  // Error codes we treat as "migration not applied yet" so we don't spam
+  // admin alerts during the deploy window where code is live but the table
+  // isn't. Postgres 42P01 = undefined_table. PostgREST sends "PGRST205" for
+  // missing tables. We log + skip the whole flush rather than alert per-row.
+  const tableMissing = (err: any) =>
+    err?.code === "42P01" ||
+    err?.code === "PGRST205" ||
+    /does not exist|could not find the table/i.test(err?.message || "")
+
+  const ruleMap: Record<string, string> = {
+    ai_admission: `Sonnet keeps generating AI admissions like "EXAMPLE". You are Sarah, a REAL PERSON. NEVER include phrases like "I am an AI", "language model", "as an AI", "I'm a bot". Not even to deny being AI — the phrasing itself is the tell.`,
+    live_person_protest: `Sonnet keeps generating "I'm a live person" or "I am a real person". Real people NEVER say this. If accused of being AI, say "im real" casually or just ignore it and continue. The protest itself sounds robotic.`,
+    excitement_reaction: `Sonnet keeps reacting with excitement ("EXAMPLE"). NEVER use wow, amazing, nice, awesome, cool, great, perfect, love it, or any similar reaction. Size the job and move on — real dirt people dont react to project size.`,
+    apology: `Sonnet keeps apologizing ("EXAMPLE"). Sarah NEVER apologizes. No sorry, my bad, oops, apologies. She has nothing to be sorry for.`,
+    service_opener: `Sonnet keeps generating customer service openers ("EXAMPLE"). NEVER start with "thanks for reaching out", "happy to help", "glad you texted", "appreciate you contacting us". Real people texting dont say these things.`,
+    stall_phrase: `Sonnet keeps generating price stall phrases ("EXAMPLE"). NEVER say "let me get you the exact number", "let me check pricing", "give me a sec to get the price". The system handles pricing deterministically — if no price is in the task, ask for the next missing field.`,
+    near_duplicate: `Sonnet keeps generating near-duplicate replies that get blocked. Vary your responses — if you asked about something and the customer responded, do NOT rephrase the same question. Acknowledge what they said and move to the NEXT thing.`,
+  }
+
+  for (const [type, { count: delta, example }] of grouped.entries()) {
+    try {
+      const { data: row, error: readErr } = await sb
+        .from("brain_violation_counts")
+        .select("count")
+        .eq("brain", "sarah")
+        .eq("type", type)
+        .maybeSingle()
+      if (readErr) {
+        if (tableMissing(readErr)) {
+          console.warn("[flushViolations] brain_violation_counts table missing — migration 20260411_brain_violation_counts.sql not applied. Skipping flush.")
+          return // abort entire flush, don't spam per-type
+        }
+        console.error("[flushViolations] read failed:", readErr.message, "type:", type)
+        // Silent fail on DB hiccups is bad — alert admin per never-silent-fail rule
+        try { await notifyAdmin(`BRAIN VIOLATION FLUSH read failed: ${readErr.message} | type=${type}`, `flush_read_${Date.now()}`) } catch {}
+        continue
+      }
+      const nextCount = (row?.count || 0) + delta
+      const { error: upsertErr } = await sb
+        .from("brain_violation_counts")
+        .upsert(
+          {
+            brain: "sarah",
+            type,
+            count: nextCount,
+            last_example: example,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "brain,type" },
+        )
+      if (upsertErr) {
+        console.error("[flushViolations] upsert failed:", upsertErr.message, "type:", type)
+        try { await notifyAdmin(`BRAIN VIOLATION FLUSH upsert failed: ${upsertErr.message} | type=${type}`, `flush_upsert_${Date.now()}`) } catch {}
+        continue
+      }
+
+      if (nextCount >= VIOLATION_THRESHOLD) {
+        const ruleTemplate = ruleMap[type]
+        if (ruleTemplate) {
+          const rule = ruleTemplate.replace(/EXAMPLE/g, example)
+          await addLearning("sarah", type, rule)
+        }
+        // Reset the counter so the next batch starts fresh. addLearning
+        // dedups on rule prefix so repeated threshold hits won't spam rows.
+        const { error: resetErr } = await sb
+          .from("brain_violation_counts")
+          .update({ count: 0, updated_at: new Date().toISOString() })
+          .eq("brain", "sarah")
+          .eq("type", type)
+        if (resetErr) {
+          console.error("[flushViolations] reset failed:", resetErr.message, "type:", type)
+          try { await notifyAdmin(`BRAIN VIOLATION FLUSH reset failed: ${resetErr.message} | type=${type}`, `flush_reset_${Date.now()}`) } catch {}
+        } else {
+          console.log(`[flushViolations] threshold hit for ${type} — rule persisted, counter reset`)
+        }
+      }
+    } catch (e) {
+      console.error("[flushViolations] threw:", (e as any)?.message, "type:", type)
+      try { await notifyAdmin(`BRAIN VIOLATION FLUSH threw: ${(e as any)?.message} | type=${type}`, `flush_threw_${Date.now()}`) } catch {}
     }
-    // Reset so we don't keep inserting (dedup in addLearning handles true dupes)
-    violationCounts[type] = 0
   }
 }
 
@@ -1277,30 +1400,61 @@ function validate(r: string, lastOutboundArg: string | string[]): string {
   // Strip "Ha " / "Haha " / "Lol " openers — sounds fake.
   // \b is critical: without it, "Happy" → "ppy" because "Ha" matches.
   const beforeApology = r
-  r = r.replace(/^(ha|haha|hehe|lol|oops|sorry|my bad|apologies)\b\s*,?\s*/i, "").trim()
-  // Never apologize — Sarah has nothing to be sorry for
-  r = r.replace(/\b(sorry about that|my apologies|I apologize|sorry for)\b/gi, "").replace(/\s{2,}/g, " ").trim()
+  r = r.replace(/^(ha|haha|hehe|lol|oops|sorry|my bad|apologies|lo siento|disculpa|disculpe|disculpas|mis disculpas|perdona|perdone|perd[oó]n)\b\s*,?\s*/i, "").trim()
+  // Never apologize — Sarah has nothing to be sorry for. EN + ES variants.
+  r = r.replace(/\b(sorry about that|my apologies|I apologize|sorry for|my bad|mi error|mis disculpas|lo siento|disculpa(s)? por|perd[oó]n por|mil disculpas)\b/gi, "").replace(/\s{2,}/g, " ").trim()
   if (r !== beforeApology) trackViolation("apology", beforeApology.slice(0, 40))
   // Strip robotic customer-service openers — these make Sarah sound like a script,
   // not a real person texting from her phone. Belt-and-suspenders for the prompt rule.
   const beforeServiceOpener = r
   r = r.replace(/^(hey|hi|hello)?\s*[,!]?\s*(thanks for (reaching out|getting in touch|texting|your message|contacting us|messaging)|thank you for (reaching out|getting in touch|texting|your message|contacting us|messaging)|glad you (reached out|texted|got in touch|messaged)|happy to help( you)?( with that)?|great to hear from you|appreciate you (reaching out|texting|contacting us)|i'?d (be )?(happy|glad|love) to (help|assist)( you)?( with that)?)\s*[,.!]?\s*/i, "").trim()
   if (r !== beforeServiceOpener) trackViolation("service_opener", beforeServiceOpener.slice(0, 40))
-  // Strip standalone "Of course" / "Absolutely" / "Certainly" / "No problem" openers
-  r = r.replace(/^(of course|absolutely|certainly|no problem|for sure)\s*[,!.]?\s*/i, "").trim()
+  // Strip standalone "Of course" / "Absolutely" / "Certainly" / "No problem" / "No worries" openers
+  r = r.replace(/^(of course|absolutely|certainly|no problem|no worries|for sure|not a problem)\s*[,!.]?\s*/i, "").trim()
   // ── EXCITEMENT / REACTION STRIPPER ──
   // Real people don't react with awe to numbers. "Wow 50 loads thats a big project"
   // is the canonical AI-tell. Strip ALL of it: opening reactions and embedded
   // excitement clauses. This is the #1 rule customers/testers catch.
+  //
+  // EN: wow/nice/awesome/perfect/great/looks great/sounds great/works great/perfectly
+  // ES: perfecto/perfectamente/excelente/genial/maravilloso/estupendo/fantástico/magnífico
   const beforeExcitement = r
-  r = r.replace(/^(wow|whoa|woah|oh wow|nice|sweet|awesome|amazing|cool|sick|damn|dang|gotcha|hmm|haha|interesting|great|perfect|love it|love that|exciting|impressive)[\s,!.]+/i, "").trim()
+  r = r.replace(/^(wow|whoa|woah|oh wow|nice|sweet|awesome|amazing|cool|sick|damn|dang|gotcha|hmm|haha|interesting|great|perfect|perfectly|love it|love that|exciting|impressive|works great|looks great|sounds great|perfecto|perfectamente|excelente|genial|maravilloso|estupendo|fant[aá]stico|magn[ií]fico|suena\s+bien|suena\s+genial|suena\s+perfecto|suena\s+excelente|me\s+encanta)[\s,!.¡]+/i, "").trim()
   // Remove "thats a big/huge/large/major/serious project|job|order|one" anywhere in the message
   r = r.replace(/\b(that.?s|that is)\s+(a\s+)?(huge|big|large|major|serious|massive|hefty|sizeable|sizable|nice|solid|good\s*sized?|decent\s*sized?)\s*(project|job|order|one|haul|load|amount|quantity)\b[.,!]*\s*/gi, "").trim()
-  // Remove standalone "wow", "amazing", emoji-style reactions inside the message
-  r = r.replace(/\b(wow|whoa|woah|amazing|awesome|incredible|fantastic|impressive)[!,.]*\s*/gi, "").trim()
+  // Remove the Spanish equivalent: "es un proyecto (grande|enorme|considerable)"
+  r = r.replace(/\b(es|eso\s+es|esto\s+es)\s+un\s+(proyecto|trabajo|pedido|encargo|traslado|envío|env[ií]o)\s+(grande|enorme|considerable|importante|gigante|mayor)\b[.,!¡]*\s*/gi, "").trim()
+  // Remove standalone "wow", "amazing", "perfecto", "excelente" etc. inside the message
+  r = r.replace(/\b(wow|whoa|woah|amazing|awesome|incredible|fantastic|impressive|works\s+great|looks\s+great|sounds\s+great|perfecto|perfectamente|excelente|genial|maravilloso|estupendo|fant[aá]stico|magn[ií]fico)[!,.¡]*\s*/gi, "").trim()
   if (r !== beforeExcitement) trackViolation("excitement_reaction", beforeExcitement.slice(0, 40))
   // Strip ALL emoji — Sarah is texting from her phone but doesn't use emoji in this product
   r = r.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}]/gu, "").trim()
+  // ── WRONG-AGENT-NAME STRIPPER ──
+  // Sarah is attached to at most one agent per request (see
+  // currentRequestAgentFirstName). If her reply claims to be a DIFFERENT
+  // configured agent ("im John" when she's actually Micah for this
+  // conversation), strip the phrase. If no agent is attached (default
+  // number → Sarah from Fill Dirt Near Me), strip ALL configured agent
+  // names so she doesn't impersonate anyone. Reads from agentCache only —
+  // no network calls, safe inside sync validate().
+  {
+    const currentLower = currentRequestAgentFirstName?.toLowerCase() || null
+    const otherNames = (agentCache.agents || [])
+      .map(a => (a.name || "").split(/\s+/)[0].toLowerCase())
+      .filter(n => n && n !== currentLower)
+    if (otherNames.length > 0) {
+      // Unique + regex-escape each name
+      const uniq = Array.from(new Set(otherNames)).map(n => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      const alt = uniq.join("|")
+      // Strip "im John" / "i'm John" / "this is John" / "my name is John" — case-insensitive
+      const wrongNameRe = new RegExp(`\\b(?:i'?m|im|i\\s+am|this\\s+is|my\\s+name\\s+is|soy|me\\s+llamo)\\s+(?:${alt})\\b[,.!]?`, "gi")
+      const beforeWrongName = r
+      r = r.replace(wrongNameRe, "").replace(/\s{2,}/g, " ").trim()
+      if (r !== beforeWrongName) {
+        console.warn(`[validate] stripped wrong agent name — currentAgent=${currentRequestAgentFirstName || "none"} | before="${beforeWrongName.slice(0, 80)}"`)
+      }
+    }
+  }
   // Collapse double spaces / leading punctuation left behind by stripping
   r = r.replace(/^[,.!?\s]+/, "").replace(/\s{2,}/g, " ").trim()
   // ── ZIP/POSTAL/CITY ASK STRIPPER ──
@@ -1378,6 +1532,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // when the customer texted an agent number. Falls back to undefined when
   // there's no agent (default number → Sarah from Fill Dirt Near Me).
   const agentFirstName = agent ? (agent.name || "").split(/\s+/)[0] : undefined
+  // Expose the current agent to validate() so it can strip OTHER agents'
+  // names from Sarah's output. When agentFirstName is undefined (default
+  // number), validate() will strip ALL configured agent names.
+  currentRequestAgentFirstName = agentFirstName || null
 
   // ── RAPID-FIRE CONCATENATION ──
   // If customer sent multiple messages in quick succession WITHOUT Sarah replying,
@@ -1660,12 +1818,34 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // Same logic applies to "no" (false-positive on "no rush", "no problem",
   // "no tax right").
   const trimmedLower = lower.trim()
-  const isBareYes = /^(yes|yeah|yep|yup|si|dale|sounds good|perfect|works|absolutely|definitely)[.!?]?$/i.test(trimmedLower)
+  // Bare yes: add Spanish short confirmations. Kept tight on purpose — "ok"
+  // / "okay" / "sure" / "ya" / "va" are deliberately NOT listed because
+  // standalone they're commonly acknowledgements, not confirmations.
+  const isBareYes = /^(yes|yeah|yep|yup|si|sí|dale|vale|claro|listo|h[aá]zlo|sounds good|perfect|works|absolutely|definitely)[.!?]?$/i.test(trimmedLower)
   const isBareNo = /^(no|nah|nope|pass)[.!?]?$/i.test(trimmedLower)
+  // ── SPANISH CONFIRMATION PATTERNS ──
+  // Luis's conversation (2026-04-10/11) sat in QUOTING for 24h because every
+  // Spanish confirmation — "Ponla para hoy", "Si se puede", "La necesito
+  // hoy" — fell through the English-only isYes regex. The brain kept
+  // parroting the "Want me to get that scheduled" CTA forever and never
+  // routed to the createDispatchOrder() branch. This pattern handles the
+  // common Spanish confirmations explicitly so we're not solely relying on
+  // the Claude extractor (which can return null on error).
+  const isSpanishConfirm = /\b(agend[aá]l[oa]|prog?r[aá]m[aá]l[oa]|reserv[aá]l[oa]|confirm[aá]l[oa]|pon[gl][oa]?\s+para|ponla\s+para|ponlo\s+para|puedes\s+(agendar|programar|reservar|confirmar)|quiero\s+(agendar|confirmar|reservar)|si\s+se\s+puede|sí\s+se\s+puede|me\s+parece\s+bien|est[aá]\s+bien|estoy\s+list[oa]|estamos\s+list[oa]s|estoy\s+de\s+acuerdo|de\s+acuerdo|procede|adelante|qued[aá]mos|quedamos|h[aá]zlo\s+ya|h[aá]gaslo\s+ya|proced[ae])\b/i.test(lower)
+    || /\b(lo|la)\s+(quiero|necesito|tomo|acepto)\s+(hoy|ya|ahora|ma[nñ]ana|esta\s+semana|este\s+fin)\b/i.test(lower)
+  // Extractor-driven confirmation: the Haiku extractor reads the ENTIRE
+  // conversation and sets is_confirming_order when the customer is
+  // explicitly accepting. This handles Spanish paraphrasing, English slang,
+  // and any phrasing the regexes miss. Best-effort — falls through to
+  // regex patterns if extractor is null.
+  const extractorConfirm = extracted?.is_confirming_order === true
   const isYes = isBareYes
     || /\b(lets do it|let's do it|go ahead|book it|schedule it|set it up|do it|im down|i'm down|im in|i'm in|lets go|let's go|sure thing|sounds great|sounds perfect|that works|works for me|go for it|lock it in|lock me in|lock it|im ready|i'm ready|ready to (book|schedule|go|order|move|do)|ready to move forward|move forward|ill take it|i'll take it|sign me up|count me in|im sold|i'm sold|ok lets do|ok let's do|ok book|ok schedule|ok lets go|ok let's go|ok do it|yes please|yes lets|yes let's|yes book|yes schedule|yes do)\b/i.test(lower)
+    || isSpanishConfirm
+    || extractorConfirm
   const isNo = isBareNo
     || /\b(too much|too expensive|way too much|too high|cant afford|can't afford|out of my budget|too pricey|hard pass|no way|no thanks|no thank you|nah im good|nah i'm good|not right now|not interested|maybe later|ill pass|i'll pass|cancel that|forget it|nevermind|never mind|dont want|don't want|dont need|don't need|not gonna|im out|i'm out)\b/i.test(lower)
+    || /\b(muy\s+caro|demasiado\s+caro|muy\s+costoso|no\s+puedo\s+pagar|no\s+me\s+alcanza|no\s+gracias|no\s+quiero|no\s+lo\s+necesito|no\s+me\s+interesa|olv[ií]dalo|cancel[aá]l[oa])\b/i.test(lower)
   // Must be an actual cancellation REQUEST, not a question about cancellation policy
   // isCancel — must be a clear cancellation REQUEST. Removed "want my money"
   // because "I want my money's worth" is a negotiation, not a cancellation.
@@ -1703,8 +1883,17 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // plausible excuse for the confusion, (3) immediately use any data we
   // already have so we don't loop. NEVER let Sonnet handle this — it leaks
   // "I am an AI" or gives robotic denials.
-  const isAskingIfAI = /\b(are you (a |an )?(ai|bot|robot|machine|computer|artificial|automated|chatbot|chat bot)|is this (a |an )?(ai|bot|robot|machine|computer|automated|chatbot)|am i (talking|speaking|texting|communicating) (to|with) (a |an )?(ai|bot|robot|machine|computer|real|human|live|actual)|live (person|human|agent)|real (person|human|agent)|human or (ai|bot|robot)|ai or (human|person|real))\b/i.test(lower)
-    && !isYes && !isNo
+  //
+  // Two firing paths: (a) English/Spanish regex for unambiguous phrasings,
+  // (b) Haiku extractor's is_asking_question + question_topic="identity".
+  // The extractor catches paraphrases the regex misses — "¿eres humano?",
+  // "are you automated", "is there a real person typing" — but we keep the
+  // regex so the identity response still fires when the extractor is null.
+  const aiRegexHit = /\b(are you (a |an )?(ai|bot|robot|machine|computer|artificial|automated|chatbot|chat bot)|is this (a |an )?(ai|bot|robot|machine|computer|automated|chatbot)|am i (talking|speaking|texting|communicating) (to|with) (a |an )?(ai|bot|robot|machine|computer|real|human|live|actual)|live (person|human|agent)|real (person|human|agent)|human or (ai|bot|robot)|ai or (human|person|real))\b/i.test(lower)
+    || /\b(eres (una? )?(ia|bot|robot|m[aá]quina|computadora|humano|humana|persona real)|eres real|est[oa]y hablando con (una? )?(ia|bot|robot|humano|humana|persona real)|hay (una? )?persona (real )?(atendiendo|escribiendo|del otro lado)|hay alguien real|es (una? )?(ia|bot|robot))\b/i.test(lower)
+  const aiExtractorHit = extracted?.is_asking_question === true
+    && (extracted.question_topic === "identity" || extracted.question_topic === "ai" || extracted.question_topic === "bot" || extracted.question_topic === "human")
+  const isAskingIfAI = (aiRegexHit || aiExtractorHit) && !isYes && !isNo
   if (isAskingIfAI) {
     const firstName = (conv.customer_name || "").split(/\s+/)[0]
     const agentN = agentFirstName || "Sarah"
@@ -3305,5 +3494,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     try { await notifyAdmin(`BRAIN CRASH for ${phoneFallback}: ${crashMsg}`, `crash_${sms.messageSid}`) } catch {}
     try { await flagPendingAction(phoneFallback, "BRAIN_CRASH", crashMsg) } catch {}
     return fallback
+  } finally {
+    // Clear the request-scoped agent state so the next request in the same
+    // warm container starts clean (see validate() wrong-agent-name stripper).
+    currentRequestAgentFirstName = null
   }
 }
