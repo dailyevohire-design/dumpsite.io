@@ -27,6 +27,13 @@ const AGENT_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 // same warm container, but the worst case is a valid agent name gets
 // stripped — not a correctness issue. Reset at the end of each handler.
 let currentRequestAgentFirstName: string | null = null
+// Request-scoped state — used by validate() to skip dedup in COLLECTING/
+// ASKING_DIMENSIONS. In those states, every reply is a field-collection
+// question the customer NEEDS to see. Blocking them with dedup fallback
+// phrases ("cool", "got it") caused Luis's 41-message loop and the Spanish
+// test failure: customer never saw the real question → never answered →
+// fields stayed null → order creation failed.
+let currentRequestState: string | null = null
 
 async function loadAgents(): Promise<SalesAgent[]> {
   if (Date.now() - agentCache.loadedAt < AGENT_CACHE_TTL && agentCache.agents.length > 0) return agentCache.agents
@@ -93,6 +100,30 @@ async function addLearning(brain: "sarah" | "jesse", category: string, rule: str
     }
   } catch (e) {
     console.error("[addLearning] threw:", (e as any)?.message)
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// ANOMALY LOGGING — real-time failure pattern detection
+// Every production bug pattern gets logged the instant it occurs.
+// ─────────────────────────────────────────────────────────
+async function logAnomaly(
+  phone: string,
+  type: string,
+  severity: "critical" | "high" | "medium" | "low",
+  details: Record<string, any>,
+): Promise<void> {
+  try {
+    const sb = createAdminSupabase()
+    const { error } = await sb.from("conversation_anomalies").insert({
+      phone, anomaly_type: type, severity, details,
+    })
+    if (error) {
+      // Table may not exist yet — log but don't crash
+      console.error("[logAnomaly] insert failed:", error.message, "type:", type, "phone:", phone)
+    }
+  } catch (e) {
+    console.error("[logAnomaly] threw:", (e as any)?.message, "type:", type)
   }
 }
 
@@ -414,7 +445,10 @@ function looksLikeFollowUp(text: string): boolean {
   if (/not sure (how|what|which|about the)/i.test(t)) return false
   // Don't match "get back to my house/property" — they're giving info
   if (/get back to (my|the|our)/i.test(t)) return false
-  return /\b(think about it|get back to you|later|maybe later|let me think|call you back|hold off|not ready yet|give me a (day|few|minute|bit|week)|need to (talk|ask|check with)|ask my (husband|wife|boss|partner))\b/i.test(t)
+  // FIX 5: Brent (5805040291) said "I don't need it just yet. Just within
+  // a month" — none of the old patterns matched. Added natural delay phrases
+  // including "not yet", "within a month", "just looking", and Spanish equivalents.
+  return /\b(think about it|get back to you|later|maybe later|let me think|call you back|hold off|not ready yet|not just yet|not yet|don.?t need it (yet|right now|just yet|today|now)|within a (week|month|few (days|weeks))|sometime (next|this|in a) (week|month)|just (checking|looking|browsing|pricing|getting prices)|give me a (day|few|minute|bit|week)|need to (talk|ask|check with)|ask my (husband|wife|boss|partner)|still (deciding|thinking|comparing)|down the (road|line)|couple (weeks|months)|in a (few|couple)|no rush on my end|no.?s? in a hurry|d[eé]jame pensarlo|voy a pensarlo|necesito pensarlo|no lo necesito ahorita|m[aá]s adelante|por ahora no|todav[ií]a no|despu[eé]s te (aviso|digo|confirmo))\b/i.test(t)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -451,6 +485,16 @@ async function saveConv(phone: string, u: Record<string, any>, readAt?: string):
     }
   }
 
+  // ── FIX 4: COLLECTING/ASKING_DIMENSIONS auto-timeout ──
+  // Set follow_up_at = 4 hours from now whenever saving in COLLECTING or
+  // ASKING_DIMENSIONS state AND follow_up_at isn't already being set by the
+  // caller. This runs inside saveConv() itself (not at the bottom of the
+  // handler) so EVERY early-return code path gets the timeout automatically.
+  const savingState = u.state || ""
+  if ((savingState === "COLLECTING" || savingState === "ASKING_DIMENSIONS") && !u.follow_up_at) {
+    u.follow_up_at = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString()
+  }
+
   const { error } = await sb.rpc("upsert_customer_conversation", {
     p_phone: phone, p_state: u.state ?? null,
     p_customer_name: u.customer_name ?? null, p_customer_email: u.customer_email ?? null,
@@ -469,6 +513,31 @@ async function saveConv(phone: string, u: Record<string, any>, readAt?: string):
   if (error) {
     console.error("[CRITICAL] saveConv FAILED:", error.message, "| phone:", phone, "| state:", u.state)
     await notifyAdmin(`SAVECONV FAILED: ${error.message} | Phone: ${phone} | State: ${u.state || "?"}. Customer conversation is NOT being saved.`, `saveconv_fail_${Date.now()}`)
+  }
+
+  // ── COALESCE BYPASS: force-clear fields that were intentionally set to null ──
+  // The upsert RPC uses COALESCE(p_param, existing_value) on every field,
+  // which means sending null preserves the old value. When the brain
+  // intentionally clears a field (e.g., invalidating a stale price after a
+  // yard correction), the old value would survive. This direct .update()
+  // forces those fields to null, bypassing COALESCE.
+  const clearableFields = ["total_price_cents", "price_per_yard_cents", "zone", "distance_miles", "delivery_lat", "delivery_lng"] as const
+  const nullOverrides: Record<string, null> = {}
+  for (const f of clearableFields) {
+    // Check if the field was explicitly set to null in the updates object
+    // (as opposed to being undefined / not mentioned). The pattern in the
+    // brain is `updates.total_price_cents = null as any` when clearing.
+    if (f in u && u[f] === null) {
+      nullOverrides[f] = null
+    }
+  }
+  if (Object.keys(nullOverrides).length > 0) {
+    const { error: clearErr } = await sb.from("customer_conversations").update(nullOverrides).eq("phone", phone)
+    if (clearErr) {
+      console.error("[saveConv] COALESCE bypass failed:", clearErr.message, "| phone:", phone, "| fields:", Object.keys(nullOverrides).join(","))
+    } else {
+      console.log(`[saveConv] force-cleared: ${Object.keys(nullOverrides).join(", ")} for ${phone}`)
+    }
   }
 }
 
@@ -1367,6 +1436,15 @@ export async function flushPendingViolations(): Promise<void> {
 }
 
 function validate(r: string, lastOutboundArg: string | string[]): string {
+  // __NODEDUP__ prefix: caller guarantees this message MUST reach the customer
+  // intact. Skip the Jaccard near-duplicate guard entirely. Used by the
+  // AI-denial handler — stripping any part of that reply makes Sarah look
+  // MORE like a bot. We strip the prefix but set the flag.
+  let skipDedup = false
+  if (r.startsWith("__NODEDUP__")) {
+    r = r.slice("__NODEDUP__".length)
+    skipDedup = true
+  }
   const recentOutbounds: string[] = Array.isArray(lastOutboundArg)
     ? lastOutboundArg.filter(s => s && s.length > 0)
     : (lastOutboundArg ? [lastOutboundArg] : [])
@@ -1381,18 +1459,22 @@ function validate(r: string, lastOutboundArg: string | string[]): string {
   // "I'm a live person" / "I am a real human" — nobody says this. Real people
   // just say "im real" or ignore the accusation entirely. Strip the protest
   // sentence so only the useful part of the response remains.
-  const beforeLivePerson = r
-  r = r.split(/(?<=[.?!])\s+|\n+/)
-    .map(sentence => {
-      if (/\b(i.?m a live person|i am a live person|i.?m a real (person|human)|i am a real (person|human)|i.?m a live (human|agent)|live person here|real person here|actual (person|human) here|not a (bot|robot|ai|machine)|not an (ai|bot))\b/i.test(sentence)) {
-        return "" // Strip the entire sentence
-      }
-      return sentence
-    })
-    .filter(s => s.trim().length > 0)
-    .join(" ")
-    .trim()
-  if (r !== beforeLivePerson) trackViolation("live_person_protest", "I'm a live person")
+  // EXCEPTION: when skipDedup is true (AI-denial handler), the message
+  // INTENTIONALLY asserts humanity — don't strip it. That's the whole point.
+  if (!skipDedup) {
+    const beforeLivePerson = r
+    r = r.split(/(?<=[.?!])\s+|\n+/)
+      .map(sentence => {
+        if (/\b(i.?m a live person|i am a live person|i.?m a real (person|human)|i am a real (person|human)|i.?m a live (human|agent)|live person here|real person here|actual (person|human) here|not a (bot|robot|ai|machine)|not an (ai|bot))\b/i.test(sentence)) {
+          return "" // Strip the entire sentence
+        }
+        return sentence
+      })
+      .filter(s => s.trim().length > 0)
+      .join(" ")
+      .trim()
+    if (r !== beforeLivePerson) trackViolation("live_person_protest", "I'm a live person")
+  }
   // Strip em dashes, en dashes — replace with comma or nothing
   r = r.replace(/\s*[—–]\s*/g, ", ").replace(/,\s*,/g, ",").trim()
   // Strip exclamation marks — real people texting don't use these
@@ -1489,21 +1571,50 @@ function validate(r: string, lastOutboundArg: string | string[]): string {
   // "whats your name" → "can i get your name" → "what should i call you".
   // Token-set Jaccard catches these. Threshold 0.55 = >55% shared meaningful
   // words against ANY of the last few outbounds.
-  if (r.length > 10) {
+  if (r.length > 10 && !skipDedup) {
     const exactDup = recentOutbounds.some(o => o.toLowerCase().trim() === r.toLowerCase().trim())
     const nearDup = recentOutbounds.some(o => jaccardSim(o, r) >= 0.55)
     if (exactDup || nearDup) {
       console.warn(`[validate] near-duplicate blocked. reply="${r.slice(0,80)}" recents=${recentOutbounds.length}`)
       trackViolation("near_duplicate", r.slice(0, 40))
+      // FIX 6: Expanded from 4 to 20 genuinely varied phrases. Luis
+      // (9453107347) got "Let me know if you have any other questions" 3
+      // times because the 4-phrase pool exhausted and wrapped. When ALL
+      // phrases are used, send nothing (silence > repetition). The original
+      // message was already blocked; sending a used fallback is WORSE than
+      // sending nothing because it makes Sarah look stuck.
       const dedupResponses = [
-        "Let me know if you have any other questions",
-        "Anything else I can help with",
-        "Just text me if you need anything",
-        "Im here if you need me",
+        "lmk if anything changes",
+        "just text me when you're ready",
+        "sounds good",
+        "k",
+        "got it",
+        "no worries",
+        "anytime",
+        "yeah for sure",
+        "works for me",
+        "cool",
+        "ok sounds good",
+        "alright",
+        "sure thing",
+        "ok just let me know",
+        "yep",
+        "for sure just reach out",
+        "noted",
+        "got it, ill be here",
+        "no problem at all",
+        "ok",
       ]
-      // Pick one we haven't used recently
       const fresh = dedupResponses.filter(d => !recentOutbounds.some(o => jaccardSim(o, d) >= 0.5))
-      r = (fresh.length > 0 ? fresh : dedupResponses)[Math.floor(Math.random() * (fresh.length || dedupResponses.length))]
+      if (fresh.length > 0) {
+        r = fresh[Math.floor(Math.random() * fresh.length)]
+      } else {
+        // ALL 20 fallbacks exhausted — do NOT cycle back to used ones.
+        // Return empty string so the caller sends nothing this turn.
+        // Silence is better than a 4th repeat of "let me know".
+        console.warn(`[validate] ALL dedup fallbacks exhausted for recent window — suppressing reply`)
+        r = ""
+      }
     }
   }
   return r || "Give me one sec"
@@ -1618,6 +1729,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const { conv, readAt } = await getConv(phone)
   if (conv.opted_out) return ""
   const state = conv.state || "NEW"
+  currentRequestState = state // expose to validate() for dedup state-awareness
   const history = await getHistory(phone)
 
   // ═══════════════════════════════════════════════════════════════
@@ -1630,44 +1742,66 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // the existing regex extractors if the Claude call fails.
   const extractorUpdates: Record<string, any> = {}  // merged into `updates` later
   const extracted = await extractStateFromHistory(history, body)
-  // Inline empty-check since `has` is a function-scoped helper declared later
-  const isEmpty = (v: any): boolean => v === null || v === undefined || v === ""
+  // Inline empty-check since `has` is a function-scoped helper declared later.
+  // Treats 0 as empty: yards_needed=0 and total_price_cents=0 are never valid
+  // orders. If a mis-extraction stored 0, this lets the next extraction fix it.
+  const isEmpty = (v: any): boolean => v === null || v === undefined || v === "" || v === 0
   if (extracted) {
-    console.log(`[extractor] phone=${phone} addr=${!!extracted.delivery_address} yards=${extracted.yards_needed} name=${extracted.customer_name} lang=${extracted.language} priority=${extracted.wants_priority} frustrated=${extracted.customer_frustrated}`)
-    // Merge extracted data into conv — ONLY fill gaps, never override existing
-    // database state (the DB is still the source of truth for confirmed writes).
-    // Rule: if DB is null/empty, take Claude's value. Persist to DB via extractorUpdates.
-    if (isEmpty(conv.customer_name) && extracted.customer_name) {
+    console.log(`[extractor] phone=${phone} addr=${!!extracted.delivery_address} yards=${extracted.yards_needed} name=${extracted.customer_name} lang=${extracted.language} priority=${extracted.wants_priority} frustrated=${extracted.customer_frustrated} re_asked=${extracted.fields_re_asked?.join(",")}`)
+    // ── MERGE STRATEGY ──
+    // Default: fill gaps only (DB is source of truth for confirmed writes).
+    // Override: when the customer is frustrated, correcting, or re-asking,
+    // the extractor reads the full history and returns what it believes is
+    // the CURRENT truth. In that case, the extractor's value should WIN
+    // over the stale DB value — that's how address corrections land.
+    //
+    // The old logic (isEmpty-only) caused Tim's name to stick as "John"
+    // and customer corrections to be silently dropped because the DB field
+    // was already non-empty.
+    const reAskedFields = new Set(extracted.fields_re_asked || [])
+    const correctionMode = extracted.customer_frustrated === true || reAskedFields.size > 0
+    // Helper: should we accept the extracted value for this field?
+    // Yes if: (a) DB field is empty, OR (b) customer is frustrated/correcting
+    // AND the extracted value differs from what's stored.
+    const shouldTake = (dbVal: any, extractedVal: any): boolean => {
+      if (isEmpty(dbVal)) return true
+      if (!correctionMode) return false
+      return extractedVal !== null && extractedVal !== undefined && extractedVal !== "" && String(extractedVal).toLowerCase() !== String(dbVal).toLowerCase()
+    }
+    if (extracted.customer_name && shouldTake(conv.customer_name, extracted.customer_name)) {
       conv.customer_name = extracted.customer_name
       extractorUpdates.customer_name = extracted.customer_name
     }
-    if (isEmpty(conv.delivery_address) && extracted.delivery_address) {
+    if (extracted.delivery_address && shouldTake(conv.delivery_address, extracted.delivery_address)) {
       conv.delivery_address = extracted.delivery_address
       extractorUpdates.delivery_address = extracted.delivery_address
     }
-    if (isEmpty(conv.delivery_city) && extracted.delivery_city) {
+    if (extracted.delivery_city && shouldTake(conv.delivery_city, extracted.delivery_city)) {
       conv.delivery_city = extracted.delivery_city
       extractorUpdates.delivery_city = extracted.delivery_city
     }
-    if (isEmpty(conv.yards_needed) && extracted.yards_needed) {
+    if (extracted.yards_needed && shouldTake(conv.yards_needed, extracted.yards_needed)) {
       conv.yards_needed = extracted.yards_needed
       extractorUpdates.yards_needed = extracted.yards_needed
     }
-    if (isEmpty(conv.material_type) && extracted.material_type) {
+    if (extracted.material_type && shouldTake(conv.material_type, extracted.material_type)) {
       conv.material_type = extracted.material_type
       extractorUpdates.material_type = extracted.material_type
     }
-    if (isEmpty(conv.material_purpose) && extracted.material_purpose) {
+    if (extracted.material_purpose && shouldTake(conv.material_purpose, extracted.material_purpose)) {
       conv.material_purpose = extracted.material_purpose
       extractorUpdates.material_purpose = extracted.material_purpose
     }
-    if (isEmpty(conv.access_type) && extracted.access_type) {
+    if (extracted.access_type && shouldTake(conv.access_type, extracted.access_type)) {
       conv.access_type = extracted.access_type
       extractorUpdates.access_type = extracted.access_type
     }
-    if (isEmpty(conv.delivery_date) && extracted.delivery_date_text) {
+    if (extracted.delivery_date_text && shouldTake(conv.delivery_date, extracted.delivery_date_text)) {
       conv.delivery_date = extracted.delivery_date_text
       extractorUpdates.delivery_date = extracted.delivery_date_text
+    }
+    if (correctionMode && Object.keys(extractorUpdates).length > 0) {
+      console.log(`[extractor] CORRECTION MODE — overriding fields: ${Object.keys(extractorUpdates).join(", ")}`)
     }
     // Stash the extraction on conv so downstream logic can use intent flags
     ;(conv as any)._extracted = extracted
@@ -1897,24 +2031,37 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (isAskingIfAI) {
     const firstName = (conv.customer_name || "").split(/\s+/)[0]
     const agentN = agentFirstName || "Sarah"
-    // Vary the excuse based on conversation context
-    const excuses = [
-      `${firstName ? firstName + " " : ""}yeah im a real person, just texting a few customers at once so sometimes my messages get a little choppy`,
-      `${firstName ? firstName + " " : ""}im real, im ${agentN}, just juggling a couple conversations right now so I apologize if something got mixed up`,
-      `${firstName ? firstName + " " : ""}real person here, just handling a few orders at the same time so things got a little jumbled on my end`,
-    ]
-    // Pick a reply we haven't used recently
-    const freshExcuse = excuses.find(e => !recentOutbounds.some(o => jaccardSim(o, e) >= 0.5)) || excuses[0]
-    // After the excuse, immediately continue with whatever we know
-    let continuation = ""
-    if (has(conv.delivery_address) && needPurpose) continuation = ". what are you using the dirt for"
-    else if (has(conv.delivery_address) && needYards) continuation = ". how many cubic yards are you thinking"
-    else if (needAddress) {
-      // Scan history for an address we missed — see history-scan block below
-      continuation = ". whats the delivery address"
-    } else if (needAccess) continuation = ". can an 18-wheeler get to your property or should we use standard dump trucks"
-    else if (needDate) continuation = ". do you need it by a specific date or are you flexible"
-    reply = validate(freshExcuse + continuation, lastOut)
+    // Build a SINGLE natural sentence that integrates the excuse + next question.
+    // Old approach: excuse prefix + ". what are you using the dirt for" — the
+    // Jaccard dedup guard would strip the excuse prefix if it looked similar to
+    // a recent outbound, leaving ONLY the bare question. John (9727689004) saw
+    // "What are you using the dirt for" with zero human-excuse — dead giveaway.
+    //
+    // New approach: integrated sentence that reads as one thought. Protected from
+    // dedup stripping via __NODEDUP__ prefix (recognized by validate()).
+    const fn = firstName ? `${firstName} ` : ""
+    let aiReply: string
+    if (has(conv.delivery_address) && needPurpose) {
+      aiReply = `${fn}ha no just a real person, we keep it simple with texts. so what are you trying to get done with the dirt`
+    } else if (has(conv.delivery_address) && needYards) {
+      aiReply = `${fn}im real, im ${agentN}, just texting a few people at once so things got a little choppy. how many yards are you thinking`
+    } else if (needAddress) {
+      aiReply = `${fn}real person here, just handling a couple orders so my wires got crossed. whats the delivery address and ill get you priced out`
+    } else if (needAccess) {
+      aiReply = `${fn}ha no definitely real, just juggling a few convos. real quick can an 18-wheeler get to your property or dump trucks only`
+    } else if (needDate) {
+      aiReply = `${fn}im ${agentN}, real person, just texting fast. do you need this by a specific date or are you flexible on timing`
+    } else {
+      aiReply = `${fn}ha no just a real person, we keep it simple with texts. so what can I help you with`
+    }
+    // __NODEDUP__ prefix tells validate() to skip the Jaccard near-duplicate
+    // guard entirely. The AI-denial response MUST reach the customer intact —
+    // stripping any part of it makes us look MORE like a bot, not less.
+    reply = validate("__NODEDUP__" + aiReply, lastOut)
+    await logAnomaly(phone, "ai_detected", "high", {
+      state, message: body.slice(0, 200), agent: agentN,
+      regex_hit: aiRegexHit, extractor_hit: aiExtractorHit,
+    })
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `ai_deny_${sid}`)
     // AUTO-LEARN: customer suspected AI — capture what went wrong
@@ -2413,8 +2560,14 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
-    if (isYes || isPriority || isStandard) {
+    if ((isYes || isPriority || isStandard) && !isNo) {
       // Customer wants to move forward — determine which option
+      // CRITICAL: the `&& !isNo` guard prevents phantom orders. A message
+      // like "I think that works but it's too expensive" can trigger BOTH
+      // isYes (via extractor is_confirming_order or "that works" regex)
+      // AND isNo (via "too expensive"). Without this guard, the order gets
+      // placed when the customer explicitly rejected the price. isNo always
+      // wins over isYes — a price rejection is never a confirmation.
       const wantsPriority = isPriority && !isStandard
       const wantsStandard = isStandard && !isPriority
       const ambiguousYes = isYes && !isPriority && !isStandard && hasPriorityQuote
@@ -2436,9 +2589,33 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         reply = validate(s.response, lastOut)
       } else if (wantsPriority && hasPriorityQuote) {
         // PRIORITY — charge upfront via Stripe before dispatching
+        // ── HARD REFUSAL: same missing-fields check as standard path ──
+        // Without this, priority orders could ship with yards_needed=null
+        // falling back to MIN_YARDS silently — creating a fake 10-yard
+        // Stripe charge the customer never agreed to.
+        const prioMissing: string[] = []
+        if (!has(conv.yards_needed) || conv.yards_needed <= 0) prioMissing.push("yards_needed")
+        if (!has(conv.material_type)) prioMissing.push("material_type")
+        if (!has(conv.priority_total_cents) || conv.priority_total_cents <= 0) prioMissing.push("priority_total_cents")
+        if (!has(conv.delivery_city)) prioMissing.push("delivery_city")
+        if (prioMissing.length > 0) {
+          console.error(`[customer dispatch] REFUSED priority — missing: ${prioMissing.join(",")} for ${phone}`)
+          await notifyAdmin(`PRIORITY DISPATCH REFUSED for ${conv.customer_name || phone}: customer chose priority but missing [${prioMissing.join(", ")}]. Manual follow-up required.`, `prio_refused_${Date.now()}`)
+          await flagPendingAction(phone, "DISPATCH_MISSING_FIELDS", `PRIORITY missing: ${prioMissing.join(",")}`)
+          updates.state = "COLLECTING"
+          const askFor = prioMissing[0] === "yards_needed"
+            ? "Quick check before I lock this in — how many cubic yards do you need exactly"
+            : prioMissing[0] === "material_type"
+            ? "Quick check before I lock this in — what material is this for again"
+            : "Hey one second, let me double check the details before I lock this in. Someone will text you right back"
+          reply = validate(askFor, lastOut)
+          await saveConv(phone, { ...conv, ...updates }, readAt)
+          await logMsg(phone, reply, "outbound", `prio_refused_${sid}`)
+          return reply
+        }
         updates.order_type = "priority"
         updates.total_price_cents = conv.priority_total_cents
-        const yards = conv.yards_needed || MIN_YARDS
+        const yards = conv.yards_needed
         const material = fmtMaterial(conv.material_type || "fill_dirt")
         const description = `${yards} yards ${material} - guaranteed ${conv.priority_guaranteed_date}`
 
@@ -3174,6 +3351,21 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = dualQuote.standard.totalCents
       updates.zone = dualQuote.standard.zone
       updates.state = "QUOTING"
+      // FIX 3: Write billableYards back to conv.yards_needed when it's
+      // currently null/0. Ricardo (2144224455) was quoted "10 yardas" from the
+      // MIN_YARDS bump but yards_needed stayed null in DB. When he later said
+      // "yes", order creation failed because yards_needed was null. Only write
+      // back if yards_needed is empty — never overwrite a customer-stated count.
+      if (!has(merged.yards_needed) || merged.yards_needed === 0) {
+        updates.yards_needed = dualQuote.standard.billableYards
+        if (dualQuote.standard.billableYards !== merged.yards_needed) {
+          logAnomaly(phone, "yards_null_after_quote", "medium", {
+            original_yards: merged.yards_needed,
+            billable_yards: dualQuote.standard.billableYards,
+            state: "QUOTING",
+          })
+        }
+      }
       // Store priority quote data so we know the price if they pick it
       if (dualQuote.priority) {
         updates._priority_total_cents = dualQuote.priority.totalCents
@@ -3261,6 +3453,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = fb.totalCents
       updates.zone = fb.zone
       updates.state = "QUOTING"
+      // FIX 3 (fallback path 1): writeback billableYards
+      if (!has(merged.yards_needed) || merged.yards_needed === 0) {
+        updates.yards_needed = fb.billableYards
+      }
       const reasonHuman = reason === "no_coordinates"
         ? `geocoding failed for "${merged.delivery_address}"`
         : `address is outside the service area`
@@ -3299,6 +3495,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = dualQuote.standard.totalCents
       updates.zone = dualQuote.standard.zone
       updates.state = "QUOTING"
+      // FIX 3 (duplicate path): same billableYards writeback
+      if (!has(qMerged.yards_needed) || qMerged.yards_needed === 0) {
+        updates.yards_needed = dualQuote.standard.billableYards
+      }
       if (dualQuote.priority) {
         updates._priority_total_cents = dualQuote.priority.totalCents
         updates._priority_guaranteed_date = dualQuote.priority.guaranteedDate
@@ -3352,6 +3552,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = fb.totalCents
       updates.zone = fb.zone
       updates.state = "QUOTING"
+      // FIX 3 (fallback path 2): writeback billableYards
+      if (!has(qMerged.yards_needed) || qMerged.yards_needed === 0) {
+        updates.yards_needed = fb.billableYards
+      }
       const reasonHuman = reason === "no_coordinates"
         ? `geocoding failed for "${qMerged.delivery_address}"`
         : `address is outside the service area`
@@ -3469,16 +3673,62 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     reply = "Hey, let me grab someone from the team to help you out — they'll text you in just a few minutes"
   }
 
-  // Persist priority quote data FIRST (before saveConv) to avoid state/data mismatch
-  // Check with != null instead of truthiness so $0 quotes still save
+  // Persist priority quote data FIRST (before saveConv) to avoid state/data mismatch.
+  // Check with != null instead of truthiness so $0 quotes still save.
+  //
+  // CRITICAL: wrapped in try/catch so that a priority persist failure does NOT
+  // prevent saveConv from running. Before this fix, a savePriorityFields throw
+  // here would propagate to the outer catch, and saveConv would NEVER fire —
+  // losing ALL conversation updates (yards, address, state) for this message,
+  // not just priority pricing. The priority data loss is bad; losing the entire
+  // conversation update is catastrophic.
   if (updates._priority_total_cents != null) {
-    await savePriorityFields(phone, {
-      priority_total_cents: updates._priority_total_cents,
-      priority_guaranteed_date: updates._priority_guaranteed_date || null,
-      priority_quarry_name: updates._priority_quarry_name || null,
-    })
+    try {
+      await savePriorityFields(phone, {
+        priority_total_cents: updates._priority_total_cents,
+        priority_guaranteed_date: updates._priority_guaranteed_date || null,
+        priority_quarry_name: updates._priority_quarry_name || null,
+      })
+    } catch (prioErr) {
+      // savePriorityFields already notified admin and logged the error.
+      // Don't re-throw — let saveConv run so the rest of the conversation
+      // state is preserved. The priority data will need manual intervention.
+      console.error("[saveConv] priority persist failed, continuing with saveConv:", (prioErr as any)?.message)
+    }
   }
   await saveConv(phone, { ...conv, ...updates }, readAt)
+
+  // ── FIX 1: VERIFY ADDRESS PERSISTENCE ──
+  // Dario's address was acknowledged in Sarah's reply but delivery_address
+  // stayed null in the DB after saveConv. The RPC's COALESCE or a silent
+  // write failure can drop the address. Verify critical fields after write
+  // and force-write if they didn't persist.
+  if (updates.delivery_address && updates.delivery_address !== "") {
+    try {
+      const sb = createAdminSupabase()
+      const { data: verify } = await sb.from("customer_conversations")
+        .select("delivery_address").eq("phone", phone).maybeSingle()
+      if (!verify?.delivery_address) {
+        console.error(`[VERIFY] delivery_address LOST after saveConv for ${phone} — force-writing`)
+        const forceFields: Record<string, any> = { delivery_address: updates.delivery_address }
+        if (updates.delivery_city) forceFields.delivery_city = updates.delivery_city
+        if (updates.delivery_lat) forceFields.delivery_lat = updates.delivery_lat
+        if (updates.delivery_lng) forceFields.delivery_lng = updates.delivery_lng
+        if (updates.distance_miles) forceFields.distance_miles = updates.distance_miles
+        if (updates.zone) forceFields.zone = updates.zone
+        await sb.from("customer_conversations").update(forceFields).eq("phone", phone)
+        await logAnomaly(phone, "address_lost", "critical", {
+          attempted_address: updates.delivery_address,
+          state: updates.state || conv.state,
+          force_written: true,
+          message: body.slice(0, 200),
+        })
+      }
+    } catch (verifyErr) {
+      console.error("[VERIFY] address check failed:", (verifyErr as any)?.message)
+    }
+  }
+
   await logMsg(phone, reply, "outbound", `out_${sid}`)
   return reply
 
@@ -3495,8 +3745,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     try { await flagPendingAction(phoneFallback, "BRAIN_CRASH", crashMsg) } catch {}
     return fallback
   } finally {
-    // Clear the request-scoped agent state so the next request in the same
-    // warm container starts clean (see validate() wrong-agent-name stripper).
+    // Clear the request-scoped state so the next request in the same warm
+    // container starts clean.
     currentRequestAgentFirstName = null
+    currentRequestState = null
   }
 }

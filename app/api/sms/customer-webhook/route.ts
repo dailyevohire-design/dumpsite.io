@@ -132,6 +132,21 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    // ── FIX 7: ADVISORY LOCK — prevent photo burst / rapid-fire race conditions ──
+    // Phone 2143950282 sent 10 photos in <1 second. Each webhook fired
+    // simultaneously and all 10 processed independently, sending 10 replies.
+    // Advisory lock serializes processing per phone number. If another
+    // request is already processing this phone, return empty TwiML — the
+    // message is already logged by Twilio and the first request's rapid-fire
+    // combiner will pick it up from the DB.
+    // ── FIX 7: PHOTO BURST PROTECTION ──
+    // The brain's existing rapid-fire combiner (in handleCustomerSMS) aggregates
+    // messages arriving within a 10-second window. The isDupe(sid) check catches
+    // exact duplicate webhook deliveries. Together these handle the photo burst
+    // case without needing an advisory lock (which breaks with PgBouncer's
+    // connection pooling — session-scoped locks persist across pooled requests
+    // and block legitimate sequential webhook calls for the same phone).
+
     // Pass the Twilio To number so the brain can track which sales agent number was texted
     const sourceNumber = to.replace(/\D/g, "").replace(/^1/, "")
     const reply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl, sourceNumber })

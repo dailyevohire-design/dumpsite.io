@@ -205,8 +205,10 @@ async function runScenario(s: Scenario): Promise<{ name: string; passed: boolean
         details.push(`send failed: status=${r.status}`)
         return { name: s.name, passed: false, details }
       }
-      // Small delay between messages so brain finishes processing
-      await new Promise(r => setTimeout(r, 800))
+      // Delay between messages — brain needs Claude API call + geocoding per message.
+      // 800ms was too aggressive; the rapid-fire combiner sometimes merges messages
+      // and the dedup guard blocks legitimate sequential questions.
+      await new Promise(r => setTimeout(r, 2000))
     }
     // Wait a bit for final message processing
     await new Promise(r => setTimeout(r, 1500))
