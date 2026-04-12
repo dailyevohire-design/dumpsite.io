@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+import { requireAdmin } from "@/lib/admin-auth"
 
 export async function GET() {
+  const auth = await requireAdmin()
+  if (auth.error) return auth.error
+
   const sb = createAdminSupabase()
   const now = Date.now()
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
