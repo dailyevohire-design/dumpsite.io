@@ -1,35 +1,43 @@
 "use client"
 import { useState, useEffect, useRef, useCallback } from "react"
+import { createBrowserSupabase } from "@/lib/supabase"
 
 // ═══════════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════════
 interface CommandData {
   timestamp: string
+  error?: string
   revenue: {
     today: { orders: number; completed: number; yards: number; revenue: number; driverPay: number; margin: number }
     week: { orders: number; completed: number; yards: number; revenue: number; driverPay: number; margin: number }
     month: { orders: number; completed: number; revenue: number; driverPay: number; margin: number }
-  }
-  financial: { pipelineCents: number; outstandingCents: number; collectedCents: number; unpaidCustomerCents: number; pendingDriverPayCents: number }
-  funnel: { leads: number; quoted: number; ordered: number; delivered: number; paid: number }
+  } | null
+  financial: { pipelineCents: number; outstandingCents: number; collectedCents: number; unpaidCustomerCents: number; pendingDriverPayCents: number } | null
+  funnel: { leads: number; quoted: number; ordered: number; delivered: number; paid: number } | null
+  stateFunnel: Record<string, number> | null
   alerts: {
     staleOrders: number; unpaidCustomers: number; unpaidCustomerTotal: number
     stuckDriverConvs: number; stuckCustomerConvs: number; driverNoShows: number
     pendingDriverPayments: number; pendingDriverPayTotal: number
-  }
-  activeConversations: { drivers: any[]; customers: any[] }
-  agentPipeline: AgentPipeline[]
-  unassignedLeads: number
-  salesAgents: { id: string; name: string }[]
-  cityIntel: CityData[]
-  dailyTrend: { date: string; orders: number; completed: number; revenue: number; margin: number }[]
-  brainHealth: { crashesThisWeek: number; pendingActionsByType: Record<string, number>; totalPendingActions: number }
-  staleOrders: any[]; unpaidCustomers: any[]; stuckDrivers: any[]; stuckCustomers: any[]; noShows: any[]
-  recentSms: any[]; recentCustSms: any[]
-  driverCount: number
-  pendingActions: PendingAction[]
-  mapPins: MapPin[]
+  } | null
+  activeConversations: { drivers: any[]; customers: any[] } | null
+  agentPipeline: AgentPipeline[] | null
+  unassignedLeads: number | null
+  salesAgents: { id: string; name: string }[] | null
+  cityIntel: CityData[] | null
+  dailyTrend: { date: string; orders: number; completed: number; revenue: number; margin: number }[] | null
+  brainHealth: { crashesThisWeek: number; pendingActionsByType: Record<string, number>; totalPendingActions: number } | null
+  staleOrders: any[] | null
+  unpaidCustomers: any[] | null
+  stuckDrivers: any[] | null
+  stuckCustomers: any[] | null
+  noShows: any[] | null
+  recentSms: any[] | null
+  recentCustSms: any[] | null
+  driverCount: number | null
+  pendingActions: PendingAction[] | null
+  mapPins: MapPin[] | null
 }
 
 interface MapPin {
@@ -58,777 +66,660 @@ interface PendingAction {
 // ═══════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════
-const fmt$ = (cents: number) => "$" + (cents / 100).toLocaleString("en-US", { maximumFractionDigits: 0 })
-const fmtK = (cents: number) => {
-  const d = cents / 100
-  if (d >= 10000) return "$" + (d / 1000).toFixed(0) + "k"
-  if (d >= 1000) return "$" + (d / 1000).toFixed(1) + "k"
-  return "$" + d.toFixed(0)
+const fmt$ = (v: number) => "$" + v.toLocaleString("en-US", { maximumFractionDigits: 0 })
+const fmtCents = (cents: number | null | undefined) => {
+  if (!cents && cents !== 0) return "$0"
+  return "$" + (cents / 100).toLocaleString("en-US", { maximumFractionDigits: 0 })
 }
-const fmtPct = (n: number) => n + "%"
-const ago = (ts: string) => {
+
+const ago = (ts: string | null | undefined) => {
+  if (!ts) return "unknown"
   const m = Math.round((Date.now() - new Date(ts).getTime()) / 60000)
   if (m < 1) return "now"
-  if (m < 60) return m + "m"
-  if (m < 1440) return Math.round(m / 60) + "h"
-  return Math.round(m / 1440) + "d"
+  if (m < 60) return m + "m ago"
+  if (m < 1440) return Math.round(m / 60) + "h ago"
+  return Math.round(m / 1440) + "d ago"
 }
 
-const PENDING_TYPE_COLOR: Record<string, string> = {
-  MANUAL_QUOTE: "#f59e0b", MANUAL_PRIORITY: "#f97316", URGENT_STRIPE: "#ef4444",
-  DISPATCH_FAILED: "#ef4444", BRAIN_CRASH: "#dc2626", MANUAL_CITY: "#eab308",
-  NO_DRIVERS: "#eab308", DISPATCH_MISSING_FIELDS: "#f97316",
+const STATE_LABELS: Record<string, string> = {
+  NEW: "New Lead", COLLECTING: "Collecting", ASKING_DIMENSIONS: "Collecting",
+  QUOTING: "Qualifying", FOLLOW_UP: "Follow Up", ORDER_PLACED: "Placed",
+  AWAITING_PAYMENT: "Awaiting Pay", AWAITING_PRIORITY_PAYMENT: "Awaiting Pay",
+  DELIVERED: "Complete", CLOSED: "Lost", OUT_OF_AREA: "Lost", CANCELED: "Lost",
 }
 
-const STATE_COLOR: Record<string, string> = {
-  NEW: "#6b7280", COLLECTING: "#3b82f6", ASKING_DIMENSIONS: "#3b82f6",
-  QUOTING: "#f59e0b", FOLLOW_UP: "#eab308", ORDER_PLACED: "#10b981",
-  AWAITING_PAYMENT: "#f97316", AWAITING_PRIORITY_PAYMENT: "#f97316",
-  DELIVERED: "#10b981", CLOSED: "#6b7280", OUT_OF_AREA: "#6b7280",
+const STATE_COLORS: Record<string, string> = {
+  NEW: "bg-gray-600", COLLECTING: "bg-blue-600", ASKING_DIMENSIONS: "bg-blue-600",
+  QUOTING: "bg-amber-600", FOLLOW_UP: "bg-yellow-600", ORDER_PLACED: "bg-emerald-600",
+  AWAITING_PAYMENT: "bg-orange-600", AWAITING_PRIORITY_PAYMENT: "bg-orange-600",
+  DELIVERED: "bg-green-600", CLOSED: "bg-gray-700", OUT_OF_AREA: "bg-gray-700", CANCELED: "bg-gray-700",
 }
+
+const FUNNEL_STAGES = [
+  { key: "NEW", label: "New Lead", states: ["NEW"] },
+  { key: "COLLECTING", label: "Collecting Info", states: ["COLLECTING", "ASKING_DIMENSIONS"] },
+  { key: "QUOTING", label: "Quoted", states: ["QUOTING"] },
+  { key: "FOLLOW_UP", label: "Follow Up", states: ["FOLLOW_UP"] },
+  { key: "ORDER_PLACED", label: "Order Placed", states: ["ORDER_PLACED", "AWAITING_PAYMENT", "AWAITING_PRIORITY_PAYMENT"] },
+  { key: "DELIVERED", label: "Completed", states: ["DELIVERED"] },
+  { key: "LOST", label: "Lost", states: ["CLOSED", "OUT_OF_AREA", "CANCELED"] },
+]
 
 // ═══════════════════════════════════════════════════════
-// MINI COMPONENTS
+// SKELETON COMPONENTS
 // ═══════════════════════════════════════════════════════
-function KPI({ label, value, sub, color, alert }: { label: string; value: string; sub?: string; color?: string; alert?: boolean }) {
+function SkeletonCard() {
   return (
-    <div style={{ background: alert ? "#1a0a0a" : "#111", border: `1px solid ${alert ? "#ff4444" : "#222"}`, borderRadius: 8, padding: "14px 16px", minWidth: 130 }}>
-      <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
-      <div style={{ fontSize: 24, fontWeight: 700, color: color || "#fff", marginTop: 4 }}>{value}</div>
-      {sub && <div style={{ fontSize: 11, color: "#666", marginTop: 2 }}>{sub}</div>}
+    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 animate-pulse">
+      <div className="h-3 w-20 bg-gray-800 rounded mb-3" />
+      <div className="h-7 w-24 bg-gray-800 rounded mb-2" />
+      <div className="h-3 w-16 bg-gray-800 rounded" />
     </div>
   )
 }
 
-function FunnelBar({ label, count, total, color }: { label: string; count: number; total: number; color: string }) {
-  const pct = total > 0 ? Math.round((count / total) * 100) : 0
+function SkeletonList({ rows = 5 }: { rows?: number }) {
   return (
-    <div style={{ flex: 1 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#aaa", marginBottom: 4 }}>
-        <span>{label}</span><span style={{ color }}>{count} ({pct}%)</span>
-      </div>
-      <div style={{ height: 6, background: "#222", borderRadius: 3, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 3, transition: "width 0.5s" }} />
-      </div>
-    </div>
-  )
-}
-
-function Sparkline({ data, dataKey, color, height = 40 }: { data: any[]; dataKey: string; color: string; height?: number }) {
-  if (!data || data.length < 2) return null
-  const values = data.map(d => d[dataKey] || 0)
-  const max = Math.max(...values, 1)
-  const min = Math.min(...values, 0)
-  const range = max - min || 1
-  const w = 200
-  const points = values.map((v, i) => `${(i / (values.length - 1)) * w},${height - ((v - min) / range) * (height - 4) - 2}`).join(" ")
-  return (
-    <svg width={w} height={height} style={{ display: "block" }}>
-      <polyline points={points} fill="none" stroke={color} strokeWidth={1.5} />
-      {/* Last point dot */}
-      {values.length > 0 && (
-        <circle cx={w} cy={height - ((values[values.length - 1] - min) / range) * (height - 4) - 2} r={3} fill={color} />
-      )}
-    </svg>
-  )
-}
-
-function AgentRow({ a }: { a: AgentPipeline }) {
-  return (
-    <tr style={{ borderBottom: "1px solid #1a1a1a" }}>
-      <td style={{ padding: "10px 12px", fontWeight: 600 }}>{a.name}</td>
-      <td style={{ padding: "10px 8px", textAlign: "center" }}>{a.totalLeads}</td>
-      <td style={{ padding: "10px 8px", textAlign: "center" }}>{a.activeLeads}</td>
-      <td style={{ padding: "10px 8px", textAlign: "right", color: "#f59e0b" }}>{fmtK(a.quotedCents)}</td>
-      <td style={{ padding: "10px 8px", textAlign: "center" }}>{a.orderedCount}</td>
-      <td style={{ padding: "10px 8px", textAlign: "right", color: "#10b981" }}>{fmtK(a.orderedCents)}</td>
-      <td style={{ padding: "10px 8px", textAlign: "center" }}>{a.completedCount}</td>
-      <td style={{ padding: "10px 8px", textAlign: "right", color: "#22c55e" }}>{fmtK(a.completedCents)}</td>
-      <td style={{ padding: "10px 8px", textAlign: "center" }}>{a.paidCount}</td>
-      <td style={{ padding: "10px 8px", textAlign: "right", color: "#4ade80", fontWeight: 600 }}>{fmtK(a.paidCents)}</td>
-      <td style={{ padding: "10px 8px", textAlign: "center", color: a.closeRate >= 30 ? "#10b981" : a.closeRate >= 15 ? "#f59e0b" : "#ef4444" }}>{fmtPct(a.closeRate)}</td>
-      <td style={{ padding: "10px 8px", textAlign: "right", color: "#a78bfa" }}>{fmtK(a.commissionCents)}</td>
-    </tr>
-  )
-}
-
-function CityRow({ c }: { c: CityData }) {
-  return (
-    <tr style={{ borderBottom: "1px solid #1a1a1a" }}>
-      <td style={{ padding: "8px 12px", fontWeight: 500 }}>{c.name}</td>
-      <td style={{ padding: "8px 8px", textAlign: "center" }}>{c.orders}</td>
-      <td style={{ padding: "8px 8px", textAlign: "center" }}>{c.completed}</td>
-      <td style={{ padding: "8px 8px", textAlign: "center" }}>{c.dispatching > 0 ? <span style={{ color: "#f59e0b" }}>{c.dispatching}</span> : "0"}</td>
-      <td style={{ padding: "8px 8px", textAlign: "right" }}>${Math.round(c.revenue).toLocaleString()}</td>
-      <td style={{ padding: "8px 8px", textAlign: "right" }}>${Math.round(c.driverPay).toLocaleString()}</td>
-      <td style={{ padding: "8px 8px", textAlign: "right", color: c.margin > 0 ? "#10b981" : "#ef4444" }}>${Math.round(c.margin).toLocaleString()}</td>
-      <td style={{ padding: "8px 8px", textAlign: "center", color: c.marginPct >= 40 ? "#10b981" : c.marginPct >= 20 ? "#f59e0b" : "#ef4444" }}>{c.marginPct}%</td>
-      <td style={{ padding: "8px 8px", textAlign: "right" }}>{c.yards.toLocaleString()}</td>
-    </tr>
-  )
-}
-
-function PendingActionRow({ item, onResolve }: { item: PendingAction; onResolve: (id: string) => void }) {
-  const color = PENDING_TYPE_COLOR[item.type] || "#888"
-  return (
-    <div style={{ padding: "10px 12px", borderLeft: `3px solid ${color}`, background: "#111", borderRadius: "0 6px 6px 0", marginBottom: 6, fontSize: 13 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div>
-          <span style={{ background: color + "22", color, padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700, marginRight: 8 }}>{item.type}</span>
-          <span style={{ fontWeight: 600 }}>{item.customer_name || item.phone}</span>
-          {item.delivery_city && <span style={{ color: "#666", marginLeft: 8 }}>{item.delivery_city}</span>}
-          {item.yards_needed && <span style={{ color: "#666", marginLeft: 8 }}>{item.yards_needed}yd</span>}
-          {item.total_price_cents && <span style={{ color: "#10b981", marginLeft: 8 }}>{fmt$(item.total_price_cents)}</span>}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ color: item.minutesOld > 30 ? "#ef4444" : "#888", fontSize: 11 }}>{item.minutesOld}m ago</span>
-          <a href={`sms:+1${item.phone}`} style={{ fontSize: 11, color: "#3b82f6", textDecoration: "none" }}>SMS</a>
-          <button onClick={() => onResolve(item.id)} style={{ fontSize: 11, background: "#222", color: "#10b981", border: "1px solid #333", borderRadius: 4, padding: "2px 10px", cursor: "pointer" }}>Resolve</button>
-        </div>
-      </div>
-      <div style={{ color: "#666", fontSize: 11, marginTop: 4, maxWidth: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.message}</div>
-    </div>
-  )
-}
-
-function CustomerRow({ c, smsHistory }: { c: any; smsHistory: any[] }) {
-  const [expanded, setExpanded] = useState(false)
-  const stateColor = STATE_COLOR[c.state] || "#888"
-  const agentName = c._agentName || "Unassigned"
-  const material = c.material_type?.replace(/_/g, " ") || ""
-
-  return (
-    <>
-      <tr onClick={() => setExpanded(!expanded)} style={{ borderBottom: "1px solid #1a1a1a", cursor: "pointer" }}>
-        <td style={{ padding: "8px 12px", fontSize: 12, color: "#888" }}>{agentName}</td>
-        <td style={{ padding: "8px 8px", fontWeight: 500 }}>
-          {c.customer_name || c.phone?.slice(-4)}
-          {c.phone && (
-            <a href={`tel:+1${c.phone.replace(/\D/g, "").replace(/^1/, "")}`} onClick={e => e.stopPropagation()} style={{ marginLeft: 8, fontSize: 11, color: "#3b82f6", textDecoration: "none", fontWeight: 400 }}>
-              {c.phone.replace(/\D/g, "").replace(/^1/, "").replace(/(\d{3})(\d{3})(\d{4})/, "($1) $2-$3")}
-            </a>
-          )}
-        </td>
-        <td style={{ padding: "8px 8px", fontSize: 12 }}>
-          {c.yards_needed && <span>{c.yards_needed}yd </span>}
-          {material && <span style={{ color: "#888" }}>{material}</span>}
-        </td>
-        <td style={{ padding: "8px 8px", textAlign: "right" }}>{c.total_price_cents ? fmt$(c.total_price_cents) : "--"}</td>
-        <td style={{ padding: "8px 8px" }}><span style={{ background: stateColor + "22", color: stateColor, padding: "2px 8px", borderRadius: 4, fontSize: 11 }}>{c.state}</span></td>
-        <td style={{ padding: "8px 8px", fontSize: 11, color: "#666" }}>{ago(c.updated_at)}</td>
-        <td style={{ padding: "8px 4px", fontSize: 11, color: "#444" }}>{expanded ? "−" : "+"}</td>
-      </tr>
-      {expanded && (
-        <tr>
-          <td colSpan={7} style={{ padding: "0 12px 12px 40px", background: "#0d0d0d" }}>
-            <div style={{ maxHeight: 300, overflowY: "auto", fontSize: 12, lineHeight: 1.6 }}>
-              {smsHistory.filter(s => s.phone === c.phone?.replace(/\D/g, "").replace(/^1/, "")).slice(-20).map((s: any, i: number) => (
-                <div key={i} style={{ padding: "3px 0", borderBottom: "1px solid #111" }}>
-                  <span style={{ color: s.direction === "inbound" ? "#3b82f6" : "#10b981", fontWeight: 600, fontSize: 11, marginRight: 8 }}>
-                    {s.direction === "inbound" ? "CUST" : "SARAH"}
-                  </span>
-                  <span style={{ color: "#ccc" }}>{(s.body || "").slice(0, 200)}</span>
-                  <span style={{ color: "#444", marginLeft: 8, fontSize: 10 }}>{ago(s.created_at)}</span>
-                </div>
-              ))}
-              {smsHistory.filter(s => s.phone === c.phone?.replace(/\D/g, "").replace(/^1/, "")).length === 0 && (
-                <div style={{ color: "#444", fontStyle: "italic" }}>No SMS history loaded</div>
-              )}
-            </div>
-          </td>
-        </tr>
-      )}
-    </>
-  )
-}
-
-// ═══════════════════════════════════════════════════════
-// ORDER MAP — Leaflet via CDN, no API key needed
-// ═══════════════════════════════════════════════════════
-function OrderMap({ pins }: { pins: MapPin[] }) {
-  const mapRef = useRef<HTMLDivElement>(null)
-  const mapInstanceRef = useRef<any>(null)
-
-  useEffect(() => {
-    if (!mapRef.current || pins.length === 0) return
-    // Load Leaflet CSS
-    if (!document.getElementById("leaflet-css")) {
-      const link = document.createElement("link")
-      link.id = "leaflet-css"
-      link.rel = "stylesheet"
-      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      document.head.appendChild(link)
-    }
-    // Load Leaflet JS
-    const loadMap = () => {
-      const L = (window as any).L
-      if (!L || !mapRef.current) return
-
-      // Destroy previous instance
-      if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null }
-
-      const map = L.map(mapRef.current).setView([32.75, -97.33], 8) // DFW center
-      mapInstanceRef.current = map
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "&copy; OpenStreetMap",
-        maxZoom: 18,
-      }).addTo(map)
-
-      const pinColors: Record<string, string> = {
-        ORDER_PLACED: "#10b981", QUOTING: "#f59e0b", COLLECTING: "#3b82f6",
-        AWAITING_PAYMENT: "#8b5cf6", DELIVERED: "#22c55e", CLOSED: "#666",
-        OUT_OF_AREA: "#ef4444", FOLLOW_UP: "#f97316",
-      }
-
-      const bounds: [number, number][] = []
-      for (const p of pins) {
-        if (!p.lat || !p.lng) continue
-        bounds.push([p.lat, p.lng])
-        const color = pinColors[p.state] || "#888"
-        const radius = p.hasOrder ? 8 : 5
-        const circle = L.circleMarker([p.lat, p.lng], {
-          radius, color, fillColor: color, fillOpacity: 0.8, weight: p.hasOrder ? 2 : 1,
-        }).addTo(map)
-        const price = p.totalCents ? "$" + (p.totalCents / 100).toLocaleString() : "--"
-        const material = (p.material || "fill_dirt").replace(/_/g, " ")
-        const phone = p.phone?.replace(/(\d{3})(\d{3})(\d{4})/, "($1) $2-$3") || ""
-        circle.bindPopup(`
-          <div style="font-family:system-ui;font-size:13px;line-height:1.5;min-width:180px">
-            <b>${p.name || "Unknown"}</b><br>
-            <a href="tel:+1${p.phone}" style="color:#3b82f6">${phone}</a><br>
-            ${p.address || p.city || ""}<br>
-            ${p.yards ? p.yards + "yd " : ""}${material} — <b>${price}</b><br>
-            <span style="color:${color};font-weight:600">${p.state}</span><br>
-            <span style="color:#888;font-size:11px">Agent: ${p.agentName || "Unassigned"}</span>
-          </div>
-        `)
-      }
-      if (bounds.length > 0) map.fitBounds(bounds, { padding: [30, 30] })
-    }
-
-    if ((window as any).L) { loadMap() }
-    else {
-      if (!document.getElementById("leaflet-js")) {
-        const script = document.createElement("script")
-        script.id = "leaflet-js"
-        script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-        script.onload = loadMap
-        document.head.appendChild(script)
-      } else {
-        // Script exists but not loaded yet — poll
-        const interval = setInterval(() => { if ((window as any).L) { clearInterval(interval); loadMap() } }, 100)
-        return () => clearInterval(interval)
-      }
-    }
-
-    return () => {
-      if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null }
-    }
-  }, [pins])
-
-  if (pins.length === 0) return <div style={{ color: "#444", fontStyle: "italic", padding: 20 }}>No geocoded orders to display</div>
-
-  return (
-    <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, overflow: "hidden" }}>
-      <div style={{ padding: "10px 16px", fontSize: 13, fontWeight: 700, borderBottom: "1px solid #222", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span>Order Map ({pins.length} pins)</span>
-        <div style={{ display: "flex", gap: 8, fontSize: 10 }}>
-          {[["ORDER_PLACED","#10b981"], ["QUOTING","#f59e0b"], ["COLLECTING","#3b82f6"], ["AWAITING_PAYMENT","#8b5cf6"], ["OTHER","#888"]].map(([label, color]) => (
-            <span key={label} style={{ display: "flex", alignItems: "center", gap: 3 }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" }} />
-              {label}
-            </span>
-          ))}
-        </div>
-      </div>
-      <div ref={mapRef} style={{ height: 500, width: "100%" }} />
+    <div className="space-y-2 animate-pulse">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="h-12 bg-gray-800/50 rounded" />
+      ))}
     </div>
   )
 }
 
 // ═══════════════════════════════════════════════════════
-// MAIN PAGE
+// PER-SECTION ERROR COMPONENT
 // ═══════════════════════════════════════════════════════
-export default function CommandCenter() {
+function SectionError({ label, onRetry }: { label: string; onRetry: () => void }) {
+  return (
+    <div className="p-4 text-center">
+      <div className="text-sm text-gray-500">{label} unavailable</div>
+      <button onClick={onRetry} className="text-xs text-gray-600 hover:text-gray-400 mt-1">Tap to retry</button>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════
+// MAIN COMPONENT
+// ═══════════════════════════════════════════════════════
+export default function CommandCenterPage() {
   const [data, setData] = useState<CommandData | null>(null)
   const [loading, setLoading] = useState(true)
-  const [tab, setTab] = useState<"overview" | "agents" | "customers" | "cities" | "brain" | "sms">("overview")
-  const [resolving, setResolving] = useState<string | null>(null)
-  const [alertsOpen, setAlertsOpen] = useState(false)
-  const intervalRef = useRef<any>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [selectedPhone, setSelectedPhone] = useState<string | null>(null)
+  const [funnelFilter, setFunnelFilter] = useState<string[] | null>(null)
+  const [convLoading, setConvLoading] = useState(false)
+  const [convDetail, setConvDetail] = useState<{ sms: any[]; conv: any } | null>(null)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const conversationRef = useRef<HTMLDivElement>(null)
 
   const fetchData = useCallback(async () => {
     try {
-      const r = await fetch("/api/command-center")
-      if (r.ok) {
-        const d = await r.json()
-        // Enrich customer conversations with agent names
-        const agentNames: Record<string, string> = {}
-        for (const a of (d.salesAgents || [])) agentNames[a.id] = a.name
-        for (const c of (d.activeConversations?.customers || [])) {
-          c._agentName = c.agent_id ? agentNames[c.agent_id] || "Unknown" : "Unassigned"
-        }
-        setData(d)
-      }
-    } catch (e) { console.error("fetch failed:", e) }
-    setLoading(false)
+      const res = await fetch("/api/command-center", { credentials: "include" })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = await res.json()
+      setData(json)
+      setError(null)
+    } catch (e: any) {
+      setError(e.message || "Failed to load dashboard")
+    } finally {
+      setLoading(false)
+    }
   }, [])
+
+  const loadConversation = useCallback(async (phone: string) => {
+    setConvLoading(true)
+    setConvDetail(null)
+    try {
+      const res = await fetch(
+        `/api/command-center/conversation?phone=${encodeURIComponent(phone)}`,
+        { credentials: "include" }
+      )
+      const d = await res.json()
+      setConvDetail(d)
+    } catch (err) {
+      console.error("[conv-viewer]", err)
+    } finally {
+      setConvLoading(false)
+    }
+  }, [])
+
+  const selectConversation = useCallback((phone: string | null) => {
+    setSelectedPhone(phone)
+    if (phone) loadConversation(phone)
+    else setConvDetail(null)
+  }, [loadConversation])
 
   useEffect(() => {
     fetchData()
-    // Refresh every 5s — the command center is a live dashboard, not a status page.
-    // Customer orders that populate slowly are the #1 complaint, so we poll fast.
-    intervalRef.current = setInterval(fetchData, 5000)
-    return () => clearInterval(intervalRef.current)
-  }, [tab, fetchData])
+    intervalRef.current = setInterval(fetchData, 30000)
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
+  }, [fetchData])
 
-  const resolveAction = async (id: string) => {
-    setResolving(id)
-    try {
-      await fetch(`/api/admin/pending-actions/${id}/resolve`, { method: "POST" })
-      await fetchData()
-    } catch {}
-    setResolving(null)
+  // Supabase realtime subscriptions
+  useEffect(() => {
+    const sb = createBrowserSupabase()
+    const channel = sb.channel("command-center-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "customer_conversations" }, () => {
+        fetchData()
+      })
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "customer_sms_logs" }, () => {
+        fetchData()
+      })
+      .subscribe()
+
+    return () => { sb.removeChannel(channel) }
+  }, [fetchData])
+
+  // Scroll to conversation viewer when selected
+  useEffect(() => {
+    if (selectedPhone && conversationRef.current) {
+      conversationRef.current.scrollIntoView({ behavior: "smooth", block: "start" })
+    }
+  }, [selectedPhone])
+
+  // ─── Derived data ───
+  const customers = data?.activeConversations?.customers || []
+  const filteredCustomers = funnelFilter
+    ? customers.filter((c: any) => funnelFilter.includes(c.state))
+    : customers
+
+  // On-demand loaded SMS thread (from /api/command-center/conversation)
+  const smsForSelected = convDetail?.sms || []
+  const selectedConv = convDetail?.conv
+    || (selectedPhone ? customers.find((c: any) => c.phone === selectedPhone) : null)
+
+  // Funnel stage counts from stateFunnel API response (preferred) or fallback to customer array
+  const funnelCounts: Record<string, number> = {}
+  if (data?.stateFunnel) {
+    const sf = data.stateFunnel
+    for (const stage of FUNNEL_STAGES) {
+      funnelCounts[stage.key] = stage.states.reduce((sum, s) => sum + (sf[s] || 0), 0)
+    }
+  } else {
+    for (const stage of FUNNEL_STAGES) {
+      funnelCounts[stage.key] = customers.filter((c: any) => stage.states.includes(c.state)).length
+    }
   }
 
-  if (loading || !data) return <div style={{ background: "#0a0a0a", color: "#fff", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>Loading...</div>
+  // Pipeline value
+  const pipelineCents = data?.financial?.pipelineCents || 0
 
-  const d = data
-  const totalAlerts = d.alerts.staleOrders + d.alerts.driverNoShows + d.alerts.stuckDriverConvs + d.alerts.stuckCustomerConvs + d.alerts.unpaidCustomers + d.pendingActions.length
+  // Anomaly count from brain health
+  const anomalyCount = data?.brainHealth?.crashesThisWeek || 0
+
+  // Pending follow-ups: conversations in FOLLOW_UP state
+  const pendingFollowUps = customers.filter((c: any) => c.state === "FOLLOW_UP").length
+
+  // ─── Error state ───
+  if (error && !data) {
+    return (
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+        <div className="text-center">
+          <div className="text-red-400 text-lg font-semibold mb-2">Dashboard unavailable</div>
+          <div className="text-gray-500 text-sm mb-4">{error}</div>
+          <button
+            onClick={() => { setLoading(true); setError(null); fetchData() }}
+            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg transition-colors"
+          >
+            Tap to retry
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div style={{ background: "#0a0a0a", color: "#e5e5e5", minHeight: "100vh", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
-      {/* ── HEADER ── */}
-      <div style={{ borderBottom: "1px solid #1a1a1a", padding: "12px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, color: "#fff" }}>Command Center</h1>
-          <a href="/admin" style={{ fontSize: 12, color: "#3b82f6", textDecoration: "none" }}>Admin</a>
-          <a href="/admin/dispatch" style={{ fontSize: 12, color: "#3b82f6", textDecoration: "none" }}>+ Dispatch</a>
-          <a href="/admin/driver-pay" style={{ fontSize: 12, color: "#3b82f6", textDecoration: "none" }}>Driver Pay</a>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, position: "relative" }}>
-          {totalAlerts > 0 && (
-            <button
-              onClick={() => setAlertsOpen(!alertsOpen)}
-              style={{
-                background: "#ef4444", color: "#fff", padding: "4px 12px", borderRadius: 10,
-                fontSize: 12, fontWeight: 700, border: "none", cursor: "pointer",
-                display: "flex", alignItems: "center", gap: 6,
-              }}
-            >
-              <span style={{ fontSize: 14 }}>🔔</span>
-              {totalAlerts} alerts
-              <span style={{ fontSize: 10, marginLeft: 2 }}>{alertsOpen ? "▲" : "▼"}</span>
-            </button>
+    <div className="min-h-screen bg-gray-950 text-gray-100">
+      {/* Header */}
+      <div className="border-b border-gray-800 px-4 py-3 flex items-center justify-between sticky top-0 bg-gray-950/95 backdrop-blur z-10">
+        <div className="flex items-center gap-3">
+          <h1 className="text-lg font-bold tracking-tight">Command Center</h1>
+          {data?.timestamp && (
+            <span className="text-xs text-gray-500">Updated {ago(data.timestamp)}</span>
           )}
-          <span style={{ fontSize: 11, color: "#444" }}>Updated {ago(d.timestamp)}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {error && <span className="text-xs text-red-400">Refresh failed</span>}
+          <div className={`w-2 h-2 rounded-full ${error ? "bg-red-500" : "bg-emerald-500"} ${!error ? "animate-pulse" : ""}`} />
+        </div>
+      </div>
 
-          {/* Alert dropdown */}
-          {alertsOpen && totalAlerts > 0 && (
+      <div className="p-4 max-w-[1600px] mx-auto space-y-4">
+        {/* ═══ ROW 1: KPI Cards ═══ */}
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+          {loading ? (
+            Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)
+          ) : (
             <>
-              {/* Click-away overlay */}
-              <div onClick={() => setAlertsOpen(false)} style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 998 }} />
-              <div style={{
-                position: "absolute", top: "100%", right: 0, marginTop: 10,
-                width: 480, maxHeight: 600, overflowY: "auto",
-                background: "#0d0d0d", border: "1px solid #333", borderRadius: 8,
-                boxShadow: "0 10px 40px rgba(0,0,0,0.8)", zIndex: 999, padding: 12,
-              }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#fff", marginBottom: 10, padding: "4px 8px", borderBottom: "1px solid #222", paddingBottom: 8 }}>
-                  All Alerts ({totalAlerts})
-                </div>
-
-                {d.pendingActions.length > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#ef4444", textTransform: "uppercase", padding: "4px 8px" }}>
-                      Needs Human Action ({d.pendingActions.length})
-                    </div>
-                    {d.pendingActions.slice(0, 10).map(a => (
-                      <div key={a.id} style={{ fontSize: 12, color: "#ccc", padding: "6px 8px", borderBottom: "1px solid #1a1a1a" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontWeight: 600, color: "#fff" }}>
-                              {a.customer_name || a.phone?.slice(-4)}
-                              <span style={{ color: "#888", fontWeight: 400, marginLeft: 6, fontSize: 11 }}>{a.type}</span>
-                            </div>
-                            <div style={{ color: "#888", fontSize: 11, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.message}</div>
-                          </div>
-                          <a href={`tel:+1${a.phone?.replace(/\D/g, "")}`} onClick={e => e.stopPropagation()} style={{ fontSize: 10, color: "#3b82f6", textDecoration: "none", flexShrink: 0 }}>call</a>
-                          <button onClick={() => resolveAction(a.id)} disabled={resolving === a.id} style={{ fontSize: 10, color: "#10b981", background: "none", border: "1px solid #10b981", borderRadius: 4, padding: "2px 6px", cursor: "pointer" }}>
-                            {resolving === a.id ? "..." : "clear"}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {d.alerts.stuckCustomerConvs > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", padding: "4px 8px" }}>
-                      Stuck Customer Conversations ({d.alerts.stuckCustomerConvs})
-                    </div>
-                    {d.stuckCustomers.slice(0, 8).map((c: any, i: number) => (
-                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
-                        <span style={{ fontWeight: 600, color: "#fff" }}>{c.customer_name || c.phone?.slice(-4)}</span>
-                        <span style={{ color: "#888", marginLeft: 6 }}>{c.state}</span>
-                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(c.updated_at)}</span>
-                        {c.total_price_cents && <span style={{ color: "#10b981", marginLeft: 6 }}>{fmt$(c.total_price_cents)}</span>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {d.alerts.staleOrders > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", padding: "4px 8px" }}>
-                      Stale Orders 4h+ ({d.alerts.staleOrders})
-                    </div>
-                    {d.staleOrders.slice(0, 8).map((o: any, i: number) => (
-                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
-                        <span style={{ fontWeight: 600, color: "#fff" }}>{o.client_name}</span>
-                        <span style={{ color: "#888", marginLeft: 6 }}>{o.yards_needed}yd</span>
-                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(o.created_at)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {d.alerts.unpaidCustomers > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#f97316", textTransform: "uppercase", padding: "4px 8px" }}>
-                      Unpaid Deliveries ({d.alerts.unpaidCustomers})
-                    </div>
-                    {d.unpaidCustomers.slice(0, 8).map((c: any, i: number) => (
-                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
-                        <span style={{ fontWeight: 600, color: "#fff" }}>{c.customer_name || c.phone?.slice(-4)}</span>
-                        <span style={{ color: "#10b981", marginLeft: 6 }}>{fmt$(c.total_price_cents || 0)}</span>
-                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(c.updated_at)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {d.alerts.driverNoShows > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#ef4444", textTransform: "uppercase", padding: "4px 8px" }}>
-                      Driver No-Shows ({d.alerts.driverNoShows})
-                    </div>
-                    {d.noShows.slice(0, 8).map((n: any, i: number) => (
-                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
-                        <span style={{ fontWeight: 600, color: "#fff" }}>{n.phone?.slice(-4)}</span>
-                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(n.updated_at)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {d.alerts.stuckDriverConvs > 0 && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b", textTransform: "uppercase", padding: "4px 8px" }}>
-                      Stuck Driver Conversations ({d.alerts.stuckDriverConvs})
-                    </div>
-                    {d.stuckDrivers.slice(0, 8).map((c: any, i: number) => (
-                      <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 8px", borderBottom: "1px solid #1a1a1a" }}>
-                        <span style={{ fontWeight: 600, color: "#fff" }}>...{c.phone?.slice(-4)}</span>
-                        <span style={{ color: "#888", marginLeft: 6 }}>{c.state}</span>
-                        <span style={{ color: "#666", marginLeft: 6, fontSize: 11 }}>{ago(c.updated_at)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <KPICard
+                label="Revenue Today"
+                value={data?.revenue ? fmt$(data.revenue.today.revenue) : "--"}
+                sub={data?.revenue ? `Margin ${fmt$(data.revenue.today.margin)}` : undefined}
+                color="text-emerald-400"
+              />
+              {data && !data.revenue && (
+                <div className="col-span-1"><SectionError label="Revenue" onRetry={fetchData} /></div>
+              )}
+              <KPICard
+                label="Active Conversations"
+                value={String(customers.length)}
+                sub={data?.funnel ? `${data.funnel.leads} total leads (30d)` : undefined}
+                color="text-blue-400"
+              />
+              <KPICard
+                label="Orders Today"
+                value={data?.revenue ? String(data.revenue.today.orders) : "--"}
+                sub={data?.revenue ? `${data.revenue.today.completed} completed` : undefined}
+                color="text-amber-400"
+              />
+              <KPICard
+                label="Pipeline Value"
+                value={data?.financial ? fmtCents(pipelineCents) : "--"}
+                sub={`${funnelCounts["QUOTING"] || 0} quoted conversations`}
+                color="text-purple-400"
+              />
+              {data && !data.financial && (
+                <div className="col-span-1"><SectionError label="Financial" onRetry={fetchData} /></div>
+              )}
+              <KPICard
+                label="Anomalies"
+                value={data?.brainHealth ? String(anomalyCount) : "--"}
+                sub={data?.brainHealth ? `${data.brainHealth.totalPendingActions || 0} pending actions` : undefined}
+                color={anomalyCount > 0 ? "text-red-400" : "text-gray-400"}
+                alert={anomalyCount > 0}
+              />
+              {data && !data.brainHealth && (
+                <div className="col-span-1"><SectionError label="Brain Health" onRetry={fetchData} /></div>
+              )}
+              <KPICard
+                label="Pending Follow-ups"
+                value={String(pendingFollowUps)}
+                sub={pendingFollowUps > 5 ? "High volume" : "Normal"}
+                color={pendingFollowUps > 5 ? "text-orange-400" : "text-gray-400"}
+              />
             </>
           )}
         </div>
-      </div>
 
-      {/* ── EXECUTIVE KPIs ── */}
-      <div style={{ padding: "16px 24px", display: "flex", gap: 10, overflowX: "auto" }}>
-        <KPI label="Today Revenue" value={"$" + d.revenue.today.revenue.toLocaleString()} sub={`${d.revenue.today.completed} completed / ${d.revenue.today.orders} total`} color="#10b981" />
-        <KPI label="Today Margin" value={"$" + d.revenue.today.margin.toLocaleString()} sub={d.revenue.today.revenue > 0 ? Math.round((d.revenue.today.margin / d.revenue.today.revenue) * 100) + "% margin" : "0%"} color={d.revenue.today.margin > 0 ? "#10b981" : "#ef4444"} />
-        <KPI label="Week Revenue" value={"$" + d.revenue.week.revenue.toLocaleString()} sub={`${d.revenue.week.completed} completed`} color="#3b82f6" />
-        <KPI label="Pipeline" value={fmtK(d.financial.pipelineCents)} sub="Quoted, not ordered" color="#f59e0b" />
-        <KPI label="Outstanding" value={fmtK(d.financial.outstandingCents)} sub="Ordered, not paid" color="#f97316" alert={d.financial.outstandingCents > 100000} />
-        <KPI label="Collected (30d)" value={fmtK(d.financial.collectedCents)} sub="Paid orders" color="#22c55e" />
-        <KPI label="Month Revenue" value={"$" + d.revenue.month.revenue.toLocaleString()} sub={`${d.revenue.month.completed} completed`} color="#8b5cf6" />
-        <KPI label="Drivers" value={String(d.driverCount || 0)} sub="Active" />
-      </div>
+        {/* ═══ ROW 2: Funnel + Live Feed ═══ */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Sales Funnel */}
+          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-300">Sales Funnel</h2>
+              {funnelFilter && (
+                <button
+                  onClick={() => setFunnelFilter(null)}
+                  className="text-xs text-gray-500 hover:text-gray-300"
+                >
+                  Clear filter
+                </button>
+              )}
+            </div>
+            {loading ? (
+              <div className="p-4"><SkeletonList rows={8} /></div>
+            ) : data && !data.stateFunnel && !data.activeConversations ? (
+              <SectionError label="Funnel" onRetry={fetchData} />
+            ) : (
+              <div className="divide-y divide-gray-800/50">
+                {FUNNEL_STAGES.map((stage, i) => {
+                  const count = funnelCounts[stage.key] || 0
+                  const prevCount = i > 0 ? (funnelCounts[FUNNEL_STAGES[i - 1].key] || 0) : 0
+                  const conversionPct = i > 0 && prevCount > 0
+                    ? Math.round((count / prevCount) * 100)
+                    : null
+                  const isActive = funnelFilter && JSON.stringify(funnelFilter) === JSON.stringify(stage.states)
+                  const maxCount = Math.max(...Object.values(funnelCounts), 1)
+                  const barWidth = Math.max((count / maxCount) * 100, 2)
 
-      {/* ── PENDING ACTIONS (always visible if any) ── */}
-      {d.pendingActions.length > 0 && (
-        <div style={{ padding: "0 24px 12px" }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "#ef4444", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
-            Needs Human Action ({d.pendingActions.length})
+                  return (
+                    <button
+                      key={stage.key}
+                      onClick={() => stage.states.length > 0 ? setFunnelFilter(isActive ? null : stage.states) : null}
+                      className={`w-full px-4 py-2.5 flex items-center justify-between hover:bg-gray-800/50 transition-colors text-left ${isActive ? "bg-gray-800/70" : ""}`}
+                    >
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="text-sm text-gray-300 w-24 shrink-0">{stage.label}</span>
+                        <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-blue-600/60 rounded-full transition-all"
+                            style={{ width: `${barWidth}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 ml-3">
+                        <span className="text-sm font-mono font-semibold text-gray-200 w-8 text-right">{count}</span>
+                        {conversionPct !== null && (
+                          <span className="text-xs text-gray-500 w-10 text-right">{conversionPct}%</span>
+                        )}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
           </div>
-          {d.pendingActions.map(a => <PendingActionRow key={a.id} item={a} onResolve={resolveAction} />)}
+
+          {/* Live Conversation Feed */}
+          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden flex flex-col" style={{ maxHeight: 480 }}>
+            <div className="px-4 py-3 border-b border-gray-800">
+              <h2 className="text-sm font-semibold text-gray-300">
+                Live Conversations
+                {funnelFilter && <span className="text-gray-500 font-normal ml-2">(filtered)</span>}
+              </h2>
+            </div>
+            {loading ? (
+              <div className="p-4"><SkeletonList rows={8} /></div>
+            ) : data && !data.activeConversations ? (
+              <SectionError label="Conversations" onRetry={fetchData} />
+            ) : filteredCustomers.length === 0 ? (
+              <div className="p-8 text-center text-gray-600 text-sm">No conversations match filter</div>
+            ) : (
+              <div className="overflow-y-auto flex-1 divide-y divide-gray-800/30">
+                {filteredCustomers.map((c: any) => {
+                  const lastMsg = (data?.recentCustSms || []).find((s: any) => s.phone === c.phone)
+                  const isSelected = selectedPhone === c.phone
+                  return (
+                    <button
+                      key={c.phone}
+                      onClick={() => selectConversation(isSelected ? null : c.phone)}
+                      className={`w-full px-4 py-3 flex items-start gap-3 hover:bg-gray-800/40 transition-colors text-left ${isSelected ? "bg-gray-800/60 border-l-2 border-blue-500" : ""}`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className="text-sm font-medium text-gray-200 truncate">
+                            {c.customer_name || c.phone}
+                          </span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${STATE_COLORS[c.state] || "bg-gray-700"} text-white shrink-0`}>
+                            {STATE_LABELS[c.state] || c.state}
+                          </span>
+                          {c.needs_human_review && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900 text-red-300 shrink-0">REVIEW</span>
+                          )}
+                        </div>
+                        {lastMsg && (
+                          <p className="text-xs text-gray-500 truncate">{lastMsg.body}</p>
+                        )}
+                      </div>
+                      <div className="text-right shrink-0">
+                        {c.total_price_cents && c.total_price_cents > 0 && (
+                          <div className="text-xs font-semibold text-emerald-400">{fmtCents(c.total_price_cents)}</div>
+                        )}
+                        <div className="text-[10px] text-gray-600">{ago(c.updated_at)}</div>
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         </div>
-      )}
 
-      {/* ── TAB BAR ── */}
-      <div style={{ padding: "0 24px", borderBottom: "1px solid #1a1a1a", display: "flex", gap: 0 }}>
-        {(["overview", "agents", "customers", "cities", "brain", "sms"] as const).map(t => (
-          <button key={t} onClick={() => setTab(t)} style={{
-            padding: "10px 20px", fontSize: 13, fontWeight: tab === t ? 700 : 400,
-            color: tab === t ? "#fff" : "#666", background: "none", border: "none",
-            borderBottom: tab === t ? "2px solid #3b82f6" : "2px solid transparent",
-            cursor: "pointer", textTransform: "capitalize",
-          }}>{t}</button>
-        ))}
-      </div>
-
-      {/* ── TAB CONTENT ── */}
-      <div style={{ padding: "20px 24px" }}>
-
-        {/* ════════ OVERVIEW ════════ */}
-        {tab === "overview" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-            {/* Conversion Funnel */}
-            <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, padding: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12, color: "#fff" }}>30-Day Conversion Funnel</div>
-              <div style={{ display: "flex", gap: 12 }}>
-                <FunnelBar label="Leads" count={d.funnel.leads} total={d.funnel.leads} color="#3b82f6" />
-                <FunnelBar label="Quoted" count={d.funnel.quoted} total={d.funnel.leads} color="#f59e0b" />
-                <FunnelBar label="Ordered" count={d.funnel.ordered} total={d.funnel.leads} color="#10b981" />
-                <FunnelBar label="Delivered" count={d.funnel.delivered} total={d.funnel.leads} color="#22c55e" />
-                <FunnelBar label="Paid" count={d.funnel.paid} total={d.funnel.leads} color="#4ade80" />
+        {/* ═══ ROW 3: Conversation Viewer ═══ */}
+        <div ref={conversationRef} className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          {!selectedPhone ? (
+            <div className="px-4 py-8 text-center text-gray-600 text-sm">
+              Select a conversation above to view the SMS thread
+            </div>
+          ) : (
+            <>
+              {/* Conversation Header */}
+              <div className="px-4 py-3 border-b border-gray-800 flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="font-semibold text-gray-200">{selectedConv?.customer_name || selectedPhone}</span>
+                <span className="text-xs text-gray-500 font-mono">{selectedPhone}</span>
+                {selectedConv && (
+                  <>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${STATE_COLORS[selectedConv.state] || "bg-gray-700"} text-white`}>
+                      {STATE_LABELS[selectedConv.state] || selectedConv.state}
+                    </span>
+                    {selectedConv.delivery_address && (
+                      <span className="text-xs text-gray-500">{selectedConv.delivery_address}</span>
+                    )}
+                    {selectedConv.yards_needed && (
+                      <span className="text-xs text-gray-400">{selectedConv.yards_needed} yards</span>
+                    )}
+                    {selectedConv.material_type && (
+                      <span className="text-xs text-gray-400">{selectedConv.material_type}</span>
+                    )}
+                    {selectedConv.total_price_cents > 0 && (
+                      <span className="text-xs font-semibold text-emerald-400">{fmtCents(selectedConv.total_price_cents)}</span>
+                    )}
+                  </>
+                )}
+                <button
+                  onClick={() => selectConversation(null)}
+                  className="ml-auto text-xs text-gray-500 hover:text-gray-300"
+                >
+                  Close
+                </button>
               </div>
-            </div>
-
-            {/* Sparklines */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-              <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, padding: 16 }}>
-                <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Orders (14d)</div>
-                <Sparkline data={d.dailyTrend} dataKey="orders" color="#3b82f6" />
+              {/* SMS Thread */}
+              <div className="p-4 space-y-2 max-h-96 overflow-y-auto">
+                {convLoading ? (
+                  <SkeletonList rows={4} />
+                ) : smsForSelected.length === 0 ? (
+                  <div className="text-center text-gray-600 text-sm py-4">No messages found for this number</div>
+                ) : (
+                  smsForSelected.map((msg: any, i: number) => {
+                    const isCustomer = msg.direction === "inbound"
+                    return (
+                      <div key={i} className={`flex ${isCustomer ? "justify-start" : "justify-end"}`}>
+                        <div className={`max-w-[80%] px-3 py-2 rounded-lg text-sm ${
+                          isCustomer
+                            ? "bg-gray-800 text-gray-200 rounded-bl-none"
+                            : "bg-blue-600 text-white rounded-br-none"
+                        }`}>
+                          <p className="whitespace-pre-wrap break-words">{msg.body}</p>
+                          <div className={`text-[10px] mt-1 ${isCustomer ? "text-gray-500" : "text-blue-200"}`}>
+                            {new Date(msg.created_at).toLocaleString("en-US", { hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
               </div>
-              <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, padding: 16 }}>
-                <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>Revenue (14d)</div>
-                <Sparkline data={d.dailyTrend} dataKey="revenue" color="#10b981" />
-              </div>
-            </div>
-
-            {/* Alerts Grid */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
-              <KPI label="Stale Orders" value={String(d.alerts.staleOrders)} color={d.alerts.staleOrders > 0 ? "#ef4444" : "#10b981"} alert={d.alerts.staleOrders > 0} />
-              <KPI label="Driver No-Shows" value={String(d.alerts.driverNoShows)} color={d.alerts.driverNoShows > 0 ? "#ef4444" : "#10b981"} alert={d.alerts.driverNoShows > 0} />
-              <KPI label="Stuck Customers" value={String(d.alerts.stuckCustomerConvs)} color={d.alerts.stuckCustomerConvs > 0 ? "#f59e0b" : "#10b981"} alert={d.alerts.stuckCustomerConvs > 0} />
-              <KPI label="Stuck Drivers" value={String(d.alerts.stuckDriverConvs)} color={d.alerts.stuckDriverConvs > 0 ? "#f59e0b" : "#10b981"} alert={d.alerts.stuckDriverConvs > 0} />
-              <KPI label="Unpaid Deliveries" value={String(d.alerts.unpaidCustomers)} sub={d.alerts.unpaidCustomerTotal > 0 ? "$" + d.alerts.unpaidCustomerTotal : ""} color={d.alerts.unpaidCustomers > 0 ? "#f97316" : "#10b981"} alert={d.alerts.unpaidCustomers > 0} />
-              <KPI label="Pending Driver Pay" value={String(d.alerts.pendingDriverPayments)} sub={d.alerts.pendingDriverPayTotal > 0 ? "$" + d.alerts.pendingDriverPayTotal : ""} color={d.alerts.pendingDriverPayments > 0 ? "#f97316" : "#10b981"} />
-            </div>
-
-            {/* Stale Orders Detail */}
-            {d.staleOrders.length > 0 && (
-              <div style={{ background: "#1a0a0a", border: "1px solid #ff4444", borderRadius: 8, padding: 16 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#ef4444", marginBottom: 8 }}>Stale Orders (4h+ no driver)</div>
-                {d.staleOrders.map((o: any) => (
-                  <div key={o.id} style={{ fontSize: 12, color: "#ccc", padding: "4px 0" }}>
-                    {o.cities?.name || "?"} — {o.yards_needed}yd — ${Math.round((o.driver_pay_cents || 0) / 100)}/load — {ago(o.created_at)}
-                    {o.price_quoted_cents && <span style={{ color: "#10b981", marginLeft: 8 }}>{fmt$((o as any).price_quoted_cents)}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ════════ AGENTS ════════ */}
-        {tab === "agents" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-            <div style={{ fontSize: 12, color: "#888" }}>
-              {d.unassignedLeads > 0 && <span style={{ color: "#f59e0b" }}>{d.unassignedLeads} unassigned leads</span>}
-            </div>
-            <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, overflow: "hidden" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr style={{ background: "#0d0d0d", borderBottom: "1px solid #222" }}>
-                    <th style={{ padding: "10px 12px", textAlign: "left", fontSize: 11, color: "#888", fontWeight: 600 }}>Agent</th>
-                    <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Leads</th>
-                    <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Active</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#f59e0b" }}>Quoted $</th>
-                    <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Orders</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#10b981" }}>Ordered $</th>
-                    <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Done</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#22c55e" }}>Completed $</th>
-                    <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Paid</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#4ade80" }}>Collected $</th>
-                    <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Close %</th>
-                    <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#a78bfa" }}>Commission</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {d.agentPipeline.map(a => <AgentRow key={a.id} a={a} />)}
-                  {/* Totals row */}
-                  <tr style={{ background: "#0d0d0d", fontWeight: 700, borderTop: "2px solid #333" }}>
-                    <td style={{ padding: "10px 12px" }}>Total</td>
-                    <td style={{ padding: "10px 8px", textAlign: "center" }}>{d.agentPipeline.reduce((s, a) => s + a.totalLeads, 0)}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "center" }}>{d.agentPipeline.reduce((s, a) => s + a.activeLeads, 0)}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "right", color: "#f59e0b" }}>{fmtK(d.agentPipeline.reduce((s, a) => s + a.quotedCents, 0))}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "center" }}>{d.agentPipeline.reduce((s, a) => s + a.orderedCount, 0)}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "right", color: "#10b981" }}>{fmtK(d.agentPipeline.reduce((s, a) => s + a.orderedCents, 0))}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "center" }}>{d.agentPipeline.reduce((s, a) => s + a.completedCount, 0)}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "right", color: "#22c55e" }}>{fmtK(d.agentPipeline.reduce((s, a) => s + a.completedCents, 0))}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "center" }}>{d.agentPipeline.reduce((s, a) => s + a.paidCount, 0)}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "right", color: "#4ade80" }}>{fmtK(d.agentPipeline.reduce((s, a) => s + a.paidCents, 0))}</td>
-                    <td style={{ padding: "10px 8px", textAlign: "center" }}>--</td>
-                    <td style={{ padding: "10px 8px", textAlign: "right", color: "#a78bfa" }}>{fmtK(d.agentPipeline.reduce((s, a) => s + a.commissionCents, 0))}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* ════════ CUSTOMERS ════════ */}
-        {tab === "customers" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* State legend */}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {Object.entries(
-                (d.activeConversations.customers || []).reduce((acc: Record<string, number>, c: any) => {
-                  acc[c.state] = (acc[c.state] || 0) + 1; return acc
-                }, {})
-              ).sort((a, b) => b[1] - a[1]).map(([state, count]) => (
-                <span key={state} style={{ background: (STATE_COLOR[state] || "#888") + "22", color: STATE_COLOR[state] || "#888", padding: "3px 10px", borderRadius: 4, fontSize: 11 }}>
-                  {state} ({count})
-                </span>
-              ))}
-            </div>
-
-            <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, overflow: "hidden" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr style={{ background: "#0d0d0d", borderBottom: "1px solid #222" }}>
-                    <th style={{ padding: "8px 12px", textAlign: "left", fontSize: 11, color: "#888" }}>Agent</th>
-                    <th style={{ padding: "8px 8px", textAlign: "left", fontSize: 11, color: "#888" }}>Customer</th>
-                    <th style={{ padding: "8px 8px", textAlign: "left", fontSize: 11, color: "#888" }}>Order</th>
-                    <th style={{ padding: "8px 8px", textAlign: "right", fontSize: 11, color: "#888" }}>Quote</th>
-                    <th style={{ padding: "8px 8px", textAlign: "left", fontSize: 11, color: "#888" }}>Status</th>
-                    <th style={{ padding: "8px 8px", textAlign: "left", fontSize: 11, color: "#888" }}>Updated</th>
-                    <th style={{ padding: "8px 4px" }}></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(d.activeConversations.customers || []).map((c: any) => (
-                    <CustomerRow key={c.phone} c={c} smsHistory={d.recentCustSms || []} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Stuck customers */}
-            {d.stuckCustomers.length > 0 && (
-              <div style={{ background: "#1a0a0a", border: "1px solid #ff4444", borderRadius: 8, padding: 16 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#ef4444", marginBottom: 8 }}>Stuck Conversations (2h+ no update)</div>
-                {d.stuckCustomers.map((c: any, i: number) => (
-                  <div key={i} style={{ fontSize: 12, color: "#ccc", padding: "4px 0" }}>
-                    {c.customer_name || c.phone?.slice(-4)} — {c.state} — {ago(c.updated_at)}
-                    {c.total_price_cents && <span style={{ color: "#10b981", marginLeft: 8 }}>{fmt$(c.total_price_cents)}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ════════ CITIES ════════ */}
-        {tab === "cities" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <OrderMap pins={d.mapPins || []} />
-          <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, overflow: "hidden" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ background: "#0d0d0d", borderBottom: "1px solid #222" }}>
-                  <th style={{ padding: "10px 12px", textAlign: "left", fontSize: 11, color: "#888" }}>City</th>
-                  <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Orders</th>
-                  <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Done</th>
-                  <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Active</th>
-                  <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#888" }}>Revenue</th>
-                  <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#888" }}>Driver Pay</th>
-                  <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#888" }}>Margin</th>
-                  <th style={{ padding: "10px 8px", textAlign: "center", fontSize: 11, color: "#888" }}>Margin %</th>
-                  <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 11, color: "#888" }}>Yards</th>
-                </tr>
-              </thead>
-              <tbody>
-                {d.cityIntel.map(c => <CityRow key={c.name} c={c} />)}
-              </tbody>
-            </table>
-          </div>
-          </div>
-        )}
-
-        {/* ════════ BRAIN HEALTH ════════ */}
-        {tab === "brain" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
-              <KPI label="Brain Crashes (7d)" value={String(d.brainHealth.crashesThisWeek)} color={d.brainHealth.crashesThisWeek > 0 ? "#ef4444" : "#10b981"} alert={d.brainHealth.crashesThisWeek > 3} />
-              <KPI label="Pending Actions" value={String(d.brainHealth.totalPendingActions)} color={d.brainHealth.totalPendingActions > 0 ? "#f59e0b" : "#10b981"} />
-              <KPI label="Active Customers" value={String(d.activeConversations.customers?.length || 0)} color="#3b82f6" />
-              <KPI label="Active Drivers" value={String(d.activeConversations.drivers?.length || 0)} color="#3b82f6" />
-            </div>
-
-            {/* Action type breakdown */}
-            <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, padding: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12, color: "#fff" }}>Pending Actions by Type (48h)</div>
-              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                {Object.entries(d.brainHealth.pendingActionsByType).sort((a, b) => b[1] - a[1]).map(([type, count]) => (
-                  <div key={type} style={{ background: (PENDING_TYPE_COLOR[type] || "#888") + "15", border: `1px solid ${PENDING_TYPE_COLOR[type] || "#888"}44`, borderRadius: 6, padding: "8px 14px" }}>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: PENDING_TYPE_COLOR[type] || "#888" }}>{count}</div>
-                    <div style={{ fontSize: 10, color: "#888", marginTop: 2 }}>{type}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Driver conversations */}
-            {d.activeConversations.drivers.length > 0 && (
-              <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, padding: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12, color: "#fff" }}>Active Driver Conversations</div>
-                {d.activeConversations.drivers.map((c: any, i: number) => (
-                  <div key={i} style={{ fontSize: 12, padding: "4px 0", color: "#ccc", borderBottom: "1px solid #1a1a1a" }}>
-                    ...{c.phone?.slice(-4)} — <span style={{ color: STATE_COLOR[c.state] || "#888" }}>{c.state}</span>
-                    {c.extracted_city && <span style={{ color: "#666", marginLeft: 8 }}>{c.extracted_city}</span>}
-                    <span style={{ color: "#444", marginLeft: 8 }}>{ago(c.updated_at)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ════════ SMS ════════ */}
-        {tab === "sms" && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-            <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, padding: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12, color: "#fff" }}>Customer SMS (Recent)</div>
-              {(d.recentCustSms || []).filter(s => s.direction === "inbound" || s.direction === "outbound").slice(0, 25).map((s: any, i: number) => (
-                <div key={i} style={{ fontSize: 11, padding: "3px 0", borderBottom: "1px solid #1a1a1a" }}>
-                  <span style={{ color: s.direction === "inbound" ? "#3b82f6" : "#10b981", fontWeight: 600, width: 28, display: "inline-block" }}>
-                    {s.direction === "inbound" ? "IN" : "OUT"}
-                  </span>
-                  <span style={{ color: "#666", marginRight: 6 }}>...{s.phone?.slice(-4)}</span>
-                  <span style={{ color: "#aaa" }}>{(s.body || "").slice(0, 80)}</span>
-                  <span style={{ color: "#333", marginLeft: 6 }}>{ago(s.created_at)}</span>
+              {/* Admin Actions */}
+              {selectedConv && (
+                <div className="px-4 py-3 border-t border-gray-800 flex flex-wrap gap-2">
+                  <button className="text-xs px-3 py-1.5 bg-emerald-900/50 text-emerald-300 rounded hover:bg-emerald-900/70 transition-colors">
+                    Mark Resolved
+                  </button>
+                  <button className="text-xs px-3 py-1.5 bg-orange-900/50 text-orange-300 rounded hover:bg-orange-900/70 transition-colors">
+                    Escalate
+                  </button>
+                  <button className="text-xs px-3 py-1.5 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition-colors">
+                    Override State
+                  </button>
                 </div>
-              ))}
-            </div>
-            <div style={{ background: "#111", border: "1px solid #222", borderRadius: 8, padding: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12, color: "#fff" }}>Driver SMS (Recent)</div>
-              {(d.recentSms || []).filter(s => s.direction === "inbound" || s.direction === "outbound").slice(0, 25).map((s: any, i: number) => (
-                <div key={i} style={{ fontSize: 11, padding: "3px 0", borderBottom: "1px solid #1a1a1a" }}>
-                  <span style={{ color: s.direction === "inbound" ? "#3b82f6" : "#10b981", fontWeight: 600, width: 28, display: "inline-block" }}>
-                    {s.direction === "inbound" ? "IN" : "OUT"}
-                  </span>
-                  <span style={{ color: "#666", marginRight: 6 }}>...{s.phone?.slice(-4)}</span>
-                  <span style={{ color: "#aaa" }}>{(s.body || "").slice(0, 80)}</span>
-                  <span style={{ color: "#333", marginLeft: 6 }}>{ago(s.created_at)}</span>
-                </div>
-              ))}
-            </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* ═══ ROW 4: Anomaly Monitor ═══ */}
+        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-gray-300">Anomaly Monitor</h2>
+            {anomalyCount > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900 text-red-300 font-semibold">
+                {anomalyCount} crash{anomalyCount !== 1 ? "es" : ""} this week
+              </span>
+            )}
           </div>
-        )}
+          {loading ? (
+            <div className="p-4"><SkeletonList rows={3} /></div>
+          ) : data && !data.brainHealth ? (
+            <SectionError label="Anomaly Monitor" onRetry={fetchData} />
+          ) : (
+            <div className="p-4">
+              {/* Pending actions by type */}
+              {data?.brainHealth?.pendingActionsByType && Object.keys(data.brainHealth.pendingActionsByType).length > 0 ? (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(data.brainHealth.pendingActionsByType).map(([type, count]) => (
+                      <span
+                        key={type}
+                        className={`text-xs px-2 py-1 rounded font-medium ${
+                          type.includes("CRASH") || type.includes("URGENT")
+                            ? "bg-red-900/60 text-red-300"
+                            : type.includes("FAILED") || type.includes("MISSING")
+                              ? "bg-orange-900/60 text-orange-300"
+                              : "bg-yellow-900/60 text-yellow-300"
+                        }`}
+                      >
+                        {type}: {count}
+                      </span>
+                    ))}
+                  </div>
+                  {/* Recent pending actions */}
+                  {(data?.pendingActions || []).length > 0 && (
+                    <div className="space-y-1 mt-2">
+                      {(data?.pendingActions || []).slice(0, 5).map((a) => (
+                        <div key={a.id} className="flex items-center gap-2 text-xs py-1.5 px-2 bg-gray-800/40 rounded">
+                          <span className="text-gray-500 font-mono shrink-0">{a.minutesOld}m</span>
+                          <span className={`px-1.5 py-0.5 rounded font-medium shrink-0 ${
+                            a.type.includes("CRASH") ? "bg-red-900/60 text-red-300" : "bg-yellow-900/60 text-yellow-300"
+                          }`}>
+                            {a.type}
+                          </span>
+                          <span className="text-gray-400 truncate">{a.customer_name || a.phone}</span>
+                          <span className="text-gray-600 truncate ml-auto">{a.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-sm text-gray-600 py-2">No anomalies detected. Systems nominal.</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ═══ ROW 5: Jesse Driver Feed ═══ */}
+        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800">
+            <h2 className="text-sm font-semibold text-gray-300">Driver Feed (Jesse)</h2>
+          </div>
+          {loading ? (
+            <div className="p-4"><SkeletonList rows={5} /></div>
+          ) : data && !data.activeConversations ? (
+            <SectionError label="Driver Feed" onRetry={fetchData} />
+          ) : (data?.activeConversations?.drivers || []).length === 0 ? (
+            <div className="p-8 text-center text-gray-600 text-sm">No active driver conversations</div>
+          ) : (
+            <div className="divide-y divide-gray-800/30">
+              {(data?.activeConversations?.drivers || []).slice(0, 10).map((d: any) => {
+                const lastMsg = (data?.recentSms || []).find((s: any) => s.phone === d.phone)
+                return (
+                  <div key={d.phone} className="px-4 py-3 flex items-center gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className="text-sm font-medium text-gray-200">{d.phone}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 text-white font-medium">{d.state}</span>
+                        {d.extracted_truck_type && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 font-medium">{d.extracted_truck_type}</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {d.extracted_city && (
+                          <span className="text-xs text-gray-500">{d.extracted_city}</span>
+                        )}
+                        {lastMsg && (
+                          <span className="text-xs text-gray-600 truncate">{(lastMsg.body || "").slice(0, 50)}</span>
+                        )}
+                      </div>
+                    </div>
+                    <span className="text-[10px] text-gray-600 shrink-0">{ago(d.updated_at)}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* ═══ ROW 6: System Health Bar ═══ */}
+        <div className="bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
+          {loading ? (
+            <div className="flex gap-6 animate-pulse">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="h-4 w-32 bg-gray-800 rounded" />
+              ))}
+            </div>
+          ) : data && !data.alerts ? (
+            <SectionError label="System Health" onRetry={fetchData} />
+          ) : (
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+              <HealthPill
+                label="Last Webhook"
+                value={
+                  data?.recentCustSms && data.recentCustSms.length > 0
+                    ? ago(data.recentCustSms[0].created_at)
+                    : "N/A"
+                }
+                ok={
+                  data?.recentCustSms && data.recentCustSms.length > 0
+                    ? (Date.now() - new Date(data.recentCustSms[0].created_at).getTime()) < 3600000
+                    : false
+                }
+              />
+              <HealthPill
+                label="Pending Follow-ups"
+                value={String(pendingFollowUps)}
+                ok={pendingFollowUps <= 10}
+              />
+              <HealthPill
+                label="Brain Crashes (7d)"
+                value={String(data?.brainHealth?.crashesThisWeek || 0)}
+                ok={(data?.brainHealth?.crashesThisWeek || 0) === 0}
+              />
+              <HealthPill
+                label="Stuck Customers"
+                value={String(data?.alerts?.stuckCustomerConvs || 0)}
+                ok={(data?.alerts?.stuckCustomerConvs || 0) === 0}
+              />
+              <HealthPill
+                label="Stale Orders"
+                value={String(data?.alerts?.staleOrders || 0)}
+                ok={(data?.alerts?.staleOrders || 0) === 0}
+              />
+              <HealthPill
+                label="Active Drivers"
+                value={String(data?.driverCount || 0)}
+                ok={(data?.driverCount || 0) > 0}
+              />
+            </div>
+          )}
+        </div>
       </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════
+// SUB-COMPONENTS
+// ═══════════════════════════════════════════════════════
+function KPICard({ label, value, sub, color, alert }: {
+  label: string; value: string; sub?: string; color?: string; alert?: boolean
+}) {
+  return (
+    <div className={`rounded-lg p-4 border ${alert ? "bg-red-950/30 border-red-900/50" : "bg-gray-900 border-gray-800"}`}>
+      <div className="text-[11px] text-gray-500 uppercase tracking-wider font-medium">{label}</div>
+      <div className={`text-2xl font-bold mt-1 ${color || "text-white"}`}>{value}</div>
+      {sub && <div className="text-[11px] text-gray-600 mt-1">{sub}</div>}
+    </div>
+  )
+}
+
+function HealthPill({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className={`w-1.5 h-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-red-500"}`} />
+      <span className="text-gray-500">{label}:</span>
+      <span className={ok ? "text-gray-300" : "text-red-400 font-semibold"}>{value}</span>
     </div>
   )
 }

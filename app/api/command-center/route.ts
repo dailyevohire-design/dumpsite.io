@@ -18,30 +18,31 @@ export async function GET() {
   // ═══════════════════════════════════════════════════════
   // PARALLEL QUERY BATCH 1 — core data
   // ═══════════════════════════════════════════════════════
-  const [
-    { data: ordersToday },
-    { data: ordersWeek },
-    { data: ordersMonth },
-    { data: activeDriverConvs },
-    { data: activeCustConvs },
-    { data: staleOrders },
-    { data: unpaidCustomers },
-    { data: pendingDriverPay },
-    { data: stuckDrivers },
-    { data: stuckCustomers },
-    { data: noShows },
-    { data: recentSms },
-    { data: recentCustSms },
-    { data: driverCount },
-    { data: salesAgents },
-    { data: pendingActionsRaw },
-    // New queries for enhanced dashboard
-    { data: allCustConvs },
-    { data: completedOrdersMonth },
-    { data: brainCrashes },
-    { data: dailyOrders },
-    { data: mapPinsRaw },
-  ] = await Promise.all([
+  let ordersToday: any[] | null = null
+  let ordersWeek: any[] | null = null
+  let ordersMonth: any[] | null = null
+  let activeDriverConvs: any[] | null = null
+  let activeCustConvs: any[] | null = null
+  let staleOrders: any[] | null = null
+  let unpaidCustomers: any[] | null = null
+  let pendingDriverPay: any[] | null = null
+  let stuckDrivers: any[] | null = null
+  let stuckCustomers: any[] | null = null
+  let noShows: any[] | null = null
+  let recentSms: any[] | null = null
+  let recentCustSms: any[] | null = null
+  let driverCount: any[] | null = null
+  let salesAgents: any[] | null = null
+  let pendingActionsRaw: any[] | null = null
+  let allCustConvs: any[] | null = null
+  let completedOrdersMonth: any[] | null = null
+  let brainCrashes: any[] | null = null
+  let dailyOrders: any[] | null = null
+  let mapPinsRaw: any[] | null = null
+  let driverCountRaw = 0
+
+  try {
+  const results = await Promise.allSettled([
     // Orders today
     sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents, cities(name), created_at, agent_id, source_number").gte("created_at", since),
     // Orders this week
@@ -49,7 +50,7 @@ export async function GET() {
     // Orders this month (for trends)
     sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents, created_at, agent_id").gte("created_at", thirtyDaysAgo),
     // Active driver conversations
-    sb.from("conversations").select("phone, state, extracted_city, active_order_id, updated_at")
+    sb.from("conversations").select("phone, state, extracted_city, extracted_truck_type, active_order_id, updated_at")
       .in("state", ["ACTIVE", "OTW_PENDING", "PHOTO_PENDING", "APPROVAL_PENDING", "JOB_PRESENTED", "ASKING_TRUCK", "ASKING_ADDRESS"])
       .order("updated_at", { ascending: false }).limit(20),
     // ALL customer conversations in the last 30 days — no state filter.
@@ -89,9 +90,7 @@ export async function GET() {
       .eq("direction", "pending_action")
       .gte("created_at", new Date(now - 48 * 60 * 60 * 1000).toISOString())
       .order("created_at", { ascending: true }),
-    // ALL customer conversations (for funnel + full agent pipeline)
-    sb.from("customer_conversations").select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents, material_type, agent_id, payment_status, dispatch_order_id, created_at, updated_at")
-      .gte("created_at", thirtyDaysAgo),
+    // [REMOVED] Query 16 was a duplicate of query 4 — use activeCustConvs for funnel + pipeline
     // Completed dispatch orders this month (for agent revenue tracking)
     sb.from("dispatch_orders").select("id, status, price_quoted_cents, driver_pay_cents, agent_id, cities(name), created_at")
       .eq("status", "completed").gte("created_at", thirtyDaysAgo),
@@ -108,6 +107,69 @@ export async function GET() {
       .not("delivery_lat", "is", null).not("delivery_lng", "is", null)
       .gte("created_at", thirtyDaysAgo),
   ])
+
+  // Extract data from allSettled — each result is either {status:'fulfilled', value} or {status:'rejected', reason}
+  // A fulfilled Supabase query returns {data, error} — use .data if fulfilled, null otherwise
+  const safe = (i: number) => results[i].status === "fulfilled" ? (results[i] as any).value?.data : null
+  ordersToday = safe(0)
+  ordersWeek = safe(1)
+  ordersMonth = safe(2)
+  activeDriverConvs = safe(3)
+  activeCustConvs = safe(4)
+  staleOrders = safe(5)
+  unpaidCustomers = safe(6)
+  pendingDriverPay = safe(7)
+  stuckDrivers = safe(8)
+  stuckCustomers = safe(9)
+  noShows = safe(10)
+  recentSms = safe(11)
+  recentCustSms = safe(12)
+  driverCount = safe(13)
+  salesAgents = safe(14)
+  pendingActionsRaw = safe(15)
+  // Query 16 removed — use activeCustConvs (query 4) for funnel + pipeline
+  allCustConvs = activeCustConvs
+  completedOrdersMonth = safe(16)
+  brainCrashes = safe(17)
+  dailyOrders = safe(18)
+  mapPinsRaw = safe(19)
+  // Special case: query 13 uses head:true so count is in .count not .data
+  driverCountRaw = results[13].status === "fulfilled"
+    ? (results[13] as any).value?.count ?? 0
+    : 0
+  // Log any failed queries (non-fatal — partial data is better than no data)
+  results.forEach((r, i) => {
+    if (r.status === "rejected") console.error(`[command-center] query ${i} failed:`, r.reason)
+  })
+  } catch (err) {
+    console.error("Command center query batch failed:", err)
+    return NextResponse.json({
+      timestamp: new Date().toISOString(),
+      error: "Partial failure — one or more queries failed",
+      revenue: null,
+      financial: null,
+      funnel: null,
+      stateFunnel: {},
+      alerts: null,
+      activeConversations: null,
+      agentPipeline: null,
+      unassignedLeads: null,
+      salesAgents: null,
+      cityIntel: null,
+      dailyTrend: null,
+      brainHealth: null,
+      mapPins: null,
+      staleOrders: null,
+      unpaidCustomers: null,
+      stuckDrivers: null,
+      stuckCustomers: null,
+      noShows: null,
+      recentSms: null,
+      recentCustSms: null,
+      driverCount: null,
+      pendingActions: null,
+    }, { status: 207 })
+  }
 
   // ═══════════════════════════════════════════════════════
   // REVENUE CALCULATIONS
@@ -144,6 +206,15 @@ export async function GET() {
   const funnelOrderedAlt = allConvs.filter((c: any) =>
     ["ORDER_PLACED", "AWAITING_PAYMENT", "AWAITING_PRIORITY_PAYMENT", "DELIVERED"].includes(c.state) || c.dispatch_order_id
   ).length
+
+  // ═══════════════════════════════════════════════════════
+  // STATE-BASED FUNNEL (FIX 4) — direct state → count mapping
+  // ═══════════════════════════════════════════════════════
+  const stateFunnel: Record<string, number> = {}
+  for (const c of allConvs) {
+    const st = (c as any).state || "UNKNOWN"
+    stateFunnel[st] = (stateFunnel[st] || 0) + 1
+  }
 
   // ═══════════════════════════════════════════════════════
   // AGENT PIPELINE — Quoted $ → Ordered $ → Completed $
@@ -270,8 +341,6 @@ export async function GET() {
     const type = ((r as any).body || "").split(" | ")[0] || "UNKNOWN"
     actionTypeCounts[type] = (actionTypeCounts[type] || 0) + 1
   }
-  // Calculate avg messages to quote (from customer conversations that reached QUOTING+)
-  const quotedConvs = allConvs.filter((c: any) => c.total_price_cents && c.total_price_cents > 0)
 
   // ═══════════════════════════════════════════════════════
   // FINANCIAL SUMMARY
@@ -290,38 +359,55 @@ export async function GET() {
     .reduce((s: number, c: any) => s + (c.total_price_cents || 0), 0)
 
   // ═══════════════════════════════════════════════════════
-  // PENDING ACTIONS (enriched)
+  // PENDING ACTIONS (enriched) — wrapped in own try/catch so
+  // enrichment failure doesn't nuke the entire response
   // ═══════════════════════════════════════════════════════
-  const pendingActions: Array<{
+  let pendingActions: Array<{
     id: string; phone: string; type: string; message: string
     created_at: string; minutesOld: number
     customer_name: string | null; state: string | null
     delivery_city: string | null; yards_needed: number | null
     total_price_cents: number | null
   }> = []
-  if (pendingActionsRaw && pendingActionsRaw.length > 0) {
-    const phones = Array.from(new Set(pendingActionsRaw.map((r: any) => r.phone).filter((p: string) => p && p !== "system")))
-    let convsByPhone: Record<string, any> = {}
-    if (phones.length > 0) {
-      const { data: convs } = await sb
-        .from("customer_conversations")
-        .select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents")
-        .in("phone", phones)
-      for (const c of (convs || [])) convsByPhone[c.phone] = c
+  try {
+    if (pendingActionsRaw && pendingActionsRaw.length > 0) {
+      const phones = Array.from(new Set(pendingActionsRaw.map((r: any) => r.phone).filter((p: string) => p && p !== "system")))
+      let convsByPhone: Record<string, any> = {}
+      if (phones.length > 0) {
+        const { data: convs } = await sb
+          .from("customer_conversations")
+          .select("phone, customer_name, state, delivery_city, yards_needed, total_price_cents")
+          .in("phone", phones)
+        for (const c of (convs || [])) convsByPhone[c.phone] = c
+      }
+      for (const r of pendingActionsRaw) {
+        const [type, ...rest] = ((r as any).body || "").split(" | ")
+        const message = rest.join(" | ") || (r as any).body || ""
+        const conv = convsByPhone[(r as any).phone] || {}
+        pendingActions.push({
+          id: (r as any).id, phone: (r as any).phone, type: type || "UNKNOWN", message,
+          created_at: (r as any).created_at,
+          minutesOld: Math.round((now - new Date((r as any).created_at).getTime()) / 60000),
+          customer_name: conv.customer_name || null, state: conv.state || null,
+          delivery_city: conv.delivery_city || null, yards_needed: conv.yards_needed || null,
+          total_price_cents: conv.total_price_cents || null,
+        })
+      }
     }
-    for (const r of pendingActionsRaw) {
+  } catch (enrichErr) {
+    console.error("[command-center] pending actions enrichment failed:", enrichErr)
+    // Fall back to raw pending actions without enrichment — non-fatal
+    pendingActions = (pendingActionsRaw || []).map((r: any) => {
       const [type, ...rest] = ((r as any).body || "").split(" | ")
-      const message = rest.join(" | ") || (r as any).body || ""
-      const conv = convsByPhone[(r as any).phone] || {}
-      pendingActions.push({
-        id: (r as any).id, phone: (r as any).phone, type: type || "UNKNOWN", message,
-        created_at: (r as any).created_at,
-        minutesOld: Math.round((now - new Date((r as any).created_at).getTime()) / 60000),
-        customer_name: conv.customer_name || null, state: conv.state || null,
-        delivery_city: conv.delivery_city || null, yards_needed: conv.yards_needed || null,
-        total_price_cents: conv.total_price_cents || null,
-      })
-    }
+      return {
+        id: r.id, phone: r.phone, type: type || "UNKNOWN",
+        message: rest.join(" | ") || r.body || "",
+        created_at: r.created_at,
+        minutesOld: Math.round((now - new Date(r.created_at).getTime()) / 60000),
+        customer_name: null, state: null, delivery_city: null,
+        yards_needed: null, total_price_cents: null,
+      }
+    })
   }
 
   // ═══════════════════════════════════════════════════════
@@ -346,7 +432,7 @@ export async function GET() {
       pendingDriverPayCents: Math.round(pendingPayTotal * 100),
     },
 
-    // Conversion funnel (30-day)
+    // Conversion funnel (30-day) — legacy derived funnel
     funnel: {
       leads: funnelTotal,
       quoted: funnelQuoted,
@@ -354,6 +440,9 @@ export async function GET() {
       delivered: funnelDelivered,
       paid: funnelPaid,
     },
+
+    // State-based funnel — direct conversation_state → count
+    stateFunnel,
 
     // Alerts
     alerts: {
@@ -415,7 +504,7 @@ export async function GET() {
     noShows: noShows || [],
     recentSms: recentSms || [],
     recentCustSms: recentCustSms || [],
-    driverCount: driverCount || 0,
+    driverCount: driverCountRaw,
     pendingActions,
   })
 }
