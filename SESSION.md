@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-04-09T00:04:19.265Z
-> Commit: c392c3c fix(customer-brain): unbreakable hardening pass
+> Auto-generated 2026-04-13T16:08:13.171Z
+> Commit: 2f475c1 fix: rewrite anomaly monitor + fix unreadable gray text across command center
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
@@ -10,8 +10,8 @@
 - GitHub: dailyevohire-design/dumpsite.io
 
 ## Live Stats
-- Open orders: 18
-- Active drivers: 135
+- Open orders: 19
+- Active drivers: 136
 - Active reservations: 0
 - Material photos: 11
 - Pending payouts: $0
