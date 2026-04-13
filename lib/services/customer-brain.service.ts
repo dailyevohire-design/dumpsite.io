@@ -401,6 +401,10 @@ function extractMaterialFromPurpose(purpose: string): { key: string; name: strin
   if (/\bstructural\s*fill\b/i.test(p)) return { key: "structural_fill", name: "structural fill" }
   if (/\btopsoil\b|\bscreened\s*topsoil\b/i.test(p)) return { key: "screened_topsoil", name: "screened topsoil" }
   if (/\bfill\s*dirt\b/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
+  // "dirt" or "clean dirt" alone = fill_dirt. MUST come before purpose keywords
+  // so "dirt for the driveway" → fill_dirt, not structural_fill.
+  // Dylan Delacruz was quoted $23/yard (structural_fill) because "driveway" fired first.
+  if (/\b(clean\s+)?dirt\b/i.test(p) && !/structural|topsoil|sand|gravel/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
   if (/\bsand\b/i.test(p) && !/thousand|grand/i.test(p)) return { key: "sand", name: "sand" }
   // Then check purpose keywords (English)
   if (/pool|foundation|slab|footing|driveway|road|parking|pad|concrete|patio|sidewalk|compac/i.test(p)) return { key: "structural_fill", name: "structural fill" }
@@ -1196,7 +1200,9 @@ async function callSarah(
     // Build context — tells Sonnet exactly what we know and what to do
     const has = (v: any) => v !== null && v !== undefined && v !== ""
     const collected: string[] = []
-    if (agentName) collected.push(`YOUR NAME IN THIS CONVERSATION: ${agentName} (use this name, NOT Sarah)`)
+    // Agent name is for INTERNAL tracking only — customer-facing identity is ALWAYS Sarah.
+    // Previous code told Sonnet "use John, NOT Sarah" which caused Sarah to say "im John".
+    collected.push(`YOUR NAME: Sarah`)
     if (has(conv.customer_name)) collected.push(`Name: ${conv.customer_name}`)
     if (has(conv.delivery_address)) collected.push(`Address: ${conv.delivery_address} (${conv.delivery_city || ""}, ${conv.distance_miles || "?"}mi, Zone ${conv.zone || "?"})`)
     if (has(conv.material_purpose)) collected.push(`Purpose: ${conv.material_purpose}`)
@@ -2923,31 +2929,53 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // Allow re-entry if: no address yet, existing address has no zone, or customer is correcting
   const isBareZip = /^\d{5}(-\d{4})?$/.test(body.trim())
   const addressOutOfZone = has(conv.delivery_address) && !has(conv.zone)
+
+  // ── INTERSECTION DETECTION (FIX 4) ──
+  // Intersection addresses geocode unreliably. Detect them BEFORE calling geocode.
+  const isIntersection = (addr: string): boolean => {
+    const a = addr.toLowerCase()
+    // "Highway 75 and George Bush" / "FM 121 & Main" / "off 35 and Sterret"
+    if (/(hwy|highway|fm|rd|road|st|street|ave|blvd|dr|pkwy|cr|sh|ih|i-)\s*\d+\s*(and|&)\s*/i.test(a)) return true
+    // Contains " & " (not just ampersand in a business name)
+    if (/\s+&\s+/.test(a) && !/\d{2,}/.test(a.split('&')[0])) return true
+    // "X and Y" between two non-number words that look like street names
+    if (/\b(off|near|at|by|corner of)\s+\d*\s*\w+\s+and\s+\w+/i.test(a)) return true
+    return false
+  }
+
   if (isAddress && (needAddress || addressOutOfZone) && !isBareZip) {
-    const geo = await geocode(body)
+    const addressText = body.trim()
+    const firstName = (conv.customer_name || "").split(/\s+/)[0]
+    const greeting = firstName ? `${firstName}, ` : "Hey, "
+
+    // ── FIX 4: If intersection, ask for a street number first ──
+    if (isIntersection(addressText) && !conv.delivery_address) {
+      updates.delivery_address = addressText
+      reply = validate(`${greeting}just to confirm, is that an intersection or do you have a street number? like 123 Main St, helps me get you the exact delivery spot`, lastOut)
+      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await logMsg(phone, reply, "outbound", `intersection_ask_${sid}`)
+      return reply
+    }
+
+    const geo = await geocode(addressText)
     if (geo) {
       const nearest = nearestYard(geo.lat, geo.lng)
       // ── HARD SERVICE AREA REFUSAL ──
-      // We only serve within SERVICE_RADIUS_MILES of Dallas / Fort Worth / Denver.
-      // Polite refusal, no quote, no dispatch, end the active flow. Admin is notified
-      // so we can track demand outside our area.
       if (nearest.miles > SERVICE_RADIUS_MILES) {
-        updates.delivery_address = body.trim()
+        updates.delivery_address = addressText
         updates.delivery_city = geo.city
         updates.delivery_lat = geo.lat
         updates.delivery_lng = geo.lng
         updates.distance_miles = nearest.miles
         updates.zone = null
         updates.state = "OUT_OF_AREA"
-        await notifyAdmin(`OUT OF AREA: ${conv.customer_name || phone} at "${body.trim()}" (${geo.city}) — ${nearest.miles}mi from nearest yard (${nearest.yard.name}). Refused politely.`, `out_of_area_${Date.now()}`)
-        const firstName = (conv.customer_name || "").split(/\s+/)[0]
-        const greeting = firstName ? `${firstName}, ` : ""
+        await notifyAdmin(`OUT OF AREA: ${conv.customer_name || phone} at "${addressText}" (${geo.city}) — ${nearest.miles}mi from nearest yard (${nearest.yard.name}). Refused politely.`, `out_of_area_${Date.now()}`)
         reply = validate(`${greeting}I really appreciate you reaching out but unfortunately we don't service ${geo.city} — we only deliver within ${SERVICE_RADIUS_MILES} miles of Dallas, Fort Worth, or Denver. If you have a project in any of those areas in the future just text me back and I'll get you taken care of`, lastOut)
         await saveConv(phone, { ...conv, ...updates }, readAt)
         await logMsg(phone, reply, "outbound", `out_of_area_${sid}`)
         return reply
       }
-      updates.delivery_address = body.trim()
+      updates.delivery_address = addressText
       updates.delivery_city = geo.city
       updates.delivery_lat = geo.lat
       updates.delivery_lng = geo.lng
@@ -2955,14 +2983,36 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const zone = ZONES.find(z => nearest.miles >= z.min && (nearest.miles < z.max || (z.zone === "C" && nearest.miles <= z.max)))
       updates.zone = zone?.zone || null
       if (!zone) {
-        // 60-100mi: in service but outside priced zones — admin manually quotes via safeFallbackQuote path
-        await notifyAdmin(`OUTER ZONE: ${conv.customer_name || phone} address "${body.trim()}" geocoded to ${geo.lat},${geo.lng} (${geo.city}) — ${nearest.miles}mi from nearest yard. Within service area but needs manual quote.`, `outer_zone_${Date.now()}`)
+        await notifyAdmin(`OUTER ZONE: ${conv.customer_name || phone} address "${addressText}" geocoded to ${geo.lat},${geo.lng} (${geo.city}) — ${nearest.miles}mi from nearest yard. Within service area but needs manual quote.`, `outer_zone_${Date.now()}`)
       }
     } else {
-      // Geocode completely failed — save the address text so we don't lose it, alert admin
-      updates.delivery_address = body.trim()
-      console.error("[customer geocode] FAILED for:", body.trim())
-      await notifyAdmin(`GEOCODE FAILED for customer ${conv.customer_name || phone} address: "${body.trim()}". Address saved but no coords. May need manual zone assignment.`, `geocode_fail_${Date.now()}`)
+      // ── GEOCODE FAILED — FIX 1 + FIX 2 ──
+      // First failure: ask customer to reconfirm address (don't use fallback yet).
+      // Second failure (address already saved and still no coords): use fallback pricing.
+      const isSecondAttempt = has(conv.delivery_address) && !has(conv.delivery_lat)
+      const isIntersectionAddr = isIntersection(addressText)
+
+      if (!isSecondAttempt && !isIntersectionAddr) {
+        // FIRST geocode failure — save address, ask to reconfirm. DO NOT quote yet.
+        updates.delivery_address = addressText
+        console.error("[customer geocode] FAILED (first attempt) for:", addressText)
+        // Admin notification — fire and forget, NEVER touches customer reply
+        notifyAdmin(`GEOCODE FAILED for ${conv.customer_name || phone} address: "${addressText}". Asked customer to reconfirm.`, `geocode_fail_${Date.now()}`).catch(() => {})
+        reply = validate(`${greeting}just want to make sure I get you the right price, can you double check that address for me? want to make sure it goes to the right spot`, lastOut)
+        await saveConv(phone, { ...conv, ...updates }, readAt)
+        await logMsg(phone, reply, "outbound", `geocode_reconfirm_${sid}`)
+        return reply
+      } else {
+        // SECOND attempt OR intersection — use fallback zone pricing.
+        // Save address, note it for manual review, quote normally.
+        updates.delivery_address = addressText
+        console.error("[customer geocode] FAILED (second attempt / intersection) for:", addressText)
+        // Admin notification — fire and forget, NEVER touches customer reply
+        notifyAdmin(`GEOCODE FAILED (2nd attempt): ${conv.customer_name || phone} address: "${addressText}". Using fallback zone B pricing.`, `geocode_fail2_${Date.now()}`).catch(() => {})
+        // Don't set coords — the pricing engine will see no coords and trigger safeFallbackQuote
+        // which will present a normal customer-facing quote. The MANUAL_QUOTE admin alert
+        // is sent in that fallback path, completely separate from the customer reply.
+      }
     }
   }
 
@@ -3191,8 +3241,8 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     // themselves: "got it Mike, im John, whats the address?"
     const justGotName = !!updates.customer_name && !conv.customer_name
     const customerFirst = (merged.customer_name || "").split(/\s+/)[0]
-    if (justGotName && agentFirstName) {
-      instruction = `They just told you their name is ${customerFirst}. Acknowledge it casually, introduce yourself as ${agentFirstName} (just the first name, no company name), then ask for the delivery address. Example tone: "got it ${customerFirst}, im ${agentFirstName}, whats the delivery address" — natural and short.`
+    if (justGotName) {
+      instruction = `They just told you their name is ${customerFirst}. Acknowledge it casually, introduce yourself as Sarah (just the first name, no company name), then ask for the delivery address. Example tone: "got it ${customerFirst}, im Sarah, whats the delivery address" — natural and short.`
     } else if (justGotName) {
       instruction = `They just told you their name is ${customerFirst}. Acknowledge it casually then ask for the delivery address. Example: "got it ${customerFirst}, whats the delivery address"`
     } else {
@@ -3731,6 +3781,21 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     } catch (verifyErr) {
       console.error("[VERIFY] address check failed:", (verifyErr as any)?.message)
     }
+  }
+
+  // ── FIX 1: SAFETY GUARD — NEVER send system/admin text to customer ──
+  // If the reply somehow contains internal system strings (MANUAL_QUOTE,
+  // DISPATCH_REFUSED, BRAIN_CRASH, geocoding failed, etc.), it means a code
+  // path leaked admin text into the customer reply. Catch it here and replace
+  // with a safe fallback so the customer NEVER sees system internals.
+  const SYSTEM_LEAK_PATTERNS = /MANUAL_QUOTE|MANUAL.?CONFIRM|DISPATCH_REFUSED|BRAIN_CRASH|URGENT_STRIPE|DISPATCH_FAILED|geocoding failed|fallback quote|zone [A-C]\)|Confirm exact pricing|pending_action|SEND FAILED|SEND BLOCKED/i
+  if (SYSTEM_LEAK_PATTERNS.test(reply)) {
+    console.error(`[SYSTEM LEAK BLOCKED] phone=${phone} — reply contained system text: "${reply.slice(0, 200)}"`)
+    await notifyAdmin(`SYSTEM LEAK BLOCKED for ${conv.customer_name || phone}: reply contained admin text. Original: "${reply.slice(0, 200)}". Sent safe fallback instead.`, `leak_${Date.now()}`)
+    const safeFirstName = (conv.customer_name || "").split(/\s+/)[0]
+    reply = safeFirstName
+      ? `${safeFirstName}, give me just a sec to pull up your info`
+      : "Give me just a sec to pull up your info"
   }
 
   await logMsg(phone, reply, "outbound", `out_${sid}`)
