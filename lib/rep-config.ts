@@ -34,18 +34,16 @@ export const AGENTS: AgentConfig[] = [
     commissionPct: 5,
     active: true,
   },
-  // MICAH — when his number is ready, uncomment and fill in:
-  // {
-  //   id: 'micah',
-  //   name: 'Micah',
-  //   personalPhone: '+1XXXXXXXXXX',  // Micah's real cell
-  //   twilioNumber: '+1XXXXXXXXXX',   // Micah's assigned Twilio number
-  //   market: 'DFW',
-  //   role: 'manager',
-  //   managerId: undefined,
-  //   commissionPct: 5,
-  //   active: true,
-  // },
+  {
+    id: 'micah',
+    name: 'Micah',
+    personalPhone: '+13034098337',
+    twilioNumber: '+14695236420',
+    market: 'DFW',
+    role: 'manager',
+    commissionPct: 5,
+    active: true,
+  },
   // NEW AGENT TEMPLATE — copy this block for each new hire:
   // {
   //   id: 'firstname',
