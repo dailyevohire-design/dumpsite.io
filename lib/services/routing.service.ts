@@ -1,4 +1,5 @@
 import { createAdminSupabase } from '../supabase'
+import { DEFAULT_DRIVER_PAY_CENTS } from '../driver-pay-rates'
 
 const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY || ''
 
@@ -268,7 +269,7 @@ export async function findNearbyJobs(
     id: o.id,
     cityName: (o.cities as any)?.name || driverLocation,
     yardsNeeded: o.yards_needed,
-    driverPayCents: o.driver_pay_cents || 4500,
+    driverPayCents: o.driver_pay_cents || DEFAULT_DRIVER_PAY_CENTS,
     truckTypeNeeded: o.truck_type_needed || 'tandem_axle', // null = dump truck access only
     distanceMiles: Math.round(o.distanceMiles * 10) / 10,
     drivingMinutes: o.drivingMinutes,

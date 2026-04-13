@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { createAdminSupabase } from "../supabase"
+import { DEFAULT_DRIVER_PAY_CENTS, NEGOTIATION_CEILING_CENTS } from "../driver-pay-rates"
 import { findNearbyJobs, atomicClaimJob, JobMatch } from "./routing.service"
 import {
   downloadAndStorePhoto,
@@ -192,6 +193,14 @@ function isAddressResend(text: string): boolean {
 }
 export function generateJobNumber(id: string): string {
   return "DS-" + id.replace(/-/g, "").slice(0, 6).toUpperCase()
+}
+function hashPhoneToInt(phone: string): number {
+  let hash = 0
+  for (let i = 0; i < phone.length; i++) {
+    hash = ((hash << 5) - hash) + phone.charCodeAt(i)
+    hash = hash & hash
+  }
+  return Math.abs(hash)
 }
 
 function formatTruckAccess(truckType: string): string {
@@ -406,7 +415,16 @@ async function sendJobLink(
   await saveConv(driverPhone, { ...conv, state: "ACTIVE", active_order_id: job.id })
 
   // Send address as a SEPARATE SMS so iOS/Android map-link previews don't get crowded by the summary text
-  try { await sendSMS(driverPhone, `${job.client_address}`) } catch {}
+  try {
+    await sendSMS(driverPhone, `${job.client_address}`)
+  } catch (err: any) {
+    console.error(`[jesse] CRITICAL: address SMS failed for ${driverPhone}:`, err?.message)
+    await sendAdminAlert(
+      `CRITICAL: Jesse failed to send address to driver ${driverPhone}. ` +
+      `Job ${job.id}. Address: ${job.client_address?.slice(0, 80)}. ` +
+      `Manual send required immediately.`
+    )
+  }
   // Small delay so the address arrives first in driver inbox before the summary
   await new Promise(r => setTimeout(r, 400))
 
@@ -667,7 +685,7 @@ function tryTemplate(
     if (wordMatch) {
       const count = wordNums[wordMatch[2].toLowerCase()]
       if (count) {
-        return { response: "__DELIVERY__:" + count, updates: { state: "AWAITING_CUSTOMER_CONFIRM" }, action: "COMPLETE_JOB" }
+        return { response: "__DELIVERY__:" + count, updates: {}, action: "COMPLETE_JOB" }
       }
     }
   }
@@ -900,7 +918,7 @@ function tryTemplate(
   if (loadMatch && activeJob && (state === "ACTIVE" || state === "OTW_PENDING")) {
     const loads = parseInt(loadMatch1 ? loadMatch1[1] : loadMatch2![2])
     if (loads > 0 && loads <= 100) {
-      return { response: "__DELIVERY__:" + loads, updates: { state: "AWAITING_CUSTOMER_CONFIRM" }, action: "COMPLETE_JOB" }
+      return { response: "__DELIVERY__:" + loads, updates: {}, action: "COMPLETE_JOB" }
     }
   }
 
@@ -1174,7 +1192,7 @@ function tryTemplate(
   // CATCH-ALL: qualification is NOT complete — NEVER let
   // Sonnet skip steps. Template enforces the order.
   // ═══════════════════════════════════════════════════
-  const inQualification = !activeJob && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED" && state !== "PAYMENT_METHOD_PENDING" && state !== "PAYMENT_ACCOUNT_PENDING" && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "AWAITING_CUSTOMER_CONFIRM" && state !== "CLOSED"
+  const inQualification = !activeJob && state !== "PHOTO_PENDING" && state !== "APPROVAL_PENDING" && state !== "JOB_PRESENTED" && state !== "PAYMENT_METHOD_PENDING" && state !== "PAYMENT_ACCOUNT_PENDING" && state !== "ACTIVE" && state !== "OTW_PENDING" && state !== "CLOSED"
   const qualificationMissing = !hasYards || !hasTruck || !hasTruckCount || !hasCity
 
   if (inQualification && qualificationMissing) {
@@ -1267,7 +1285,7 @@ async function callBrain(
   isKnownDriver: boolean, savedPayment: { method: string; account: string }|null,
 ): Promise<BrainOutput> {
   const topJob = nearbyJobs[0]
-  const ceilingCents = topJob?.driverPayCents || 5000
+  const ceilingCents = topJob?.driverPayCents || NEGOTIATION_CEILING_CENTS
   const floorCents = isKnownDriver ? ceilingCents : Math.max(2500, ceilingCents - 2000)
 
   const ctx = (() => {
@@ -1392,7 +1410,7 @@ async function handleDelivery(
   phone: string, conv: any, profile: any, job: any, loads: number, lang: "en"|"es"
 ): Promise<string> {
   const sb = createAdminSupabase()
-  const payPerLoad = job.driver_pay_cents || 4500
+  const payPerLoad = job.driver_pay_cents || DEFAULT_DRIVER_PAY_CENTS
   const totalCents = payPerLoad * loads
   const totalDollars = Math.round(totalCents / 100)
   const jobNum = generateJobNumber(job.id)
@@ -1563,6 +1581,19 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
 
   if (await isDuplicate(sid)) return ""
 
+  // Cross-instance advisory lock — prevents two Vercel instances from processing
+  // the same driver simultaneously. Lock auto-releases when the DB connection closes.
+  try {
+    const { data: lockAcquired } = await createAdminSupabase().rpc("try_advisory_lock", { lock_key: hashPhoneToInt(phone) })
+    if (!lockAcquired) {
+      console.log(`[jesse] advisory lock blocked for ${phone}, another instance is processing`)
+      return ""
+    }
+  } catch (lockErr) {
+    // If the RPC doesn't exist yet, log and continue — don't block all SMS
+    console.warn("[jesse] advisory lock RPC not available:", (lockErr as any)?.message?.slice(0, 80))
+  }
+
   // Multi-photo MMS — Twilio sends MediaUrl0..MediaUrlN, we only process MediaUrl0.
   // Tell driver to send one at a time so they don't think the rest were "received".
   if ((sms.numMedia || 0) > 1 && isPhoto) {
@@ -1575,6 +1606,12 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
   // Rapid-fire protection — wait 1.5s, then grab any additional messages and combine them
   const sb = createAdminSupabase()
   await logMsg(phone, body || (hasPhoto ? "[photo]" : isNonPhotoMedia ? "[voice/video]" : ""), "inbound", sid)
+
+  // Photo debounce — if driver sends a photo, wait 2s for any accompanying text to arrive
+  // and re-read conv state so we process the photo with the freshest data
+  if (hasPhoto) {
+    await new Promise(r => setTimeout(r, 2000))
+  }
 
   // APPROVAL_PENDING watchdog — if we sent the customer an approval request more than
   // 6 hours ago and they never replied, the driver is stuck. Auto-reset and tell them.
@@ -1768,7 +1805,7 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
   }
 
   // ── FIX #4: LOAD COUNT CORRECTION — "wait I meant 7" ──
-  if (/^(wait|hold on|actually|my bad|i meant|correction|no wait)/i.test(lower) && (convState === "PAYMENT_METHOD_PENDING" || convState === "AWAITING_CUSTOMER_CONFIRM")) {
+  if (/^(wait|hold on|actually|my bad|i meant|correction|no wait)/i.test(lower) && convState === "PAYMENT_METHOD_PENDING") {
     const correctedLoads = body.match(/(\d+)/)?.[1]
     if (correctedLoads) {
       const newCount = Math.min(parseInt(correctedLoads), 50)
@@ -1780,7 +1817,7 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
           .eq("dispatch_order_id", activeOrderId).eq("driver_id", profile.user_id)
           .order("created_at", { ascending: false }).maybeSingle()
         if (lr) {
-          const payPerLoad = (lr.dispatch_orders as any)?.driver_pay_cents || 4500
+          const payPerLoad = (lr.dispatch_orders as any)?.driver_pay_cents || DEFAULT_DRIVER_PAY_CENTS
           const newTotalCents = payPerLoad * newCount
           await sb.from("load_requests").update({ payout_cents: newTotalCents, truck_count: newCount }).eq("id", lr.id)
           // Update driver_payments too
@@ -2252,13 +2289,13 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
   brain.response = response
 
   // ── PERSIST (with state validation) ──────────────────────────
-  const VALID_STATES = new Set(["DISCOVERY","GETTING_NAME","ASKING_TRUCK","ASKING_TRUCK_COUNT","ASKING_ADDRESS","JOB_PRESENTED","PHOTO_PENDING","APPROVAL_PENDING","ACTIVE","OTW_PENDING","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_CUSTOMER_CONFIRM","CLOSED"])
+  const VALID_STATES = new Set(["DISCOVERY","GETTING_NAME","ASKING_TRUCK","ASKING_TRUCK_COUNT","ASKING_ADDRESS","JOB_PRESENTED","PHOTO_PENDING","APPROVAL_PENDING","ACTIVE","OTW_PENDING","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","CLOSED"])
   const toSave: Record<string,any> = { ...enriched }
   // Only accept state from brain if it's valid AND the transition makes sense
   if (brain.updates.state && VALID_STATES.has(brain.updates.state)) {
     const newState = brain.updates.state
     // Prevent brain from jumping to payment/active states without proper preconditions
-    const dangerousStates = ["PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING", "ACTIVE", "OTW_PENDING", "AWAITING_CUSTOMER_CONFIRM", "CLOSED"]
+    const dangerousStates = ["PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING", "ACTIVE", "OTW_PENDING", "CLOSED"]
     // Job-flow states that require a real order — Sonnet hallucinations have set these
     // without any actual order, locking drivers into a fake job they can't escape.
     const jobStates = ["JOB_PRESENTED", "PHOTO_PENDING", "APPROVAL_PENDING"]
@@ -2281,16 +2318,19 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
   // ── ACTIONS ──────────────────────────────────────────────────
   
   // Handle photo approval — brain approved the dirt, send to customer
-  // Trigger if: (1) Sonnet explicitly said SEND_FOR_APPROVAL, OR
-  //             (2) photo was sent during PHOTO_PENDING and Sonnet didn't reject the dirt
+  // Trigger ONLY on explicit positive signal from Sonnet — never on ambiguous responses
   // BLOCK during after hours — don't MMS/call customers at night
   const dirtRejected = /no go|can.?t accept|rejected|trash|debris|concrete|clay/i.test(brain.response)
-  const photoApprovalNeeded = brain.action === "SEND_FOR_APPROVAL"
-    || (hasPhoto && toSave.state === "APPROVAL_PENDING")
-    || (hasPhoto && convState === "PHOTO_PENDING" && !dirtRejected)
+  const explicitApproval = brain.action === "SEND_FOR_APPROVAL"
+    || (typeof brain.response === "string" && /\b(looks (good|clean|ok|great|fine)|clean (dirt|fill)|approve this|send.* for approval|se ve bien|tierra limpia)\b/i.test(brain.response))
+  const photoApprovalNeeded = hasPhoto
+    && convState === "PHOTO_PENDING"
+    && explicitApproval
+    && !dirtRejected
   if (photoApprovalNeeded) {
     const orderId = toSave.pending_approval_order_id || conv.pending_approval_order_id
-    console.log(`[Brain] Photo approval: orderId=${orderId} action=${brain.action} convState=${convState} dirtRejected=${dirtRejected}`)
+    console.log(`[Brain] Photo approval: orderId=${orderId} action=${brain.action} convState=${convState} dirtRejected=${dirtRejected} explicitApproval=${explicitApproval}`)
+    await logEvent("PHOTO_EVALUATED", { phone, orderId, action: brain.action, response: brain.response?.slice(0, 100), explicitApproval, dirtRejected }, orderId)
     if (orderId) {
       // FIX #6: Verify order still exists and is valid
       const { data: orderCheck } = await createAdminSupabase().from("dispatch_orders")
@@ -2390,8 +2430,11 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
       } // close order-valid else block
     } else {
       console.error(`[Brain] PHOTO APPROVAL BLOCKED — no orderId. conv.pending_approval_order_id=${conv.pending_approval_order_id} toSave.pending_approval_order_id=${toSave.pending_approval_order_id}`)
-      // Still set state so driver doesn't get stuck
-      toSave.state = "APPROVAL_PENDING"
+      // No orderId = no order to approve. Send driver back to DISCOVERY, don't trap in APPROVAL_PENDING
+      toSave.state = "DISCOVERY"
+      toSave.pending_approval_order_id = null
+      brain.response = lang === "es" ? "no encuentro el trabajo, mandame tu ciudad de nuevo" : "cant find the job for that one, text me your city again"
+      await sendAdminAlert(`PHOTO APPROVAL BLOCKED: driver ${phone} sent photo but no orderId found. Reset to DISCOVERY.`)
     }
   }
 

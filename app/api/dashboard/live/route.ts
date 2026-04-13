@@ -19,7 +19,7 @@ export async function GET() {
   ] = await Promise.all([
     sb.from("conversations")
       .select("phone, state, extracted_city, extracted_truck_type, extracted_yards, updated_at, photo_public_url, pending_approval_order_id, active_order_id")
-      .in("state", ["DISCOVERY", "ASKING_TRUCK", "PHOTO_PENDING", "APPROVAL_PENDING", "ACTIVE", "OTW_PENDING", "PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING", "AWAITING_CUSTOMER_CONFIRM", "GETTING_NAME"])
+      .in("state", ["DISCOVERY", "ASKING_TRUCK", "PHOTO_PENDING", "APPROVAL_PENDING", "ACTIVE", "OTW_PENDING", "PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING", "GETTING_NAME"])
       .order("updated_at", { ascending: false }),
     sb.from("sms_logs")
       .select("phone, body, direction, created_at")

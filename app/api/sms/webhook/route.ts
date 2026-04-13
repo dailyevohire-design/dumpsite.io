@@ -144,7 +144,21 @@ export async function POST(request: Request) {
 
     after(async () => {
       await new Promise(r => setTimeout(r, delay))
-      await sendViaTwilioAPI(phone, reply)
+      let sent = false
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await sendViaTwilioAPI(phone, reply)
+          sent = true
+          break
+        } catch (err) {
+          console.error(`[jesse] SMS send attempt ${attempt + 1} failed:`, err)
+          if (attempt === 0) await new Promise(r => setTimeout(r, 5000))
+        }
+      }
+      if (!sent) {
+        console.error(`[jesse] SMS FAILED BOTH ATTEMPTS for ${phone}: ${reply.slice(0, 100)}`)
+        await alertAdminViaTwilio(`Jesse SMS delivery failed for ${phone}. Reply was: ${reply.slice(0, 120)}`)
+      }
     })
 
     return new Response('<Response></Response>', { status: 200, headers: { 'Content-Type': 'text/xml' } })

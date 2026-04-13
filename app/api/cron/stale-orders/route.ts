@@ -89,7 +89,7 @@ export async function GET(request: NextRequest) {
   const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString()
   const { data: stuckDiscovery } = await sb.from("conversations")
     .select("phone, state, updated_at")
-    .in("state", ["DISCOVERY", "ASKING_TRUCK", "GETTING_NAME"])
+    .in("state", ["DISCOVERY", "ASKING_TRUCK", "ASKING_TRUCK_COUNT", "GETTING_NAME"])
     .lt("updated_at", tenMinAgo)
 
   for (const c of stuckDiscovery || []) {
@@ -104,12 +104,41 @@ export async function GET(request: NextRequest) {
     // Auto re-prompt with a forward-progress question
     const reprompt = c.state === "ASKING_TRUCK"
       ? "what kind of truck you running bro"
+      : c.state === "ASKING_TRUCK_COUNT"
+      ? "how many trucks you got running today"
       : "whats your loading address, i can see what i got close"
     try {
       await tw.messages.create({ body: reprompt, from: FROM, to: `+1${c.phone}` })
       await sb.from("sms_logs").insert({ phone: c.phone, body: `[STRANDED REPROMPT ${mins}m] ${reprompt}`, direction: "outbound", message_sid: `stranded_${Date.now()}` })
       await sb.from("conversations").update({ updated_at: new Date().toISOString() }).eq("phone", c.phone)
     } catch (e) { console.error("[stranded reprompt]", e) }
+  }
+
+  // 2c. STUCK PAYMENT — driver went dark during payment collection
+  const twentyMinAgo = new Date(Date.now() - 20 * 60 * 1000).toISOString()
+  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+  const { data: stuckPayment } = await sb.from("conversations")
+    .select("phone, state, updated_at")
+    .in("state", ["PAYMENT_METHOD_PENDING", "PAYMENT_ACCOUNT_PENDING"])
+    .lt("updated_at", twentyMinAgo)
+
+  for (const c of stuckPayment || []) {
+    const mins = Math.round((Date.now() - new Date(c.updated_at).getTime()) / 60000)
+    // Only nudge if driver sent last message (they're waiting) or it's been 20+ min since we asked
+    try {
+      const reprompt = c.state === "PAYMENT_ACCOUNT_PENDING"
+        ? "still need your payment info to close this out, whats your zelle or venmo"
+        : "how you want it, zelle or venmo"
+      await tw.messages.create({ body: reprompt, from: FROM, to: `+1${c.phone}` })
+      await sb.from("sms_logs").insert({ phone: c.phone, body: `[PAYMENT REPROMPT ${mins}m] ${reprompt}`, direction: "outbound", message_sid: `payreprompt_${Date.now()}` })
+      await sb.from("conversations").update({ updated_at: new Date().toISOString() }).eq("phone", c.phone)
+      alerts.push(`STUCK PAYMENT: ${c.phone} in ${c.state} for ${mins} min, re-prompted`)
+    } catch (e) { console.error("[payment reprompt]", e) }
+
+    // Escalate to admin after 30 min
+    if (new Date(c.updated_at) < new Date(thirtyMinAgo)) {
+      alerts.push(`PAYMENT ESCALATION: ${c.phone} stuck in ${c.state} for ${mins} min`)
+    }
   }
 
   // 3. STUCK CUSTOMER CONVERSATIONS — no update in 15+ min during active flow

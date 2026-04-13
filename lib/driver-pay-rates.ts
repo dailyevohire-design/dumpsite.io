@@ -57,3 +57,6 @@ export function getDriverPayCents(cityName: string, dbPayCents?: number | null):
   const key = cityName.toLowerCase().trim()
   return CITY_DRIVER_PAY_CENTS[key] ?? DEFAULT_DRIVER_PAY_CENTS
 }
+
+// Negotiation ceiling — the absolute max Jesse can offer a driver per load
+export const NEGOTIATION_CEILING_CENTS = 5000
