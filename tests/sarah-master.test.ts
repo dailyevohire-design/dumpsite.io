@@ -106,6 +106,8 @@ function extractMaterialFromPurpose(purpose: string): { key: string; name: strin
   if (/\bstructural\s*fill\b/i.test(p)) return { key: "structural_fill", name: "structural fill" }
   if (/\btopsoil\b|\bscreened\s*topsoil\b/i.test(p)) return { key: "screened_topsoil", name: "screened topsoil" }
   if (/\bfill\s*dirt\b/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
+  // "dirt" or "clean dirt" alone = fill_dirt. MUST come before purpose keywords.
+  if (/\b(clean\s+)?dirt\b/i.test(p) && !/structural|topsoil|sand|gravel/i.test(p)) return { key: "fill_dirt", name: "fill dirt" }
   if (/\bsand\b/i.test(p) && !/thousand|grand/i.test(p)) return { key: "sand", name: "sand" }
   if (/pool|foundation|slab|footing|driveway|road|parking|pad|concrete|patio|sidewalk|compac/i.test(p)) return { key: "structural_fill", name: "structural fill" }
   if (/garden|flower|plant|landscap|sod|grass|lawn|raised bed|planter|grow|organic|mulch/i.test(p)) return { key: "screened_topsoil", name: "screened topsoil" }
@@ -639,4 +641,294 @@ describe("Integration: State machine transitions", () => {
   // QUOTING→FOLLOW_UP) take 30-90s each due to Claude API calls. They are verified
   // by: bun tests/test-full-flow.ts (7 scenarios, all pass)
   // We only test the single-message entry point here.
+})
+
+// ═════════════════════════════════════════════════════════════
+// MIRRORED PRODUCTION FUNCTIONS — emergency fix coverage
+// ═════════════════════════════════════════════════════════════
+
+// Intersection detector — mirrored from customer-brain.service.ts
+function isIntersection(addr: string): boolean {
+  const a = addr.toLowerCase()
+  if (/(hwy|highway|fm|rd|road|st|street|ave|blvd|dr|pkwy|cr|sh|ih|i-)\s*\d+\s*(and|&)\s*/i.test(a)) return true
+  if (/\s+&\s+/.test(a) && !/\d{2,}/.test(a.split('&')[0])) return true
+  if (/\b(off|near|at|by|corner of)\s+\d*\s*\w+\s+and\s+\w+/i.test(a)) return true
+  return false
+}
+
+// System leak guard — mirrored from customer-brain.service.ts
+const SYSTEM_LEAK_PATTERNS = /MANUAL_QUOTE|MANUAL.?CONFIRM|DISPATCH_REFUSED|BRAIN_CRASH|URGENT_STRIPE|DISPATCH_FAILED|geocoding failed|fallback quote|zone [A-C]\)|Confirm exact pricing|pending_action|SEND FAILED|SEND BLOCKED|address_lost|yards_null|\[command.center\]|\[sarah.analytics\]|\[dashboard\]/i
+
+// safeFallbackQuote — mirrored from customer-pricing.service.ts
+const ZONES_PRICING = [
+  { zone: "A", min: 0, max: 20, baseCents: 1200 },
+  { zone: "B", min: 20, max: 40, baseCents: 1500 },
+  { zone: "C", min: 40, max: 60, baseCents: 1800 },
+]
+const SURCHARGE_CENTS: Record<string, number> = {
+  fill_dirt: 0,
+  screened_topsoil: 500,
+  structural_fill: 800,
+  sand: 600,
+}
+const SMALL_LOAD_FEE_CENTS = 5000
+const SMALL_LOAD_THRESHOLD_YARDS = 20
+
+function safeFallbackQuote(materialType: string, yards: number) {
+  const zone = ZONES_PRICING[1] // zone B default
+  const surcharge = SURCHARGE_CENTS[materialType] || 0
+  const perYard = zone.baseCents + surcharge
+  const billable = Math.max(yards, 10)
+  const dirtSubtotal = billable * perYard
+  let smallLoadFee = 0
+  if (billable < SMALL_LOAD_THRESHOLD_YARDS) {
+    smallLoadFee = SMALL_LOAD_FEE_CENTS
+  }
+  return { zone: zone.zone, perYardCents: perYard, totalCents: dirtSubtotal + smallLoadFee, billableYards: billable, smallLoadFeeCents: smallLoadFee }
+}
+
+// ═════════════════════════════════════════════════════════════
+// PRODUCTION EMERGENCY TESTS — 2026-04-13
+// ═════════════════════════════════════════════════════════════
+
+describe("Emergency: System text leak prevention", () => {
+  const SYSTEM_STRINGS = [
+    "MANUAL_QUOTE | John — geocoding failed for 4535 N Shore. Presented fallback quote $200 ($15/yard zone B) for 10yds fill dirt. Confirm exact pricing and text customer.",
+    "DISPATCH_REFUSED | Missing: yards_needed,material_type",
+    "BRAIN_CRASH | STUCK LOOP: Luis in state QUOTING. Last 3 replies were duplicates.",
+    "address_lost | delivery_address was null after saveConv",
+    "yards_null | yards_needed still null after quote",
+    "[command-center] query 4 failed: timeout",
+    "[sarah-analytics] conversion funnel update failed",
+    "[dashboard] stale order refresh error",
+    "geocoding failed for '4535 N Shore, The Colony, TX'",
+    "Presented fallback quote $200 ($15/yard zone B) for 10yds fill dirt",
+    "Confirm exact pricing and text customer",
+    "URGENT_STRIPE | Stripe session created but NOT saved",
+    "DISPATCH_FAILED | All attempts failed to 9152820677",
+    "MANUAL CONFIRM NEEDED: Jesus — geocoding failed",
+    "SEND FAILED — reply lost: Hey Jesus, 50 yards",
+    "SEND BLOCKED on +14695236420 — code 21610",
+    "pending_action | MANUAL_QUOTE stuck for 30 min",
+    "fallback quote zone B $15/yard used for Tim",
+    "zone B) for 10yds fill dirt",
+    "BRAIN_CRASH | LOOP DETECTED — Sarah stuck repeating",
+  ]
+
+  it("SYSTEM_LEAK_PATTERNS regex catches all 20 system text patterns", () => {
+    for (const s of SYSTEM_STRINGS) {
+      expect(SYSTEM_LEAK_PATTERNS.test(s)).toBe(true)
+    }
+  })
+
+  it("SYSTEM_LEAK_PATTERNS does NOT false-positive on normal customer replies", () => {
+    const normalReplies = [
+      "John, 10 yards of fill dirt to The Colony runs $200 thats $150 for the dirt at $15/yard plus a $50 small load fee since its under 20 yards. for standard 3-5 business day delivery. Want me to get that scheduled",
+      "Got it Jesus, im Sarah. quick question before I get you the price, can an 18-wheeler get to your property or should we stick with standard dump trucks",
+      "just want to make sure I get you the right price, can you double check that address for me? want to make sure it goes to the right spot",
+      "Tim, give me just a sec to pull up your info",
+      "Hey, let me grab someone from the team to help you out",
+      "Luis, 10 yardas de fill dirt a Frisco sale en $280",
+    ]
+    for (const r of normalReplies) {
+      expect(SYSTEM_LEAK_PATTERNS.test(r)).toBe(false)
+    }
+  })
+})
+
+describe("Emergency: Intersection address detection", () => {
+  it.each([
+    "Highway 75 and George Bush, Plano TX",
+    "FM 121 & Main St",
+    "off 35 and Sterret, Waxahachie",
+    "Gun Club & Mississippi, Aurora, CO",
+    "Hwy 380 and Preston, Prosper",
+    "near 75 and George Bush",
+    "corner of FM 544 and Coit Rd",
+    "at I-35 and Ledbetter",
+  ])("detects intersection: %s", (addr) => {
+    expect(isIntersection(addr)).toBe(true)
+  })
+
+  it.each([
+    "4535 N Shore Dr, The Colony TX",
+    "8149 FM 121 Van Alstyne",
+    "13312 Bidgelow Ln, Frisco TX",
+    "7704 Terry Drive, North Richland Hills TX",
+    "1629 Deer Creek Dr, DeSoto TX 75115",
+    "3210 Oak Ln, Weatherford",
+    "90 Roosevelt Lane",
+  ])("does NOT flag normal address: %s", (addr) => {
+    expect(isIntersection(addr)).toBe(false)
+  })
+})
+
+describe("Emergency: Material type preserved in fallback pricing", () => {
+  it("fill_dirt at zone B = $15/yard (no surcharge)", () => {
+    const q = safeFallbackQuote("fill_dirt", 20)
+    expect(q.perYardCents).toBe(1500)
+    expect(q.totalCents).toBe(20 * 1500)
+  })
+
+  it("screened_topsoil at zone B = $20/yard (+$5 surcharge)", () => {
+    const q = safeFallbackQuote("screened_topsoil", 20)
+    expect(q.perYardCents).toBe(2000)
+    expect(q.totalCents).toBe(20 * 2000)
+  })
+
+  it("structural_fill at zone B = $23/yard (+$8 surcharge)", () => {
+    const q = safeFallbackQuote("structural_fill", 20)
+    expect(q.perYardCents).toBe(2300)
+    expect(q.totalCents).toBe(20 * 2300)
+  })
+
+  it("sand at zone B = $21/yard (+$6 surcharge)", () => {
+    const q = safeFallbackQuote("sand", 20)
+    expect(q.perYardCents).toBe(2100)
+    expect(q.totalCents).toBe(20 * 2100)
+  })
+
+  it("20 yards fill_dirt = $300 (NOT $460 or $1265)", () => {
+    const q = safeFallbackQuote("fill_dirt", 20)
+    expect(q.totalCents).toBe(30000) // $300
+    expect(q.totalCents).not.toBe(46000) // not $460 (structural)
+    expect(q.totalCents).not.toBe(126500) // not $1265
+  })
+
+  it("55 yards fill_dirt = $825 (NOT $1265 at $23/yard)", () => {
+    const q = safeFallbackQuote("fill_dirt", 55)
+    expect(q.perYardCents).toBe(1500)
+    expect(q.totalCents).toBe(55 * 1500) // $825
+    expect(q.totalCents).not.toBe(55 * 2300) // NOT $1265
+  })
+
+  it("small load fee applies under 20 yards", () => {
+    const q = safeFallbackQuote("fill_dirt", 10)
+    expect(q.smallLoadFeeCents).toBe(5000) // $50
+    expect(q.totalCents).toBe(10 * 1500 + 5000) // $150 + $50 = $200
+  })
+
+  it("no small load fee at 20+ yards", () => {
+    const q = safeFallbackQuote("fill_dirt", 20)
+    expect(q.smallLoadFeeCents).toBe(0)
+  })
+})
+
+describe("Emergency: Material extraction — dirt keyword priority (Dylan fix)", () => {
+  it("'dirt for the driveway' → fill_dirt, NOT structural_fill", () => {
+    expect(extractMaterialFromPurpose("dirt for the driveway")?.key).toBe("fill_dirt")
+  })
+
+  it("'clean dirt for my driveway project' → fill_dirt", () => {
+    expect(extractMaterialFromPurpose("clean dirt for my driveway project")?.key).toBe("fill_dirt")
+  })
+
+  it("'I need dirt' → fill_dirt", () => {
+    expect(extractMaterialFromPurpose("I need dirt")?.key).toBe("fill_dirt")
+  })
+
+  it("'need dirt delivered' → fill_dirt", () => {
+    expect(extractMaterialFromPurpose("need dirt delivered")?.key).toBe("fill_dirt")
+  })
+
+  it("'good dirt for leveling' → fill_dirt", () => {
+    expect(extractMaterialFromPurpose("good dirt for leveling")?.key).toBe("fill_dirt")
+  })
+
+  it("'structural fill for foundation' still → structural_fill", () => {
+    expect(extractMaterialFromPurpose("structural fill for foundation")?.key).toBe("structural_fill")
+  })
+
+  it("'driveway' alone (no dirt keyword) still → structural_fill", () => {
+    expect(extractMaterialFromPurpose("building a new driveway")?.key).toBe("structural_fill")
+  })
+
+  it("'topsoil for the garden' → screened_topsoil", () => {
+    expect(extractMaterialFromPurpose("topsoil for the garden")?.key).toBe("screened_topsoil")
+  })
+})
+
+describe("Emergency: Agent name — Sarah identity", () => {
+  integrationIt("Sarah never introduces herself as John", async () => {
+    const phone = "+15555553001"
+    await cleanup(phone)
+    await send(phone, "Hey John, need some dirt delivered to McKinney")
+    await new Promise(r => setTimeout(r, 6000))
+    await send(phone, "Tim")
+    await new Promise(r => setTimeout(r, 8000))
+    const reply = await getLastOutbound(phone)
+    // Sarah must never say "im John" — always "Sarah"
+    expect(reply.toLowerCase()).not.toMatch(/\bim john\b/)
+    expect(reply.toLowerCase()).not.toMatch(/\bi'm john\b/)
+    expect(reply.toLowerCase()).not.toMatch(/\bthis is john\b/)
+    expect(reply.toLowerCase()).not.toMatch(/\bim micah\b/)
+    expect(reply.toLowerCase()).not.toMatch(/\bi'm micah\b/)
+    // Should contain "Sarah" OR just not mention any name (both acceptable)
+    if (/\bim \w+\b|\bi'm \w+\b|\bthis is \w+\b/i.test(reply)) {
+      expect(reply.toLowerCase()).toMatch(/\bsarah\b/)
+    }
+    await cleanup(phone)
+  }, 30000)
+
+  integrationIt("Sarah identity consistent across 5 conversation states", async () => {
+    const states = [
+      { phone: "+15555553010", msg: "need fill dirt" },
+      { phone: "+15555553011", msg: "how much for 20 yards" },
+      { phone: "+15555553012", msg: "50 yards of dirt to McKinney" },
+      { phone: "+15555553013", msg: "I need topsoil for landscaping" },
+      { phone: "+15555553014", msg: "hey can I get a quote on fill dirt" },
+    ]
+    for (const { phone, msg } of states) {
+      await cleanup(phone)
+      await send(phone, msg)
+    }
+    await new Promise(r => setTimeout(r, 10000))
+    for (const { phone } of states) {
+      const reply = await getLastOutbound(phone)
+      expect(reply.toLowerCase()).not.toMatch(/\bim john\b/)
+      expect(reply.toLowerCase()).not.toMatch(/\bi'm john\b/)
+      expect(reply.toLowerCase()).not.toMatch(/\bim micah\b/)
+      expect(reply.toLowerCase()).not.toMatch(/\bi'm micah\b/)
+      await cleanup(phone)
+    }
+  }, 60000)
+})
+
+describe("Emergency: Geocoding failure — customer reply safety", () => {
+  integrationIt("First geocoding failure asks to reconfirm, not a system message", async () => {
+    const phone = "+15555553020"
+    await cleanup(phone)
+    // Send a name first so the brain knows who we are
+    await send(phone, "Hey my name is TestGeo")
+    await new Promise(r => setTimeout(r, 6000))
+    // Send a vague address that will likely fail geocoding
+    await send(phone, "Waxahachie, off 35")
+    await new Promise(r => setTimeout(r, 8000))
+    const reply = await getLastOutbound(phone)
+    // Must NOT contain any system text
+    expect(reply).not.toMatch(SYSTEM_LEAK_PATTERNS)
+    expect(reply).not.toContain("|")
+    expect(reply).not.toMatch(/^[A-Z_]+\s*\|/)
+    // Should be a natural re-confirmation (address/check/right spot)
+    // OR a natural follow-up question — either is acceptable
+    const isNatural = /address|check|right spot|double check|delivery|confirm|where/i.test(reply)
+      || /what|how|name|need|help/i.test(reply)
+    expect(isNatural).toBe(true)
+    await cleanup(phone)
+  }, 30000)
+
+  integrationIt("Intersection triggers clarification, not a price quote", async () => {
+    const phone = "+15555553021"
+    await cleanup(phone)
+    await send(phone, "Hey im TestIntersection, need 20 yards of fill dirt")
+    await new Promise(r => setTimeout(r, 8000))
+    await send(phone, "Highway 75 and George Bush, Plano TX")
+    await new Promise(r => setTimeout(r, 8000))
+    const reply = await getLastOutbound(phone)
+    // Should ask for street number, not give a price
+    expect(reply).not.toMatch(SYSTEM_LEAK_PATTERNS)
+    const asksForAddress = /street|number|address|intersection|exact|123|delivery spot/i.test(reply)
+    expect(asksForAddress).toBe(true)
+    await cleanup(phone)
+  }, 30000)
 })

@@ -3788,7 +3788,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // DISPATCH_REFUSED, BRAIN_CRASH, geocoding failed, etc.), it means a code
   // path leaked admin text into the customer reply. Catch it here and replace
   // with a safe fallback so the customer NEVER sees system internals.
-  const SYSTEM_LEAK_PATTERNS = /MANUAL_QUOTE|MANUAL.?CONFIRM|DISPATCH_REFUSED|BRAIN_CRASH|URGENT_STRIPE|DISPATCH_FAILED|geocoding failed|fallback quote|zone [A-C]\)|Confirm exact pricing|pending_action|SEND FAILED|SEND BLOCKED/i
+  const SYSTEM_LEAK_PATTERNS = /MANUAL_QUOTE|MANUAL.?CONFIRM|DISPATCH_REFUSED|BRAIN_CRASH|URGENT_STRIPE|DISPATCH_FAILED|geocoding failed|fallback quote|zone [A-C]\)|Confirm exact pricing|pending_action|SEND FAILED|SEND BLOCKED|address_lost|yards_null|\[command.center\]|\[sarah.analytics\]|\[dashboard\]/i
   if (SYSTEM_LEAK_PATTERNS.test(reply)) {
     console.error(`[SYSTEM LEAK BLOCKED] phone=${phone} — reply contained system text: "${reply.slice(0, 200)}"`)
     await notifyAdmin(`SYSTEM LEAK BLOCKED for ${conv.customer_name || phone}: reply contained admin text. Original: "${reply.slice(0, 200)}". Sent safe fallback instead.`, `leak_${Date.now()}`)
