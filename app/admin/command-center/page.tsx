@@ -134,8 +134,8 @@ function SkeletonList({ rows = 5 }: { rows?: number }) {
 function SectionError({ label, onRetry }: { label: string; onRetry: () => void }) {
   return (
     <div className="p-4 text-center">
-      <div className="text-sm text-gray-500">{label} unavailable</div>
-      <button onClick={onRetry} className="text-xs text-gray-600 hover:text-gray-400 mt-1">Tap to retry</button>
+      <div className="text-sm text-gray-300">{label} unavailable</div>
+      <button onClick={onRetry} className="text-xs text-gray-400 hover:text-gray-400 mt-1">Tap to retry</button>
     </div>
   )
 }
@@ -258,7 +258,7 @@ export default function CommandCenterPage() {
       <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
         <div className="text-center">
           <div className="text-red-400 text-lg font-semibold mb-2">Dashboard unavailable</div>
-          <div className="text-gray-500 text-sm mb-4">{error}</div>
+          <div className="text-gray-300 text-sm mb-4">{error}</div>
           <button
             onClick={() => { setLoading(true); setError(null); fetchData() }}
             className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg transition-colors"
@@ -277,7 +277,7 @@ export default function CommandCenterPage() {
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-bold tracking-tight">Command Center</h1>
           {data?.timestamp && (
-            <span className="text-xs text-gray-500">Updated {ago(data.timestamp)}</span>
+            <span className="text-xs text-gray-300">Updated {ago(data.timestamp)}</span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -352,7 +352,7 @@ export default function CommandCenterPage() {
               {funnelFilter && (
                 <button
                   onClick={() => setFunnelFilter(null)}
-                  className="text-xs text-gray-500 hover:text-gray-300"
+                  className="text-xs text-gray-300 hover:text-gray-300"
                 >
                   Clear filter
                 </button>
@@ -392,7 +392,7 @@ export default function CommandCenterPage() {
                       <div className="flex items-center gap-3 ml-3">
                         <span className="text-sm font-mono font-semibold text-gray-200 w-8 text-right">{count}</span>
                         {conversionPct !== null && (
-                          <span className="text-xs text-gray-500 w-10 text-right">{conversionPct}%</span>
+                          <span className="text-xs text-gray-300 w-10 text-right">{conversionPct}%</span>
                         )}
                       </div>
                     </button>
@@ -407,7 +407,7 @@ export default function CommandCenterPage() {
             <div className="px-4 py-3 border-b border-gray-800">
               <h2 className="text-sm font-semibold text-gray-300">
                 Live Conversations
-                {funnelFilter && <span className="text-gray-500 font-normal ml-2">(filtered)</span>}
+                {funnelFilter && <span className="text-gray-300 font-normal ml-2">(filtered)</span>}
               </h2>
             </div>
             {loading ? (
@@ -415,7 +415,7 @@ export default function CommandCenterPage() {
             ) : data && !data.activeConversations ? (
               <SectionError label="Conversations" onRetry={fetchData} />
             ) : filteredCustomers.length === 0 ? (
-              <div className="p-8 text-center text-gray-600 text-sm">No conversations match filter</div>
+              <div className="p-8 text-center text-gray-400 text-sm">No conversations match filter</div>
             ) : (
               <div className="overflow-y-auto flex-1 divide-y divide-gray-800/30">
                 {filteredCustomers.map((c: any) => {
@@ -440,14 +440,14 @@ export default function CommandCenterPage() {
                           )}
                         </div>
                         {lastMsg && (
-                          <p className="text-xs text-gray-500 truncate">{lastMsg.body}</p>
+                          <p className="text-xs text-gray-300 truncate">{lastMsg.body}</p>
                         )}
                       </div>
                       <div className="text-right shrink-0">
                         {c.total_price_cents && c.total_price_cents > 0 && (
                           <div className="text-xs font-semibold text-emerald-400">{fmtCents(c.total_price_cents)}</div>
                         )}
-                        <div className="text-[10px] text-gray-600">{ago(c.updated_at)}</div>
+                        <div className="text-[10px] text-gray-400">{ago(c.updated_at)}</div>
                       </div>
                     </button>
                   )
@@ -460,7 +460,7 @@ export default function CommandCenterPage() {
         {/* ═══ ROW 3: Conversation Viewer ═══ */}
         <div ref={conversationRef} className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
           {!selectedPhone ? (
-            <div className="px-4 py-8 text-center text-gray-600 text-sm">
+            <div className="px-4 py-8 text-center text-gray-400 text-sm">
               Select a conversation above to view the SMS thread
             </div>
           ) : (
@@ -468,14 +468,14 @@ export default function CommandCenterPage() {
               {/* Conversation Header */}
               <div className="px-4 py-3 border-b border-gray-800 flex flex-wrap items-center gap-x-4 gap-y-1">
                 <span className="font-semibold text-gray-200">{selectedConv?.customer_name || selectedPhone}</span>
-                <span className="text-xs text-gray-500 font-mono">{selectedPhone}</span>
+                <span className="text-xs text-gray-300 font-mono">{selectedPhone}</span>
                 {selectedConv && (
                   <>
                     <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${STATE_COLORS[selectedConv.state] || "bg-gray-700"} text-white`}>
                       {STATE_LABELS[selectedConv.state] || selectedConv.state}
                     </span>
                     {selectedConv.delivery_address && (
-                      <span className="text-xs text-gray-500">{selectedConv.delivery_address}</span>
+                      <span className="text-xs text-gray-300">{selectedConv.delivery_address}</span>
                     )}
                     {selectedConv.yards_needed && (
                       <span className="text-xs text-gray-400">{selectedConv.yards_needed} yards</span>
@@ -490,7 +490,7 @@ export default function CommandCenterPage() {
                 )}
                 <button
                   onClick={() => selectConversation(null)}
-                  className="ml-auto text-xs text-gray-500 hover:text-gray-300"
+                  className="ml-auto text-xs text-gray-300 hover:text-gray-300"
                 >
                   Close
                 </button>
@@ -500,7 +500,7 @@ export default function CommandCenterPage() {
                 {convLoading ? (
                   <SkeletonList rows={4} />
                 ) : smsForSelected.length === 0 ? (
-                  <div className="text-center text-gray-600 text-sm py-4">No messages found for this number</div>
+                  <div className="text-center text-gray-400 text-sm py-4">No messages found for this number</div>
                 ) : (
                   smsForSelected.map((msg: any, i: number) => {
                     const isCustomer = msg.direction === "inbound"
@@ -512,7 +512,7 @@ export default function CommandCenterPage() {
                             : "bg-blue-600 text-white rounded-br-none"
                         }`}>
                           <p className="whitespace-pre-wrap break-words">{msg.body}</p>
-                          <div className={`text-[10px] mt-1 ${isCustomer ? "text-gray-500" : "text-blue-200"}`}>
+                          <div className={`text-[10px] mt-1 ${isCustomer ? "text-gray-300" : "text-blue-200"}`}>
                             {new Date(msg.created_at).toLocaleString("en-US", { hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })}
                           </div>
                         </div>
@@ -540,64 +540,69 @@ export default function CommandCenterPage() {
         </div>
 
         {/* ═══ ROW 4: Anomaly Monitor ═══ */}
-        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-gray-300">Anomaly Monitor</h2>
-            {anomalyCount > 0 && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900 text-red-300 font-semibold">
-                {anomalyCount} crash{anomalyCount !== 1 ? "es" : ""} this week
-              </span>
-            )}
-          </div>
-          {loading ? (
-            <div className="p-4"><SkeletonList rows={3} /></div>
-          ) : data && !data.brainHealth ? (
-            <SectionError label="Anomaly Monitor" onRetry={fetchData} />
-          ) : (
-            <div className="p-4">
-              {/* Pending actions by type */}
-              {data?.brainHealth?.pendingActionsByType && Object.keys(data.brainHealth.pendingActionsByType).length > 0 ? (
-                <div className="space-y-3">
-                  <div className="flex flex-wrap gap-2">
-                    {Object.entries(data.brainHealth.pendingActionsByType).map(([type, count]) => (
-                      <span
-                        key={type}
-                        className={`text-xs px-2 py-1 rounded font-medium ${
-                          type.includes("CRASH") || type.includes("URGENT")
-                            ? "bg-red-900/60 text-red-300"
-                            : type.includes("FAILED") || type.includes("MISSING")
-                              ? "bg-orange-900/60 text-orange-300"
-                              : "bg-yellow-900/60 text-yellow-300"
-                        }`}
-                      >
-                        {type}: {count}
-                      </span>
-                    ))}
-                  </div>
-                  {/* Recent pending actions */}
-                  {(data?.pendingActions || []).length > 0 && (
-                    <div className="space-y-1 mt-2">
-                      {(data?.pendingActions || []).slice(0, 5).map((a) => (
-                        <div key={a.id} className="flex items-center gap-2 text-xs py-1.5 px-2 bg-gray-800/40 rounded">
-                          <span className="text-gray-500 font-mono shrink-0">{a.minutesOld}m</span>
-                          <span className={`px-1.5 py-0.5 rounded font-medium shrink-0 ${
-                            a.type.includes("CRASH") ? "bg-red-900/60 text-red-300" : "bg-yellow-900/60 text-yellow-300"
-                          }`}>
-                            {a.type}
-                          </span>
-                          <span className="text-gray-400 truncate">{a.customer_name || a.phone}</span>
-                          <span className="text-gray-600 truncate ml-auto">{a.message}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+        {(() => {
+          const actions = data?.pendingActions || []
+          const crashCount = actions.filter(a => a.type === "BRAIN_CRASH").length
+          const manualQuoteCount = actions.filter(a => a.type === "MANUAL_QUOTE").length
+          return (
+            <div className="bg-gray-900 rounded-lg border border-gray-700/50 overflow-hidden">
+              <div className="bg-gray-800 border-b border-gray-700 px-5 py-4 flex items-center gap-3">
+                <h2 className="text-white text-lg font-bold">Anomaly Monitor</h2>
+                {crashCount > 0 && (
+                  <span className="bg-red-600 text-white font-bold px-3 py-1 rounded text-sm">
+                    {crashCount} crash{crashCount !== 1 ? "es" : ""}
+                  </span>
+                )}
+                {manualQuoteCount > 0 && (
+                  <span className="bg-amber-500 text-white font-bold px-3 py-1 rounded text-sm">
+                    {manualQuoteCount} manual quote{manualQuoteCount !== 1 ? "s" : ""}
+                  </span>
+                )}
+              </div>
+              {loading ? (
+                <div className="p-4"><SkeletonList rows={3} /></div>
+              ) : data && !data.brainHealth ? (
+                <SectionError label="Anomaly Monitor" onRetry={fetchData} />
+              ) : actions.length === 0 ? (
+                <div className="bg-gray-900 px-5 py-8 text-center">
+                  <span className="text-emerald-400 text-lg">&#10003;</span>
+                  <div className="text-gray-400 text-sm mt-1">No anomalies in the last 7 days</div>
                 </div>
               ) : (
-                <div className="text-sm text-gray-600 py-2">No anomalies detected. Systems nominal.</div>
+                <div>
+                  {actions.map((a) => {
+                    const typeBadge = a.type === "BRAIN_CRASH"
+                      ? "bg-red-600 text-white"
+                      : a.type === "MANUAL_QUOTE"
+                        ? "bg-amber-500 text-black"
+                        : "bg-blue-600 text-white"
+                    const stateMatch = a.type === "BRAIN_CRASH" ? a.message.match(/\b([A-Z][A-Z_]{3,})\b/) : null
+                    const extractedState = stateMatch ? stateMatch[1] : null
+                    const truncatedMsg = a.message.length > 120 ? a.message.slice(0, 120) + "..." : a.message
+                    return (
+                      <div key={a.id} className="bg-gray-900 hover:bg-gray-800 transition border-b border-gray-800 px-5 py-4 flex items-center gap-3" style={{ minHeight: 64 }}>
+                        <span className="text-gray-300 text-sm font-medium w-16 shrink-0">{ago(a.created_at)}</span>
+                        <span className={`${typeBadge} font-bold text-xs px-3 py-1.5 rounded-md uppercase tracking-wide shrink-0`}>
+                          {a.type.replace(/_/g, " ")}
+                        </span>
+                        <span className="text-white font-semibold text-sm w-20 shrink-0 truncate">{a.customer_name || a.phone}</span>
+                        {extractedState && (
+                          <span className="bg-gray-700 text-gray-200 text-xs px-2 py-1 rounded shrink-0">{extractedState}</span>
+                        )}
+                        <span className="text-gray-300 text-sm flex-1 leading-relaxed truncate" title={a.message}>{truncatedMsg}</span>
+                        {a.type === "BRAIN_CRASH" && (
+                          <button className="bg-red-900 hover:bg-red-700 text-red-300 hover:text-white text-xs px-3 py-1.5 rounded border border-red-700 hover:border-red-500 transition font-medium shrink-0">
+                            Reset
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
               )}
             </div>
-          )}
-        </div>
+          )
+        })()}
 
         {/* ═══ ROW 5: Jesse Driver Feed ═══ */}
         <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
@@ -609,7 +614,7 @@ export default function CommandCenterPage() {
           ) : data && !data.activeConversations ? (
             <SectionError label="Driver Feed" onRetry={fetchData} />
           ) : (data?.activeConversations?.drivers || []).length === 0 ? (
-            <div className="p-8 text-center text-gray-600 text-sm">No active driver conversations</div>
+            <div className="p-8 text-center text-gray-400 text-sm">No active driver conversations</div>
           ) : (
             <div className="divide-y divide-gray-800/30">
               {(data?.activeConversations?.drivers || []).slice(0, 10).map((d: any) => {
@@ -626,14 +631,14 @@ export default function CommandCenterPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         {d.extracted_city && (
-                          <span className="text-xs text-gray-500">{d.extracted_city}</span>
+                          <span className="text-xs text-gray-300">{d.extracted_city}</span>
                         )}
                         {lastMsg && (
-                          <span className="text-xs text-gray-600 truncate">{(lastMsg.body || "").slice(0, 50)}</span>
+                          <span className="text-xs text-gray-400 truncate">{(lastMsg.body || "").slice(0, 50)}</span>
                         )}
                       </div>
                     </div>
-                    <span className="text-[10px] text-gray-600 shrink-0">{ago(d.updated_at)}</span>
+                    <span className="text-[10px] text-gray-400 shrink-0">{ago(d.updated_at)}</span>
                   </div>
                 )
               })}
@@ -707,9 +712,9 @@ function KPICard({ label, value, sub, color, alert }: {
 }) {
   return (
     <div className={`rounded-lg p-4 border ${alert ? "bg-red-950/30 border-red-900/50" : "bg-gray-900 border-gray-800"}`}>
-      <div className="text-[11px] text-gray-500 uppercase tracking-wider font-medium">{label}</div>
+      <div className="text-[11px] text-gray-400 uppercase tracking-wide font-medium">{label}</div>
       <div className={`text-2xl font-bold mt-1 ${color || "text-white"}`}>{value}</div>
-      {sub && <div className="text-[11px] text-gray-600 mt-1">{sub}</div>}
+      {sub && <div className="text-[11px] text-gray-400 mt-1">{sub}</div>}
     </div>
   )
 }
@@ -718,7 +723,7 @@ function HealthPill({ label, value, ok }: { label: string; value: string; ok: bo
   return (
     <div className="flex items-center gap-1.5">
       <div className={`w-1.5 h-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-red-500"}`} />
-      <span className="text-gray-500">{label}:</span>
+      <span className="text-gray-300">{label}:</span>
       <span className={ok ? "text-gray-300" : "text-red-400 font-semibold"}>{value}</span>
     </div>
   )
