@@ -1735,6 +1735,21 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   const { conv, readAt } = await getConv(phone)
   if (conv.opted_out) return ""
+
+  // ── FIX 2: NEEDS_HUMAN_REVIEW — pause button for any conversation ──
+  // When set in Supabase, Sarah goes silent and alerts admin instead.
+  // This gives operators a way to take over a conversation manually.
+  if (conv.needs_human_review === true) {
+    console.log(`[sarah] skipping ${phone} — needs_human_review`)
+    await notifyAdmin(
+      `Flagged customer texted: ${conv.customer_name || phone}. ` +
+      `State: ${conv.state || "NEW"}. ` +
+      `Message: "${body.slice(0, 200)}". Needs human response.`,
+      `human_review_${Date.now()}`
+    )
+    return ""
+  }
+
   const state = conv.state || "NEW"
   currentRequestState = state // expose to validate() for dedup state-awareness
   const history = await getHistory(phone)
@@ -1775,7 +1790,23 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       if (!correctionMode) return false
       return extractedVal !== null && extractedVal !== undefined && extractedVal !== "" && String(extractedVal).toLowerCase() !== String(dbVal).toLowerCase()
     }
-    if (extracted.customer_name && shouldTake(conv.customer_name, extracted.customer_name)) {
+    // ── FIX 3: Never let an agent name become the customer name ──
+    // Despite prompt rules, Haiku sometimes extracts vocative agent names
+    // ("Hey John" → customer_name="John"). Hard-block any name that matches
+    // a known sales agent first name (case-insensitive).
+    let extractedNameIsAgent = false
+    if (extracted.customer_name) {
+      const agents = await loadAgents()
+      const agentFirstNames = new Set(agents.map(a => (a.name || "").split(/\s+/)[0].toLowerCase()).filter(Boolean))
+      // Also add "Sarah" since that's the default persona
+      agentFirstNames.add("sarah")
+      const extractedFirst = extracted.customer_name.split(/\s+/)[0].toLowerCase()
+      if (agentFirstNames.has(extractedFirst)) {
+        extractedNameIsAgent = true
+        console.warn(`[extractor] BLOCKED agent name as customer_name: "${extracted.customer_name}" (matched agent "${extractedFirst}")`)
+      }
+    }
+    if (extracted.customer_name && !extractedNameIsAgent && shouldTake(conv.customer_name, extracted.customer_name)) {
       conv.customer_name = extracted.customer_name
       extractorUpdates.customer_name = extracted.customer_name
     }
@@ -1809,6 +1840,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     if (correctionMode && Object.keys(extractorUpdates).length > 0) {
       console.log(`[extractor] CORRECTION MODE — overriding fields: ${Object.keys(extractorUpdates).join(", ")}`)
+    }
+    // ── PRICE INVALIDATION: extractor changed pricing-relevant fields ──
+    // If the extractor updated yards_needed or delivery_address and a quote
+    // already exists, the old total_price_cents is stale. Clear it so the
+    // quote engine re-runs downstream.
+    if ((extractorUpdates.yards_needed || extractorUpdates.delivery_address) && !isEmpty(conv.total_price_cents)) {
+      extractorUpdates.total_price_cents = null as any
+      extractorUpdates.price_per_yard_cents = null as any
+      console.log(`[extractor] invalidated stale price — yards or address changed via extractor for ${phone}`)
     }
     // Stash the extraction on conv so downstream logic can use intent flags
     ;(conv as any)._extracted = extracted
@@ -2412,25 +2452,32 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // ── ACTIVE ORDER — waiting for delivery ──
   if (state === "ORDER_PLACED") {
-    // Check actual dispatch status so Sarah doesn't lie about driver availability
-    let orderContext = "Customer has a confirmed order."
+    // ── FIX 1: ALWAYS confirm the order exists when dispatch_order_id is set ──
+    // Previous logic: when driversNotified=0 (dispatch paused), brain said
+    // "no drivers in your area" which Sonnet paraphrased as "no active order."
+    // Luis waited 2 days because the brain denied his confirmed order.
+    // New logic: if dispatch_order_id exists, the order IS confirmed — period.
+    // Driver status is secondary context, never a denial.
+    let orderContext = ""
     if (has(conv.dispatch_order_id)) {
       const sb_order = createAdminSupabase()
       const { data: order } = await sb_order.from("dispatch_orders").select("status, drivers_notified, created_at").eq("id", conv.dispatch_order_id).maybeSingle()
-      const driversNotified = order?.drivers_notified || 0
-      const daysSince = order?.created_at ? Math.round((Date.now() - new Date(order.created_at).getTime()) / (1000*60*60*24)) : 0
       const isPriority = conv.order_type === "priority"
       if (order?.status === "active") {
-        orderContext = "Their driver has been assigned. They'll get a text when their driver is heading out"
+        orderContext = "Their order is confirmed and a driver has been assigned. They'll get a text when their driver is heading out"
       } else if (isPriority) {
-        orderContext = `Their priority delivery is confirmed for ${conv.priority_guaranteed_date || "their requested date"}. They'll get a text when their driver is heading their way`
-      } else if (driversNotified > 0 && daysSince <= 2) {
-        orderContext = "Their order is in and we've reached out to drivers in their area. Standard delivery is 3-5 business days. They'll get a text when a driver is heading their way"
+        orderContext = `Their order is confirmed — priority delivery for ${conv.priority_guaranteed_date || "their requested date"}. They'll get a text when their driver is heading their way`
       } else {
-        orderContext = "Be honest, we don't have drivers hauling in their area right now. As soon as we do they'll be the first to know. We appreciate their patience. If their timeline is urgent they can ask about priority delivery"
+        // Order confirmed but driver not yet assigned (could be dispatch paused, new order, etc.)
+        // NEVER deny the order. NEVER say "no drivers in your area." Just confirm and give timeline.
+        orderContext = "Their order is confirmed and locked in. We're working on scheduling a driver — standard delivery is 3-5 business days from when the order was placed. They'll get a text when their driver is heading their way"
       }
+    } else {
+      // No dispatch_order_id — this shouldn't happen in ORDER_PLACED but handle it
+      orderContext = "Something's off — their state says ORDER_PLACED but there's no order ID. Tell them to give you just a moment while you sort it out. DO NOT say their order doesn't exist"
+      await notifyAdmin(`ORDER_PLACED but no dispatch_order_id for ${conv.customer_name || phone}. State/data mismatch — needs manual fix.`, `order_mismatch_${Date.now()}`)
     }
-    const s = await callSarah(body, conv, history, `${orderContext} Answer their question helpfully. If they want to cancel, say you'll have someone reach out`)
+    const s = await callSarah(body, conv, history, `${orderContext}. Answer their question helpfully. If they want to cancel, say you'll have someone reach out`)
     reply = validate(s.response, lastOut)
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
@@ -2468,6 +2515,33 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // ── QUOTING — we gave a price, waiting for yes/no ──
   if (state === "QUOTING") {
+    // ── YARDS/ADDRESS CHANGED IN QUOTING — RE-QUOTE ──
+    // Abel bug: customer said "actually I need 60 yards" while in QUOTING
+    // with a 20-yard quote. The QUOTING handler returned early with the stale
+    // price, and the inline extraction at the bottom never ran. Fix: detect
+    // yards or address changes HERE, invalidate the old price, drop back to
+    // COLLECTING so the quote engine re-runs with the new values.
+    const quotingYardsChanged = inlineYards && inlineYardsExplicit
+      && has(conv.yards_needed) && conv.yards_needed !== inlineYards
+    const quotingAddressChanged = isAddress && has(conv.delivery_address)
+      && looksLikeAddress(body) && body.trim().toLowerCase() !== (conv.delivery_address || "").toLowerCase()
+    if (quotingYardsChanged || quotingAddressChanged) {
+      if (quotingYardsChanged) {
+        updates.yards_needed = inlineYards
+        console.log(`[QUOTING re-quote] yards changed: ${conv.yards_needed} → ${inlineYards} for ${phone}`)
+      }
+      if (quotingAddressChanged) {
+        updates.delivery_address = body.trim()
+        // Re-geocode will happen in COLLECTING
+      }
+      updates.total_price_cents = null as any
+      updates.price_per_yard_cents = null as any
+      updates.state = "COLLECTING"  // Re-enter COLLECTING so the quote engine re-runs
+      // Do NOT saveConv here — let the fall-through COLLECTING logic handle it.
+      // That path will re-quote with the new yards/address and save once.
+    }
+
+    if (!quotingYardsChanged && !quotingAddressChanged) {
     // Detect if customer picked priority or standard.
     // CRITICAL: do NOT include "cheaper" or "first" in isStandard — those
     // get falsely triggered by "can you do cheaper" (negotiation, NOT
@@ -2783,6 +2857,9 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     await saveConv(phone, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
+    } // end if (!quotingYardsChanged && !quotingAddressChanged)
+    // When yards/address changed, we fall through to COLLECTING logic below
+    // with state already set to "COLLECTING" and price cleared.
   }
 
   // ── EMAIL COLLECTION (for invoice payments post-delivery) ──
@@ -3172,13 +3249,24 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     updates.customer_email = inlineEmail
   }
 
-  // If a correction changed pricing-relevant fields, invalidate the old quote
-  if (isCorrection && (updates.yards_needed || updates.material_type || updates.delivery_address)) {
-    if (has(conv.total_price_cents)) {
-      updates.total_price_cents = null as any
-      updates.price_per_yard_cents = null as any
-      updates.state = "COLLECTING" // Re-collect to regenerate quote
+  // ── UNIVERSAL PRICE INVALIDATION ──
+  // Rule: total_price_cents in DB must ALWAYS match the dollar amount Sarah
+  // most recently quoted. If ANY pricing-relevant field changed (yards,
+  // material, address), the old price is stale and must be cleared so the
+  // quote engine re-runs. This catches: corrections ("actually I need 60"),
+  // explicit overrides ("60 yards" while in QUOTING), dimensions calculations,
+  // sq ft recalculations, and extractor-driven updates.
+  const yardsChanged = updates.yards_needed !== undefined && updates.yards_needed !== conv.yards_needed
+  const addressChanged = updates.delivery_address !== undefined && updates.delivery_address !== conv.delivery_address
+  const materialChanged = updates.material_type !== undefined && updates.material_type !== conv.material_type
+  if ((yardsChanged || addressChanged || materialChanged) && has(conv.total_price_cents) && updates.total_price_cents !== null) {
+    updates.total_price_cents = null as any
+    updates.price_per_yard_cents = null as any
+    // Only regress state to COLLECTING if we're past it (QUOTING or later)
+    if (state === "QUOTING" || state === "ORDER_PLACED" || state === "AWAITING_PAYMENT") {
+      updates.state = "COLLECTING"
     }
+    console.log(`[price invalidation] cleared stale price for ${phone} — yards:${yardsChanged} addr:${addressChanged} mat:${materialChanged}`)
   }
 
   // Merge updates to figure out current state
