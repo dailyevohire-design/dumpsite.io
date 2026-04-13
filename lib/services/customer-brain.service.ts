@@ -2231,7 +2231,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       // Notify sales agent
       const payAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
       if (payAgent) await notifyAgent(payAgent, `Payment confirmed: ${conv.customer_name} | ${fmt$(conv.total_price_cents||0)} | ${conv.payment_method || "unknown method"}`, sid)
-      notifyRepDashboard({ fromNumber: CUSTOMER_FROM, customerName: conv.customer_name ?? "Customer", yards: conv.yards_needed ?? 0, material: conv.material_type ?? "fill dirt", city: conv.delivery_city ?? "Unknown", amountDollars: Math.round((conv.total_price_cents ?? 0) / 100), eventType: "order_delivered", orderId: conv.dispatch_order_id ?? undefined })
+      notifyRepDashboard({ fromNumber: conv.source_number || CUSTOMER_FROM, customerName: conv.customer_name ?? "Customer", yards: conv.yards_needed ?? 0, material: conv.material_type ?? "fill dirt", city: conv.delivery_city ?? "Unknown", amountDollars: Math.round((conv.total_price_cents ?? 0) / 100), eventType: "order_delivered", orderId: conv.dispatch_order_id ?? undefined })
       await saveConv(phone, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
@@ -2314,7 +2314,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
             // Notify sales agent
             const prioAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
             if (prioAgent) await notifyAgent(prioAgent, `Priority order PAID: ${conv.customer_name} | ${fmt$(conv.priority_total_cents||0)} | ${conv.yards_needed}yds ${fmtMaterial(conv.material_type||"fill_dirt")} to ${conv.delivery_city} | Guaranteed ${conv.priority_guaranteed_date}`, sid)
-            notifyRepDashboard({ fromNumber: CUSTOMER_FROM, customerName: conv.customer_name ?? "Customer", yards: conv.yards_needed ?? 0, material: conv.material_type ?? "fill dirt", city: conv.delivery_city ?? "Unknown", amountDollars: Math.round((conv.priority_total_cents ?? 0) / 100), eventType: "order_placed", orderId: orderId })
+            notifyRepDashboard({ fromNumber: conv.source_number || CUSTOMER_FROM, customerName: conv.customer_name ?? "Customer", yards: conv.yards_needed ?? 0, material: conv.material_type ?? "fill dirt", city: conv.delivery_city ?? "Unknown", amountDollars: Math.round((conv.priority_total_cents ?? 0) / 100), eventType: "order_placed", orderId: orderId })
           }
           const s = await callSarah(body, conv, history, `Payment confirmed. Tell them their priority delivery is locked in for ${conv.priority_guaranteed_date}. They'll get a text when their driver is heading their way`)
           reply = validate(s.response, lastOut)
@@ -2724,7 +2724,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           // Notify sales agent
           const orderAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
           if (orderAgent) await notifyAgent(orderAgent, `New order received: ${conv.customer_name} | ${yards}yds ${fmtMaterial(conv.material_type)} to ${conv.delivery_city} | ${fmt$(conv.total_price_cents)}`, sid)
-          notifyRepDashboard({ fromNumber: CUSTOMER_FROM, customerName: conv.customer_name ?? "Customer", yards: conv.yards_needed ?? 0, material: conv.material_type ?? "fill dirt", city: conv.delivery_city ?? "Unknown", amountDollars: Math.round((conv.total_price_cents ?? 0) / 100), eventType: "order_placed", orderId: orderId })
+          notifyRepDashboard({ fromNumber: conv.source_number || CUSTOMER_FROM, customerName: conv.customer_name ?? "Customer", yards: conv.yards_needed ?? 0, material: conv.material_type ?? "fill dirt", city: conv.delivery_city ?? "Unknown", amountDollars: Math.round((conv.total_price_cents ?? 0) / 100), eventType: "order_placed", orderId: orderId })
           // DETERMINISTIC confirmation — never let Sarah drift on the moment
           // we tell the customer their order is locked in. All fields validated above.
           reply = validate(presentStandardConfirmText({
