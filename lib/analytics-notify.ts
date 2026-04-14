@@ -1,6 +1,4 @@
-import { getAgentByTwilioNumber, getManagerOf, calcCommissions, validateAgentNumbers, AgentConfig } from './rep-config'
-
-validateAgentNumbers()
+import { getAgentByTwilioNumber, getManagerOf, calcCommissionsWithManager, AgentConfig } from './rep-config'
 
 interface OrderNotifyParams {
   fromNumber: string       // Sarah's Twilio number that handled this order
@@ -37,8 +35,8 @@ async function sendAgentSMS(toPhone: string, message: string): Promise<void> {
   }
 }
 
-// ── 2. POST to Micah's dashboard server ─────────────────────
-async function postToDashboard(params: OrderNotifyParams, agent: AgentConfig): Promise<void> {
+// ── 2. POST to dashboard server ─────────────────────────────
+async function postToDashboard(params: OrderNotifyParams, agent: AgentConfig, managerName: string, commissions: { agentCommission: number; managerCommission: number }): Promise<void> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 5000)
   try {
@@ -49,9 +47,6 @@ async function postToDashboard(params: OrderNotifyParams, agent: AgentConfig): P
       `$${params.amountDollars}`
     ].join('/ ')
 
-    const commissions = calcCommissions(params.amountDollars, agent)
-    const manager = getManagerOf(agent)
-
     await fetch('https://dumpsite-server.onrender.com/order', {
       method: 'POST',
       headers: {
@@ -59,7 +54,7 @@ async function postToDashboard(params: OrderNotifyParams, agent: AgentConfig): P
         'X-Dashboard-Secret': process.env.DASHBOARD_WEBHOOK_SECRET ?? '',
         'X-Agent-Id': agent.id,
         'X-Agent-Name': agent.name,
-        'X-Manager-Name': manager?.name ?? '',
+        'X-Manager-Name': managerName,
         'X-Market': agent.market,
       },
       body: new URLSearchParams({
@@ -67,7 +62,7 @@ async function postToDashboard(params: OrderNotifyParams, agent: AgentConfig): P
         Body: bodyText,
         AgentId: agent.id,
         AgentName: agent.name,
-        ManagerName: manager?.name ?? '',
+        ManagerName: managerName,
         Market: agent.market,
         EventType: params.eventType,
         OrderId: params.orderId ?? '',
@@ -89,20 +84,21 @@ async function postToDashboard(params: OrderNotifyParams, agent: AgentConfig): P
 export function notifyRepDashboard(params: OrderNotifyParams): void {
   void (async () => {
     try {
-      const agent = getAgentByTwilioNumber(params.fromNumber)
+      const agent = await getAgentByTwilioNumber(params.fromNumber)
       if (!agent) {
         console.warn('[analytics] no agent found for number:', params.fromNumber)
         // Still POST to dashboard even if agent unknown
-        await postToDashboard(params, {
+        const unknownAgent: AgentConfig = {
           id: 'unknown', name: 'Unknown', personalPhone: '',
           twilioNumber: params.fromNumber, market: 'Unknown',
           role: 'agent', commissionPct: 0, active: true,
-        })
+        }
+        await postToDashboard(params, unknownAgent, '', { agentCommission: 0, managerCommission: 0 })
         return
       }
 
-      const manager = getManagerOf(agent)
-      const commissions = calcCommissions(params.amountDollars, agent)
+      const manager = await getManagerOf(agent)
+      const commissions = await calcCommissionsWithManager(params.amountDollars, agent)
 
       // Build notification messages
       const isDelivery = params.eventType === 'order_delivered'
@@ -126,7 +122,7 @@ export function notifyRepDashboard(params: OrderNotifyParams): void {
           ? sendAgentSMS(manager.personalPhone, managerMsg)
           : Promise.resolve(),
         // Dashboard POST
-        postToDashboard(params, agent),
+        postToDashboard(params, agent, commissions.managerName, commissions),
       ])
     } catch (err) {
       console.error('[analytics] top-level error (non-fatal):', err)

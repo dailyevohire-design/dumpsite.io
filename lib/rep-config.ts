@@ -1,74 +1,91 @@
+import { createAdminSupabase } from './supabase'
+
 export interface AgentConfig {
-  id: string              // unique agent ID e.g. 'micah', 'carlos'
+  id: string              // UUID from sales_agents table
   name: string            // display name
   personalPhone: string   // their real cell — gets SMS notifications
   twilioNumber: string    // their assigned Twilio number (Sarah's number)
   market: string          // 'DFW', 'Denver', etc
   role: 'manager' | 'agent'
   managerId?: string      // for agents: points to their manager's id
-  commissionPct: number   // 10 for agents, 5 for manager override
+  commissionPct: number   // percentage (e.g. 10)
   active: boolean
 }
 
 // ============================================================
-// ADD NEW AGENTS HERE — one block per agent
-// When hiring: add their entry, give them their twilioNumber,
-// deploy. Nothing else changes.
+// DB-BACKED AGENT LOOKUP — cached 5 minutes, same pattern as
+// customer-brain.service.ts loadAgents(). No more hardcoded
+// arrays — add agents in Supabase, they work immediately.
 // ============================================================
-//
-// RULE: twilioNumber = the Twilio number customers TEXT to
-// reach this agent. Sarah's brain replies FROM this same
-// number. All customer comms for this agent come from
-// their twilioNumber. Never share numbers between agents.
-//
-export const AGENTS: AgentConfig[] = [
-  {
-    id: 'main',
-    name: 'Main',
-    personalPhone: process.env.ADMIN_PHONE ?? '',
-    // Must match CUSTOMER_FROM in customer-brain.service.ts:
-    // process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-    twilioNumber: process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || '',
-    market: 'DFW',
-    role: 'manager',
-    commissionPct: 5,
-    active: true,
-  },
-  {
-    id: 'micah',
-    name: 'Micah',
-    personalPhone: '+13034098337',
-    twilioNumber: '+14695236420',
-    market: 'DFW',
-    role: 'manager',
-    commissionPct: 5,
-    active: true,
-  },
-  // NEW AGENT TEMPLATE — copy this block for each new hire:
-  // {
-  //   id: 'firstname',
-  //   name: 'First Last',
-  //   personalPhone: '+1XXXXXXXXXX',  // agent's real cell for notifications
-  //   twilioNumber: '+1XXXXXXXXXX',   // their assigned Twilio/Sarah number
-  //   market: 'DFW',
-  //   role: 'agent',
-  //   managerId: 'micah',             // their manager's id
-  //   commissionPct: 10,
-  //   active: true,
-  // },
-  // IMPORTANT: After adding, go to Twilio console and
-  // point this number's webhook to:
-  // https://[your-domain]/api/sms/customer-webhook
-  // HTTP POST — without this step the number won't work
-]
 
-export function getAgentByTwilioNumber(twilioNumber: string): AgentConfig | undefined {
-  return AGENTS.find(a => a.twilioNumber === twilioNumber && a.active)
+let agentCache: { agents: AgentConfig[]; loadedAt: number } = { agents: [], loadedAt: 0 }
+const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
+async function loadAgents(): Promise<AgentConfig[]> {
+  if (Date.now() - agentCache.loadedAt < CACHE_TTL && agentCache.agents.length > 0) {
+    return agentCache.agents
+  }
+  try {
+    const sb = createAdminSupabase()
+    const { data, error } = await sb
+      .from('sales_agents')
+      .select('id, name, twilio_number, personal_number, commission_rate, market')
+      .eq('active', true)
+    if (error) {
+      console.error('[rep-config] Failed to load agents from DB:', error.message)
+      return agentCache.agents // Return stale cache on error
+    }
+    const agents: AgentConfig[] = (data || []).map(row => ({
+      id: row.id,
+      name: row.name,
+      personalPhone: row.personal_number ? `+1${row.personal_number.replace(/\D/g, '')}` : '',
+      twilioNumber: `+1${(row.twilio_number || '').replace(/\D/g, '')}`,
+      market: row.market || 'DFW',
+      // Micah is manager, everyone else is agent
+      role: row.name?.toLowerCase().includes('micah') ? 'manager' as const : 'agent' as const,
+      managerId: row.name?.toLowerCase().includes('micah') ? undefined : 'micah',
+      commissionPct: Math.round((row.commission_rate || 0.10) * 100),
+      active: true,
+    }))
+
+    // Also add the "main" agent for the default customer number
+    const mainTwilio = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
+    const adminPhone = process.env.ADMIN_PHONE || ''
+    if (mainTwilio) {
+      agents.push({
+        id: 'main',
+        name: 'Main',
+        personalPhone: adminPhone ? `+1${adminPhone.replace(/\D/g, '')}` : '',
+        twilioNumber: mainTwilio,
+        market: 'DFW',
+        role: 'manager',
+        commissionPct: 5,
+        active: true,
+      })
+    }
+
+    agentCache = { agents, loadedAt: Date.now() }
+    return agents
+  } catch (e) {
+    console.error('[rep-config] Exception loading agents:', (e as any)?.message)
+    return agentCache.agents
+  }
 }
 
-export function getManagerOf(agent: AgentConfig): AgentConfig | undefined {
+export async function getAgentByTwilioNumber(twilioNumber: string): Promise<AgentConfig | undefined> {
+  const agents = await loadAgents()
+  const normalized = twilioNumber.replace(/\D/g, '')
+  return agents.find(a => {
+    const aN = a.twilioNumber.replace(/\D/g, '')
+    return aN === normalized && a.active
+  })
+}
+
+export async function getManagerOf(agent: AgentConfig): Promise<AgentConfig | undefined> {
   if (!agent.managerId) return undefined
-  return AGENTS.find(a => a.id === agent.managerId && a.active)
+  const agents = await loadAgents()
+  // Find micah by name match (managerId is 'micah')
+  return agents.find(a => a.name.toLowerCase().includes(agent.managerId!) && a.active)
 }
 
 export function calcCommissions(orderAmountDollars: number, agent: AgentConfig): {
@@ -80,7 +97,25 @@ export function calcCommissions(orderAmountDollars: number, agent: AgentConfig):
   const agentComm = agent.role === 'agent'
     ? Math.round(orderAmountDollars * (agent.commissionPct / 100) * 100) / 100
     : 0
-  const manager = getManagerOf(agent)
+  // Manager commission is calculated separately when we have the manager object
+  return {
+    agentCommission: agentComm,
+    managerCommission: 0, // Caller should use getManagerOf + calcManagerCommission
+    agentName: agent.name,
+    managerName: '',
+  }
+}
+
+export async function calcCommissionsWithManager(orderAmountDollars: number, agent: AgentConfig): Promise<{
+  agentCommission: number
+  managerCommission: number
+  agentName: string
+  managerName: string
+}> {
+  const agentComm = agent.role === 'agent'
+    ? Math.round(orderAmountDollars * (agent.commissionPct / 100) * 100) / 100
+    : 0
+  const manager = await getManagerOf(agent)
   const managerComm = manager
     ? Math.round(orderAmountDollars * (manager.commissionPct / 100) * 100) / 100
     : 0
@@ -92,8 +127,9 @@ export function calcCommissions(orderAmountDollars: number, agent: AgentConfig):
   }
 }
 
-export function validateAgentNumbers(): void {
-  const numbers = AGENTS
+export async function validateAgentNumbers(): Promise<void> {
+  const agents = await loadAgents()
+  const numbers = agents
     .filter(a => a.active && a.twilioNumber)
     .map(a => a.twilioNumber)
   const duplicates = numbers.filter(
