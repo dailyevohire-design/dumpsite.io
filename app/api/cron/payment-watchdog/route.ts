@@ -52,8 +52,10 @@ export async function GET(request: NextRequest) {
   let actions = 0
 
   // ── UNPAID CUSTOMER DELIVERIES ──
+  // Include agent_id + source_number so we nudge FROM the agent's number
+  // (preserves agent attribution) and scope updates to this specific row.
   const { data: unpaid } = await sb.from("customer_conversations")
-    .select("phone, customer_name, total_price_cents, payment_method, updated_at")
+    .select("phone, agent_id, source_number, customer_name, total_price_cents, payment_method, updated_at")
     .eq("state", "AWAITING_PAYMENT")
     .neq("opted_out", true)
 
@@ -61,6 +63,8 @@ export async function GET(request: NextRequest) {
     const hoursWaiting = (now - new Date(c.updated_at).getTime()) / (1000 * 60 * 60)
     const name = (c.customer_name || "").split(/\s+/)[0] || "there"
     const total = c.total_price_cents ? `$${Math.round(c.total_price_cents / 100)}` : ""
+    // Reply FROM the agent's Twilio number so the customer stays in-agent context
+    const fromNumber = c.source_number ? `+1${c.source_number}` : CUSTOMER_FROM
 
     // Check last outbound to avoid spamming — only send if we haven't messaged in the window
     const { data: lastOut } = await sb.from("customer_sms_logs")
@@ -72,10 +76,10 @@ export async function GET(request: NextRequest) {
     try {
       if (hoursWaiting >= 1 && hoursWaiting < 2 && !alreadySentRecently) {
         // 1 hour — first nudge + notify admin
-        if (CUSTOMER_FROM) {
+        if (fromNumber) {
           await tw.messages.create({
             body: `Hey ${name}, just following up on the ${total} for your delivery. We accept Venmo, Zelle, or online invoice. Which works best for you`,
-            from: CUSTOMER_FROM, to: `+1${c.phone}`,
+            from: fromNumber, to: `+1${c.phone}`,
           })
           await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 1h] First follow-up`, direction: "outbound", message_sid: `pw1h_${Date.now()}` })
         }
@@ -83,28 +87,28 @@ export async function GET(request: NextRequest) {
         actions++
       } else if (hoursWaiting >= 4 && hoursWaiting < 5 && lastOutHoursAgo >= 2) {
         // 4 hours — second nudge
-        if (CUSTOMER_FROM) {
+        if (fromNumber) {
           await tw.messages.create({
             body: `${name}, checking in on the payment for your dirt delivery. ${total} via Venmo, Zelle, or we can send an invoice. Let me know`,
-            from: CUSTOMER_FROM, to: `+1${c.phone}`,
+            from: fromNumber, to: `+1${c.phone}`,
           })
           await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 4h] Second follow-up`, direction: "outbound", message_sid: `pw4h_${Date.now()}` })
         }
         actions++
       } else if (hoursWaiting >= 24 && hoursWaiting < 25 && lastOutHoursAgo >= 4) {
         // 24 hours — final text + admin escalation
-        if (CUSTOMER_FROM) {
+        if (fromNumber) {
           await tw.messages.create({
             body: `${name}, last follow-up on the ${total} delivery payment. Let me know how you'd like to handle it`,
-            from: CUSTOMER_FROM, to: `+1${c.phone}`,
+            from: fromNumber, to: `+1${c.phone}`,
           })
           await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 24h] Final follow-up`, direction: "outbound", message_sid: `pw24h_${Date.now()}` })
         }
         await alertAdmin(`UNPAID 24h — NEEDS MANUAL COLLECTION: ${c.customer_name} (${c.phone}) owes ${total}`, sb)
         actions++
       } else if (hoursWaiting >= 48) {
-        // 48h+ — close it out, admin handles manually
-        await sb.from("customer_conversations").update({ state: "CLOSED" }).eq("phone", c.phone)
+        // 48h+ — close it out, admin handles manually (scoped to this agent row)
+        await sb.from("customer_conversations").update({ state: "CLOSED" }).eq("phone", c.phone).eq("agent_id", c.agent_id)
         await alertAdmin(`UNPAID CLOSED 48h+: ${c.customer_name} (${c.phone}) ${total}. Manual collection needed.`, sb)
         actions++
       }

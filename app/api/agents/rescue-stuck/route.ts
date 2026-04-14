@@ -269,7 +269,7 @@ export async function GET(request: NextRequest) {
 
   const sarahTerminal = ["CLOSED", "DELIVERED", "ORDER_PLACED", "OUT_OF_AREA"]
   const { data: stuckSarah } = await sb.from("customer_conversations")
-    .select("phone, state, updated_at, opted_out, customer_name")
+    .select("phone, agent_id, source_number, state, updated_at, opted_out, customer_name")
     .not("state", "in", `(${sarahTerminal.join(",")})`)
     .eq("opted_out", false)
     .lt("updated_at", oneHourAgo)
@@ -279,10 +279,11 @@ export async function GET(request: NextRequest) {
     try {
       if (conv.opted_out) { results.skipped++; continue }
 
-      // Check needs_human_review
+      // Check needs_human_review — scope to this agent conversation
       const { data: convFull } = await sb.from("customer_conversations")
         .select("needs_human_review")
         .eq("phone", conv.phone)
+        .eq("agent_id", conv.agent_id)
         .maybeSingle()
       if (convFull?.needs_human_review) { results.skipped++; continue }
 
@@ -303,7 +304,7 @@ export async function GET(request: NextRequest) {
       const attemptNum = (totalAttempts || 0) + 1
 
       if (attemptNum > 3) {
-        try { await sb.from("customer_conversations").update({ needs_human_review: true }).eq("phone", conv.phone) } catch {}
+        try { await sb.from("customer_conversations").update({ needs_human_review: true }).eq("phone", conv.phone).eq("agent_id", conv.agent_id) } catch {}
         await alertAdmin(`Sarah rescue maxed out: ${conv.phone} (${conv.customer_name || "unknown"}) stuck in ${conv.state} after 3 attempts`)
         await sb.from("agent_rescue_logs").insert({
           system: "sarah", phone: conv.phone, stuck_state: conv.state,
@@ -329,14 +330,15 @@ export async function GET(request: NextRequest) {
         continue
       }
 
-      // Send SMS
-      const sent = await sendSMSraw(`+1${conv.phone}`, rescueMsg, FROM_CUSTOMER)
+      // Send SMS FROM the agent's Twilio number so agent illusion is preserved
+      const rescueFrom = conv.source_number ? `+1${conv.source_number}` : FROM_CUSTOMER
+      const sent = await sendSMSraw(`+1${conv.phone}`, rescueMsg, rescueFrom)
       if (sent) {
         await sb.from("customer_sms_logs").insert({
           phone: conv.phone, body: `[RESCUE ${conv.state}] ${rescueMsg}`,
           direction: "outbound", message_sid: `rescue_s_${Date.now()}`,
         })
-        await sb.from("customer_conversations").update({ updated_at: new Date().toISOString() }).eq("phone", conv.phone)
+        await sb.from("customer_conversations").update({ updated_at: new Date().toISOString() }).eq("phone", conv.phone).eq("agent_id", conv.agent_id)
       }
 
       await sb.from("agent_rescue_logs").insert({

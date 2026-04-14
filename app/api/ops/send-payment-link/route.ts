@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
   }
 
-  let body: { phone?: string; amountCents?: number; description?: string } = {}
+  let body: { phone?: string; amountCents?: number; description?: string; agentId?: string } = {}
   try { body = await req.json() } catch { return NextResponse.json({ success: false, error: "Invalid JSON" }, { status: 400 }) }
   const phone = (body.phone || "").replace(/\D/g, "").replace(/^1/, "")
   if (!phone || phone.length !== 10) {
@@ -37,14 +37,16 @@ export async function POST(req: NextRequest) {
   }
 
   const sb = createAdminSupabase()
-  const { data: conv, error: convErr } = await sb
-    .from("customer_conversations")
-    .select("*")
-    .eq("phone", phone)
-    .maybeSingle()
+  // A phone can now have multiple conversations (one per agent). Pick the
+  // most recently updated priority conversation, or the agent_id if provided.
+  let convQuery = sb.from("customer_conversations").select("*").eq("phone", phone)
+  if (body.agentId) convQuery = convQuery.eq("agent_id", body.agentId)
+  const { data: convs, error: convErr } = await convQuery.order("updated_at", { ascending: false }).limit(1)
+  const conv = convs?.[0]
   if (convErr || !conv) {
     return NextResponse.json({ success: false, error: convErr?.message || "No conversation" }, { status: 404 })
   }
+  const convAgentId = conv.agent_id as string
 
   const amountCents = body.amountCents || conv.priority_total_cents || conv.total_price_cents
   if (!amountCents || amountCents <= 0) {
@@ -64,12 +66,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: checkout.error || "Stripe failed" }, { status: 502 })
   }
 
-  // Persist the new session id
+  // Persist the new session id (scoped to this specific agent conversation)
   await sb.from("customer_conversations").update({
     state: "AWAITING_PRIORITY_PAYMENT",
     order_type: "priority",
     stripe_session_id: checkout.sessionId,
-  }).eq("phone", phone)
+  }).eq("phone", phone).eq("agent_id", convAgentId)
 
   // Text the link from the agent's Twilio number (preserve attribution)
   const fromNumber = conv.source_number

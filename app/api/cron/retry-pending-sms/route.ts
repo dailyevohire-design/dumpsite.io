@@ -41,13 +41,17 @@ export async function GET(req: NextRequest) {
 
   for (const row of pending) {
     // Find the agent number for this customer to preserve attribution.
-    const { data: conv } = await sb
+    // A phone can now have multiple conversation rows (one per agent) — pick
+    // the most recently updated. .limit(1) avoids maybeSingle() throwing on
+    // multi-row results.
+    const { data: convs } = await sb
       .from("customer_conversations")
       .select("source_number")
       .eq("phone", row.phone)
-      .maybeSingle()
-    const fromNumber = conv?.source_number
-      ? `+1${conv.source_number}`
+      .order("updated_at", { ascending: false })
+      .limit(1)
+    const fromNumber = convs?.[0]?.source_number
+      ? `+1${convs[0].source_number}`
       : (process.env.CUSTOMER_TWILIO_NUMBER || adminFrom)
 
     try {

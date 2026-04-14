@@ -75,18 +75,23 @@ export async function POST(req: NextRequest) {
     const normalizedPhone = normalizePhone(phone)
     const supabase = createAdminSupabase()
 
-    // Load conversation
+    // Lookup by stripe_session_id — guaranteed unique across ALL rows
+    // (a customer can have multiple conversations now, one per agent_id, so
+    // .eq("phone") could return multiple rows and .maybeSingle() would throw).
     const { data: conv } = await supabase
       .from('customer_conversations')
       .select('*')
-      .eq('phone', normalizedPhone)
+      .eq('stripe_session_id', session.id)
       .maybeSingle()
 
     if (!conv) {
-      console.error(`[stripe webhook] No conversation found for phone: ${normalizedPhone}`)
-      await sendAdminSMS(`STRIPE PAYMENT received but no conversation found for ${phone} — needs manual handling`)
+      console.error(`[stripe webhook] No conversation found for stripe session: ${session.id} phone: ${normalizedPhone}`)
+      await sendAdminSMS(`STRIPE PAYMENT received but no conversation found for ${phone} (session ${session.id}) — needs manual handling`)
       return NextResponse.json({ received: true })
     }
+
+    // Agent scope for subsequent updates — use the row we found.
+    const convAgentId = conv.agent_id as string
 
     if (conv.state !== 'AWAITING_PRIORITY_PAYMENT') {
       console.error(`[stripe webhook] Unexpected state ${conv.state} for ${normalizedPhone}`)
@@ -94,7 +99,7 @@ export async function POST(req: NextRequest) {
       await sendAdminSMS(`STRIPE PAYMENT received for ${conv.customer_name} (${phone}) but state was ${conv.state} — check manually`)
     }
 
-    // Update conversation with payment info
+    // Update conversation with payment info (scoped by agent_id)
     const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : null
     await supabase
       .from('customer_conversations')
@@ -105,6 +110,7 @@ export async function POST(req: NextRequest) {
         state: 'ORDER_PLACED',
       })
       .eq('phone', normalizedPhone)
+      .eq('agent_id', convAgentId)
 
     // Create dispatch order
     const { createDispatchOrder } = await import('@/lib/services/dispatch.service')
@@ -143,6 +149,7 @@ export async function POST(req: NextRequest) {
         .from('customer_conversations')
         .update({ dispatch_order_id: result.dispatchId })
         .eq('phone', normalizedPhone)
+        .eq('agent_id', convAgentId)
 
       console.log(`[stripe webhook] Priority order dispatched: ${result.dispatchId} for ${normalizedPhone}`)
     } else {

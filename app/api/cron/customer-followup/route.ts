@@ -21,17 +21,17 @@ export async function GET(request: NextRequest) {
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
   const { data: staleQuotes } = await sb
     .from("customer_conversations")
-    .select("phone, customer_name")
+    .select("phone, agent_id, customer_name")
     .eq("state", "QUOTING")
     .lt("updated_at", yesterday)
     .neq("opted_out", true)
-  // Auto-transition stale quotes to FOLLOW_UP
+  // Auto-transition stale quotes to FOLLOW_UP (scoped to specific agent row)
   for (const q of staleQuotes || []) {
     await sb.from("customer_conversations").update({
       state: "FOLLOW_UP",
       follow_up_at: now,
       follow_up_count: 0,
-    }).eq("phone", q.phone)
+    }).eq("phone", q.phone).eq("agent_id", q.agent_id)
   }
 
   // ── FIX 4: Follow up on COLLECTING + ASKING_DIMENSIONS too ──
@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
   const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString()
   const { data: staleCollecting } = await sb
     .from("customer_conversations")
-    .select("phone, customer_name, state, delivery_address, material_type, yards_needed, delivery_city")
+    .select("phone, agent_id, customer_name, state, delivery_address, material_type, yards_needed, delivery_city")
     .in("state", ["COLLECTING", "ASKING_DIMENSIONS"])
     .lt("follow_up_at", now)
     .neq("opted_out", true)
@@ -51,7 +51,7 @@ export async function GET(request: NextRequest) {
       state: "FOLLOW_UP",
       follow_up_at: now,
       follow_up_count: 0,
-    }).eq("phone", sc.phone)
+    }).eq("phone", sc.phone).eq("agent_id", sc.agent_id)
     // Log anomaly for visibility
     try {
       await sb.from("conversation_anomalies").insert({
@@ -65,7 +65,7 @@ export async function GET(request: NextRequest) {
 
   const { data: followUps } = await sb
     .from("customer_conversations")
-    .select("phone, customer_name, state, follow_up_count, material_type, yards_needed, total_price_cents, delivery_address, delivery_city")
+    .select("phone, agent_id, source_number, customer_name, state, follow_up_count, material_type, yards_needed, total_price_cents, delivery_address, delivery_city")
     .eq("state", "FOLLOW_UP")
     .lt("follow_up_at", now)
     .lt("follow_up_count", 3)
@@ -98,8 +98,10 @@ export async function GET(request: NextRequest) {
         msg = `${firstName} last check in on the dirt delivery. No worries if plans changed, just text me anytime you need material delivered`
       }
 
+      // Reply FROM the agent's Twilio number to preserve per-agent illusion
+      const fromNumber = c.source_number ? `+1${c.source_number}` : CUSTOMER_FROM
       await twilioClient.messages.create({
-        body: msg, from: CUSTOMER_FROM,
+        body: msg, from: fromNumber,
         to: `+1${c.phone}`,
       })
 
@@ -113,7 +115,7 @@ export async function GET(request: NextRequest) {
         follow_up_count: count + 1,
         follow_up_at: count < 2 ? nextFollowUp : null,
         state: count >= 2 ? "CLOSED" : "FOLLOW_UP",
-      }).eq("phone", c.phone)
+      }).eq("phone", c.phone).eq("agent_id", c.agent_id)
 
       sent++
     } catch (e) { console.error("[followup]", e) }
