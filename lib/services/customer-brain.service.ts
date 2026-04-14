@@ -13,6 +13,9 @@ const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_F
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
 const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const LARGE_ORDER = 500
+// Sentinel "Main" sales agent for conversations without a resolved agent
+// (matches the sentinel row inserted by the agent_isolation migration)
+const SENTINEL_AGENT_ID = "00000000-0000-0000-0000-000000000001"
 
 // ─────────────────────────────────────────────────────────
 // SALES AGENT LOOKUP — maps Twilio numbers to agents
@@ -461,24 +464,24 @@ function looksLikeFollowUp(text: string): boolean {
 // ─────────────────────────────────────────────────────────
 function normalizePhone(raw: string): string { return raw.replace(/\D/g, "").replace(/^1/, "") }
 
-async function getConv(phone: string): Promise<{ conv: any; readAt: string | undefined }> {
+async function getConv(phone: string, agentId: string): Promise<{ conv: any; readAt: string | undefined }> {
   const sb = createAdminSupabase()
-  const { data, error } = await sb.from("customer_conversations").select("*").eq("phone", phone).maybeSingle()
+  const { data, error } = await sb.from("customer_conversations").select("*").eq("phone", phone).eq("agent_id", agentId).maybeSingle()
   if (error) {
-    console.error("[CRITICAL] getConv FAILED:", error.message, "| phone:", phone)
-    await notifyAdmin(`GETCONV FAILED: ${error.message} | Phone: ${phone}. Customer may be treated as NEW incorrectly.`, `getconv_fail_${Date.now()}`)
+    console.error("[CRITICAL] getConv FAILED:", error.message, "| phone:", phone, "| agent:", agentId)
+    await notifyAdmin(`GETCONV FAILED: ${error.message} | Phone: ${phone} agent ${agentId}. Customer may be treated as NEW incorrectly.`, `getconv_fail_${Date.now()}`)
   }
-  return { conv: data || { state: "NEW" }, readAt: data?.updated_at }
+  return { conv: data || { state: "NEW", agent_id: agentId }, readAt: data?.updated_at }
 }
 
-async function saveConv(phone: string, u: Record<string, any>, readAt?: string): Promise<void> {
+async function saveConv(phone: string, agentId: string, u: Record<string, any>, readAt?: string): Promise<void> {
   const sb = createAdminSupabase()
 
   // Race condition guard: if the row was modified after we read it, another request
   // wrote in between. COALESCE handles most cases (null=keep existing), but log a
   // warning so we can detect conflicting state changes.
   if (readAt) {
-    const { data: current } = await sb.from("customer_conversations").select("updated_at, state").eq("phone", phone).maybeSingle()
+    const { data: current } = await sb.from("customer_conversations").select("updated_at, state").eq("phone", phone).eq("agent_id", agentId).maybeSingle()
     if (current && current.updated_at && current.updated_at > readAt) {
       console.warn(`[RACE] saveConv for ${phone}: row modified since read (read at ${readAt}, now ${current.updated_at}, DB state: ${current.state}, our state: ${u.state || "unchanged"}). COALESCE will merge safely but state may conflict.`)
       // If the DB already has a more advanced state, don't regress it
@@ -513,7 +516,7 @@ async function saveConv(phone: string, u: Record<string, any>, readAt?: string):
     p_payment_method: u.payment_method ?? null, p_payment_account: u.payment_account ?? null,
     p_payment_status: u.payment_status ?? null, p_dispatch_order_id: u.dispatch_order_id ?? null,
     p_follow_up_at: u.follow_up_at ?? null, p_follow_up_count: u.follow_up_count ?? null,
-    p_source_number: u.source_number ?? null, p_agent_id: u.agent_id ?? null,
+    p_source_number: u.source_number ?? null, p_agent_id: agentId,
   })
   if (error) {
     console.error("[CRITICAL] saveConv FAILED:", error.message, "| phone:", phone, "| state:", u.state)
@@ -537,7 +540,7 @@ async function saveConv(phone: string, u: Record<string, any>, readAt?: string):
     }
   }
   if (Object.keys(nullOverrides).length > 0) {
-    const { error: clearErr } = await sb.from("customer_conversations").update(nullOverrides).eq("phone", phone)
+    const { error: clearErr } = await sb.from("customer_conversations").update(nullOverrides).eq("phone", phone).eq("agent_id", agentId)
     if (clearErr) {
       console.error("[saveConv] COALESCE bypass failed:", clearErr.message, "| phone:", phone, "| fields:", Object.keys(nullOverrides).join(","))
     } else {
@@ -546,9 +549,9 @@ async function saveConv(phone: string, u: Record<string, any>, readAt?: string):
   }
 }
 
-async function savePriorityFields(phone: string, fields: Record<string, any>): Promise<void> {
+async function savePriorityFields(phone: string, agentId: string, fields: Record<string, any>): Promise<void> {
   const sb = createAdminSupabase()
-  const { error } = await sb.from("customer_conversations").update(fields).eq("phone", phone)
+  const { error } = await sb.from("customer_conversations").update(fields).eq("phone", phone).eq("agent_id", agentId)
   if (error) {
     console.error("[CRITICAL] savePriorityFields FAILED:", error.message, "| phone:", phone)
     await notifyAdmin(`SAVE PRIORITY FAILED: ${error.message} | Phone: ${phone}. Priority fields NOT saved.`, `priority_fail_${Date.now()}`)
@@ -563,6 +566,129 @@ async function savePriorityFields(phone: string, fields: Record<string, any>): P
 // waiting up to 5 minutes for the TTL.
 export function invalidateAgentCache(): void {
   agentCache = { agents: [], loadedAt: 0 }
+}
+
+// ─────────────────────────────────────────────────────────
+// CROSS-AGENT ARBITRAGE DEFENSE
+// If the same customer shops the same phone across multiple agent numbers,
+// raise the price. Never undercut. Sarah treats each agent conversation as
+// fresh (isolation at the conversation level), but the global price ledger
+// ensures we do NOT beat our own best quote.
+//
+// Tiers (over highest prior quote):
+//   2nd agent  → +15%
+//   3rd agent  → +20%
+//   4th+ agent → +25% (cap)
+// ─────────────────────────────────────────────────────────
+function computeSurchargePct(attemptNumber: number): number {
+  if (attemptNumber <= 1) return 0
+  if (attemptNumber === 2) return 0.15
+  if (attemptNumber === 3) return 0.20
+  return 0.25
+}
+
+async function lookupPriorQuotesForArbitrage(phone: string, currentAgentId: string): Promise<{
+  priorAgentsCount: number
+  highestPriorTotal: number
+  highestPriorAgentId: string | null
+}> {
+  const sb = createAdminSupabase()
+  const { data, error } = await sb
+    .from("customer_price_history")
+    .select("agent_id, total_price_cents, quoted_at")
+    .eq("phone", phone)
+    .neq("agent_id", currentAgentId)
+    .gt("total_price_cents", 0)
+  if (error) {
+    console.error("[arbitrage] lookup failed:", error.message)
+    return { priorAgentsCount: 0, highestPriorTotal: 0, highestPriorAgentId: null }
+  }
+  if (!data || data.length === 0) return { priorAgentsCount: 0, highestPriorTotal: 0, highestPriorAgentId: null }
+  const uniqueAgents = new Set(data.map(r => r.agent_id))
+  const maxRow = data.reduce((max: any, r: any) => (r.total_price_cents > (max?.total_price_cents || 0) ? r : max), data[0])
+  return {
+    priorAgentsCount: uniqueAgents.size,
+    highestPriorTotal: maxRow.total_price_cents,
+    highestPriorAgentId: maxRow.agent_id,
+  }
+}
+
+async function applyArbitrageGuard(
+  phone: string,
+  agentId: string,
+  currentAgentName: string | null,
+  customerName: string | null,
+  deliveryAddress: string | null,
+  updates: Record<string, any>,
+): Promise<void> {
+  if (!updates.total_price_cents || updates.total_price_cents <= 0) return
+  // Sentinel "main" agent = no cross-shop detection (admin/default path)
+  if (agentId === SENTINEL_AGENT_ID) return
+
+  const prior = await lookupPriorQuotesForArbitrage(phone, agentId)
+  if (prior.priorAgentsCount === 0) return
+
+  const attemptNumber = prior.priorAgentsCount + 1
+  const surchargePct = computeSurchargePct(attemptNumber)
+  const flooredTotal = Math.round(prior.highestPriorTotal * (1 + surchargePct))
+  const originalQuote = updates.total_price_cents
+  const finalTotal = Math.max(originalQuote, flooredTotal)
+
+  if (finalTotal > originalQuote) {
+    const yards = updates.yards_needed || 1
+    updates.total_price_cents = finalTotal
+    updates.price_per_yard_cents = Math.round(finalTotal / yards)
+
+    // Look up the original agent's name for the log
+    let originalAgentName: string | null = null
+    try {
+      const agents = await loadAgents()
+      originalAgentName = agents.find(a => a.id === prior.highestPriorAgentId)?.name || null
+    } catch {}
+
+    try {
+      const sb = createAdminSupabase()
+      await sb.from("customer_arbitrage_log").insert({
+        phone,
+        customer_name: customerName,
+        delivery_address: deliveryAddress,
+        original_agent_id: prior.highestPriorAgentId,
+        original_agent_name: originalAgentName,
+        shopping_agent_id: agentId,
+        shopping_agent_name: currentAgentName,
+        original_total_cents: prior.highestPriorTotal,
+        applied_total_cents: finalTotal,
+        surcharge_pct: surchargePct,
+        shop_attempt_number: attemptNumber,
+      })
+    } catch (e) {
+      console.error("[arbitrage] log insert failed:", (e as any)?.message)
+    }
+    console.log(`[arbitrage] phone=${phone} attempt=${attemptNumber} surcharge=${Math.round(surchargePct * 100)}% prior=${prior.highestPriorTotal} → ${finalTotal}`)
+  }
+}
+
+async function recordQuoteHistory(
+  phone: string,
+  agentId: string,
+  merged: Record<string, any>,
+): Promise<void> {
+  if (!merged.total_price_cents || merged.total_price_cents <= 0) return
+  if (agentId === SENTINEL_AGENT_ID) return
+  try {
+    const sb = createAdminSupabase()
+    await sb.from("customer_price_history").insert({
+      phone,
+      agent_id: agentId,
+      delivery_address: merged.delivery_address || null,
+      material_type: merged.material_type || null,
+      yards_needed: merged.yards_needed || null,
+      price_per_yard_cents: merged.price_per_yard_cents || null,
+      total_price_cents: merged.total_price_cents,
+    })
+  } catch (e) {
+    console.error("[price_history] insert failed:", (e as any)?.message)
+  }
 }
 
 async function isDupe(sid: string): Promise<boolean> {
@@ -972,6 +1098,13 @@ AD LEADS (CRAIGSLIST, FACEBOOK, ETC):
 - They think they're texting the person from the ad. DO NOT break that illusion. DO NOT introduce yourself as Sarah. DO NOT say "this is Fill Dirt Near Me" or any company name. Just respond naturally like you're the person they expect.
 - They may say things like "I saw your ad", "texting about the dirt", "someone told me to text this number" — just roll with it. You already know they came from an ad. Don't explain it.
 - Some customers will text once, get busy, and text again hours or days later from the same number. That's totally normal. The system remembers their conversation. Pick up where you left off, don't restart from scratch. If they seem confused, just say "hey we were chatting earlier" and continue.
+
+AGENT ISOLATION — CRITICAL:
+- Each agent number is its own independent brand to the customer. You have NO knowledge of any other conversation from any other agent.
+- If the customer says "I already gave you this address" or "you quoted me before" but this conversation has no prior record of it, ask them to re-share the details as if it's brand new. NEVER acknowledge that they might have spoken to another agent or to "us" before. NEVER say "I see you contacted us earlier" or "my colleague already quoted you."
+- NEVER say "same price as before", "same address you gave us", "I have it on file from last time", or ANY phrase that implies you remember them from a different agent's line.
+- Treat EVERY conversation on this agent's number as its own universe. Only use information the customer gave you ON THIS NUMBER.
+- If the price the system gives you differs from what the customer claims another "company" quoted them, just present the price — do NOT confirm or deny any other quote. Say "this is what we can do it for" and move on.
 
 YOUR NAME WHEN AN AGENT IS ASSIGNED:
 - If the CONVERSATION STATE includes a line "YOUR NAME IN THIS CONVERSATION: {name}", that is who you are in this conversation. NOT Sarah. The customer texted that agent's number from an ad and thinks they're talking to that person.
@@ -1646,6 +1779,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // Look up which agent's Twilio number was texted. Store on conversation for commission tracking.
   // Agent is set ONCE on first contact and preserved via COALESCE on subsequent messages.
   const agent = await lookupAgent(sourceNumber)
+  // Agent-scoped conversation key. Every customer_conversations read/write is
+  // keyed by (phone, agent_id) so each agent has their own isolated memory
+  // of this customer — required to mask that we're the same company.
+  const agentId = agent?.id ?? SENTINEL_AGENT_ID
   // First name only (e.g. "John Luehrsen" → "John"). Used as Sarah's identity
   // when the customer texted an agent number. Falls back to undefined when
   // there's no agent (default number → Sarah from Fill Dirt Near Me).
@@ -1710,11 +1847,11 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
 
   // Empty body with photo — acknowledge it (but check opt-out first)
   if (sms.numMedia > 0 && !body) {
-    const { conv: photoConv } = await getConv(phone)
+    const { conv: photoConv } = await getConv(phone, agentId)
     if (photoConv.opted_out) return ""
     // Persist agent attribution even on photo-only first contact
     if (agent && !photoConv.agent_id) {
-      await saveConv(phone, { source_number: sourceNumber, agent_id: agent.id }, photoConv.updated_at)
+      await saveConv(phone, agentId, { source_number: sourceNumber, agent_id: agent.id }, photoConv.updated_at)
     }
     const s = await callSarah("[Customer sent a photo]", photoConv, await getHistory(phone), "Customer sent a photo. Acknowledge it naturally, like 'thanks for the pic' or 'got the photo'. Then continue with whatever question you need to ask next based on what info is still missing")
     const r = validate(s.response, "")
@@ -1733,7 +1870,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     await logMsg(phone, r, "outbound", `start_${sid}`); return r
   }
 
-  const { conv, readAt } = await getConv(phone)
+  const { conv, readAt } = await getConv(phone, agentId)
   if (conv.opted_out) return ""
 
   // ── FIX 2: NEEDS_HUMAN_REVIEW — pause button for any conversation ──
@@ -2109,7 +2246,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       state, message: body.slice(0, 200), agent: agentN,
       regex_hit: aiRegexHit, extractor_hit: aiExtractorHit,
     })
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `ai_deny_${sid}`)
     // AUTO-LEARN: customer suspected AI — capture what went wrong
     await addLearning("sarah", "identity", `Customer in state ${state} asked if they were talking to AI. This happened because the brain was ${needAddress ? "re-asking for address" : needYards ? "re-asking for yards" : "repeating itself"}. When in ${state}, be extra careful to use data already collected and never re-ask for something the customer gave.`)
@@ -2187,7 +2324,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         recoveryMsg += `. if you're still open to it I have everything I need to put together your quote`
       }
       reply = validate(recoveryMsg, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `recovery_${sid}`)
       // AUTO-LEARN: customer frustration — what data was missed and recovered
       const recoveredFields = [
@@ -2212,7 +2349,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     updates.state = "CLOSED"
     const s = await callSarah(body, conv, history, "Customer wants to cancel. Say you'll have someone from the team reach out to help with that. Be empathetic but dont push")
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2241,7 +2378,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     const s = await callSarah(body, conv, history, statusInstruction)
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2249,7 +2386,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   if (isStatus && !hasOrder) {
     const s = await callSarah(body, conv, history, "Customer asking about an order but they don't have one yet. We're not currently hauling in their area but as soon as we are they'll be the first to know. If they want to place an order, help them get started")
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2262,7 +2399,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const s = await callSarah(body, conv, history, instruction)
     updates.state = hasQuote ? "QUOTING" : needAddress ? "COLLECTING" : "COLLECTING"
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2278,7 +2415,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const payAgent = agent || (conv.agent_id ? (await loadAgents()).find(a => a.id === conv.agent_id) : null)
       if (payAgent) await notifyAgent(payAgent, `Payment confirmed: ${conv.customer_name} | ${fmt$(conv.total_price_cents||0)} | ${conv.payment_method || "unknown method"}`, sid)
       notifyRepDashboard({ fromNumber: conv.source_number || CUSTOMER_FROM, customerName: conv.customer_name ?? "Customer", yards: conv.yards_needed ?? 0, material: conv.material_type ?? "fill dirt", city: conv.delivery_city ?? "Unknown", amountDollars: Math.round((conv.total_price_cents ?? 0) / 100), eventType: "order_delivered", orderId: conv.dispatch_order_id ?? undefined })
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/zelle/i.test(lower)) {
@@ -2286,7 +2423,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const total = fmt$(conv.total_price_cents || 0)
       const s = await callSarah(body, conv, history, `They chose Zelle. Tell them to send ${total} to support@filldirtnearme.net via Zelle. Once sent, text you back`)
       reply = validate(s.response, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/venmo/i.test(lower)) {
@@ -2294,7 +2431,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const total = fmt$(conv.total_price_cents || 0)
       const s = await callSarah(body, conv, history, `They chose Venmo. Tell them to send ${total} to @FillDirtNearMe on Venmo. Once sent, text you back`)
       reply = validate(s.response, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/invoice|card|credit|debit|online/i.test(lower)) {
@@ -2310,13 +2447,13 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         const s = await callSarah(body, conv, history, `They want to pay by card. There's a 3.5% processing fee. Ask for their email so you can send the invoice`)
         reply = validate(s.response, lastOut)
       }
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     if (/cash|check|cheque/i.test(lower)) {
       const s = await callSarah(body, conv, history, "They want cash or check. Explain we cant accept those, our drivers are independently insured contractors so for liability reasons we can only do Venmo, Zelle, or online invoice (card with 3.5% fee). Ask which works")
       reply = validate(s.response, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     // NEVER-STUCK: count how many recent outbound messages were payment-method
@@ -2332,13 +2469,13 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       await notifyAdmin(`PAYMENT METHOD STUCK: ${conv.customer_name || phone} delivered ${fmt$(conv.total_price_cents||0)} — couldn't pin a method after ${recentPayPrompts} tries. CALL OR INVOICE MANUALLY.`, `pay_stuck_${Date.now()}`)
       const s = await callSarah(body, conv, history, "Tell them no worries on the payment method — youll have someone from the team reach out directly to take care of it. Casual and friendly.")
       reply = validate(s.response, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
     // General question while waiting for payment
     const s = await callSarah(body, conv, history, `Delivery is complete, waiting on payment of ${fmt$(conv.total_price_cents||0)}. Answer their question, then remind them we accept Venmo, Zelle, or online invoice (card with 3.5% fee). Which works for them`)
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2352,7 +2489,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           updates.state = "ORDER_PLACED"
           updates.payment_status = "paid"
           updates.payment_method = "stripe"
-          await savePriorityFields(phone, { stripe_payment_intent_id: paymentIntentId || null })
+          await savePriorityFields(phone, agentId, { stripe_payment_intent_id: paymentIntentId || null })
           const orderId = await createDispatchOrder({ ...conv, ...updates, total_price_cents: conv.priority_total_cents }, phone)
           if (orderId) {
             updates.dispatch_order_id = orderId
@@ -2388,7 +2525,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         })
         if (checkout.success && checkout.url) {
           updates.stripe_session_id = checkout.sessionId
-          await savePriorityFields(phone, { stripe_session_id: checkout.sessionId })
+          await savePriorityFields(phone, agentId, { stripe_session_id: checkout.sessionId })
           const s = await callSarah(body, conv, history, `Customer needs the payment link again. Here it is: ${checkout.url} — work it into the message naturally`)
           reply = validate(s.response, lastOut)
         } else {
@@ -2406,7 +2543,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const s = await callSarah(body, conv, history, `Customer has a priority order pending payment of ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed} yards of ${fmtMaterial(conv.material_type||"")} guaranteed by ${conv.priority_guaranteed_date}. Answer their question, then remind them to complete payment to lock in their delivery date`)
       reply = validate(s.response, lastOut)
     }
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2479,7 +2616,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     const s = await callSarah(body, conv, history, `${orderContext}. Answer their question helpfully. If they want to cancel, say you'll have someone reach out`)
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2509,7 +2646,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     const s = await callSarah(body, conv, history, "This customer's delivery has been completed and payment was received. Answer their question. If they need more material, tell them to just let you know and you'll get them set up. If they have an issue with the delivery, say you'll have someone from the team reach out")
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2559,7 +2696,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const firstName = (conv.customer_name || "").split(/\s+/)[0]
       const greeting = firstName ? `${firstName} ` : ""
       reply = validate(`${greeting}that's already our locked in zone rate for ${yards} yards of ${material} to ${conv.delivery_city || "your area"} at ${fmt$(conv.total_price_cents || 0)} (${fmt$(conv.price_per_yard_cents || 0)}/yard). I can't go lower on this load, but if you can do a bigger load the per yard rate stays the same so its more efficient. Want to lock it in or think about it`, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
@@ -2579,7 +2716,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         ? ` your ${yards || MIN_YARDS} yards of ${material} to ${conv.delivery_city || "your area"} is ${fmt$(conv.total_price_cents)} and that covers everything, the dirt, the trucking, and delivery to your door`
         : ""
       reply = validate(`${greeting}the dirt is free, you're only paying for the trucking and delivery to get it to you. thats what the ${fmt$(conv.price_per_yard_cents || 1500)}/yard covers, the truck, the driver, the fuel, and getting it placed on your property.${priceContext} want me to get it scheduled`, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
@@ -2588,7 +2725,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       && !isYes && !isNo
     if (isAskingWhatsIncluded) {
       reply = validate(`Delivery and dump only — we drop the dirt where you want it on your property. We don't spread or grade. Tax and delivery are included in the quoted price. The only thing not in there is if you want a specific guaranteed date, that's a separate priority option`, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
@@ -2599,7 +2736,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const yards = conv.yards_needed || MIN_YARDS
       const material = fmtMaterial(conv.material_type || "fill_dirt")
       reply = validate(`Yeah that's our zone rate for ${yards} yards of ${material} to ${conv.delivery_city || "your area"} at ${fmt$(conv.total_price_cents || 0)}. Locked in by zone, can't move on it. Want me to get it scheduled`, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
@@ -2617,7 +2754,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       const firstName = (conv.customer_name || "").split(/\s+/)[0]
       const greeting = firstName ? `${firstName} ` : ""
       reply = validate(`${greeting}standard delivery is 3-5 business days, sometimes sooner if we get a cancellation in your area. ${yards} yards of ${material} to ${conv.delivery_city || "your area"} at ${fmt$(conv.total_price_cents || 0)} total. Want me to get it scheduled`, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
@@ -2639,7 +2776,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       } else {
         reply = validate(`${greeting}yeah we can do sooner than 3-5 days, what date do you need it by and Ill get you the guaranteed pricing for that`, lastOut)
       }
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     }
 
@@ -2692,7 +2829,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
             ? "Quick check before I lock this in — what material is this for again"
             : "Hey one second, let me double check the details before I lock this in. Someone will text you right back"
           reply = validate(askFor, lastOut)
-          await saveConv(phone, { ...conv, ...updates }, readAt)
+          await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
           await logMsg(phone, reply, "outbound", `prio_refused_${sid}`)
           return reply
         }
@@ -2715,7 +2852,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           // is on the way. If this throws, the catch below treats it as a
           // Stripe-failure path so the customer never gets a dead link.
           try {
-            await savePriorityFields(phone, {
+            await savePriorityFields(phone, agentId, {
               order_type: "priority",
               stripe_session_id: checkout.sessionId,
             })
@@ -2739,7 +2876,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           // can manually create a Stripe checkout and text the link.
           updates.state = "AWAITING_PRIORITY_PAYMENT" // hold the priority slot
           updates.order_type = "priority"
-          await savePriorityFields(phone, { order_type: "priority" })
+          await savePriorityFields(phone, agentId, { order_type: "priority" })
           const s = await callSarah(body, conv, history, `Customer chose priority. Tell them you've got their guaranteed delivery for ${conv.priority_guaranteed_date} locked in and you're sending the payment link in the next couple minutes. Casual and confident, NOT apologetic. Do NOT say there's an issue.`)
           reply = validate(s.response, lastOut)
           const stripeMsg = `${conv.customer_name || phone} — priority ${fmt$(conv.priority_total_cents||0)} for ${conv.yards_needed || MIN_YARDS}yds ${fmtMaterial(conv.material_type||"fill_dirt")} guaranteed ${conv.priority_guaranteed_date}. Customer was told payment link in 2 min. CREATE STRIPE CHECKOUT MANUALLY AND TEXT THEM. Stripe error: ${checkout.error}`
@@ -2767,7 +2904,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
             ? "Quick check before I lock this in — what material is this for again"
             : "Hey one second, let me double check the details before I lock this in. Someone will text you right back"
           reply = validate(askFor, lastOut)
-          await saveConv(phone, { ...conv, ...updates }, readAt)
+          await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
           await logMsg(phone, reply, "outbound", `dispatch_refused_${sid}`)
           return reply
         }
@@ -2784,13 +2921,13 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
             totalCents: conv.total_price_cents,
             delivery_date: conv.delivery_date,
           }), lastOut)
-          await saveConv(phone, { ...conv, ...updates }, readAt)
+          await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
           await logMsg(phone, reply, "outbound", `dup_yes_${sid}`)
           return reply
         }
         updates.order_type = "standard"
         try {
-          await savePriorityFields(phone, { order_type: "standard" })
+          await savePriorityFields(phone, agentId, { order_type: "standard" })
         } catch {
           // Non-fatal for standard path — order_type is denormalized convenience
         }
@@ -2855,7 +2992,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       }
       reply = r
     }
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
     } // end if (!quotingYardsChanged && !quotingAddressChanged)
     // When yards/address changed, we fall through to COLLECTING logic below
@@ -2891,7 +3028,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         reply = validate(s.response, lastOut)
       }
     }
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -2915,7 +3052,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         ? `${inlineLoads} loads, you running tandems (10 yards each) or end dumps (20 yards each)`
         : `you running tandems (10 yards each) or end dumps (20 yards each)`
       const reply2 = `${opener}${question}`
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply2, "outbound", `out_${sid}`)
       return reply2
     }
@@ -2962,7 +3099,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     }
     const s = await callSarah(body, merged, history, newInstruction, agentFirstName)
     reply = validate(s.response, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -3029,7 +3166,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     if (isIntersection(addressText) && !conv.delivery_address) {
       updates.delivery_address = addressText
       reply = validate(`${greeting}just to confirm, is that an intersection or do you have a street number? like 123 Main St, helps me get you the exact delivery spot`, lastOut)
-      await saveConv(phone, { ...conv, ...updates }, readAt)
+      await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
       await logMsg(phone, reply, "outbound", `intersection_ask_${sid}`)
       return reply
     }
@@ -3048,7 +3185,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         updates.state = "OUT_OF_AREA"
         await notifyAdmin(`OUT OF AREA: ${conv.customer_name || phone} at "${addressText}" (${geo.city}) — ${nearest.miles}mi from nearest yard (${nearest.yard.name}). Refused politely.`, `out_of_area_${Date.now()}`)
         reply = validate(`${greeting}I really appreciate you reaching out but unfortunately we don't service ${geo.city} — we only deliver within ${SERVICE_RADIUS_MILES} miles of Dallas, Fort Worth, or Denver. If you have a project in any of those areas in the future just text me back and I'll get you taken care of`, lastOut)
-        await saveConv(phone, { ...conv, ...updates }, readAt)
+        await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
         await logMsg(phone, reply, "outbound", `out_of_area_${sid}`)
         return reply
       }
@@ -3076,7 +3213,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         // Admin notification — fire and forget, NEVER touches customer reply
         notifyAdmin(`GEOCODE FAILED for ${conv.customer_name || phone} address: "${addressText}". Asked customer to reconfirm.`, `geocode_fail_${Date.now()}`).catch(() => {})
         reply = validate(`${greeting}just want to make sure I get you the right price, can you double check that address for me? want to make sure it goes to the right spot`, lastOut)
-        await saveConv(phone, { ...conv, ...updates }, readAt)
+        await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
         await logMsg(phone, reply, "outbound", `geocode_reconfirm_${sid}`)
         return reply
       } else {
@@ -3109,7 +3246,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     else if (needAccess) nextQ = "can an 18-wheeler get to your property or should we stick with standard dump trucks"
     else if (needDate) nextQ = "do you need it by a specific date or are you flexible"
     reply = validate(`${greeting}the dirt itself is free, the price just covers trucking and delivery to get it to your property. the per yard rate covers the truck, the driver, the fuel, and getting it placed where you need it.${nextQ ? " " + nextQ : ""}`, lastOut)
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply, "outbound", `out_${sid}`); return reply
   }
 
@@ -3130,7 +3267,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     } else if (!updates.access_type && !has(conv.access_type)) {
       truckAnswer += `. can an 18-wheeler get to your property or should we stick with standard dump trucks`
     }
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, truckAnswer, "outbound", `out_${sid}`)
     return truckAnswer
   }
@@ -3142,7 +3279,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     const firstNameL = (conv.customer_name || "").split(/\s+/)[0]
     const greetL = firstNameL ? `${firstNameL}, ` : ""
     const reply3 = `${greetL}${inlineLoads} loads, you running tandems (10 yards each) or end dumps (20 yards each)`
-    await saveConv(phone, { ...conv, ...updates }, readAt)
+    await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
     await logMsg(phone, reply3, "outbound", `out_${sid}`)
     return reply3
   }
@@ -3493,6 +3630,10 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = dualQuote.standard.totalCents
       updates.zone = dualQuote.standard.zone
       updates.state = "QUOTING"
+      // CROSS-AGENT ARBITRAGE GUARD — raise price if customer is shopping
+      // another agent. Must run BEFORE billableYards writeback so per-yard is
+      // recalculated against the potentially-adjusted total.
+      await applyArbitrageGuard(phone, agentId, agent?.name || null, merged.customer_name, merged.delivery_address, updates)
       // FIX 3: Write billableYards back to conv.yards_needed when it's
       // currently null/0. Ricardo (2144224455) was quoted "10 yardas" from the
       // MIN_YARDS bump but yards_needed stayed null in DB. When he later said
@@ -3595,6 +3736,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = fb.totalCents
       updates.zone = fb.zone
       updates.state = "QUOTING"
+      await applyArbitrageGuard(phone, agentId, agent?.name || null, merged.customer_name, merged.delivery_address, updates)
       // FIX 3 (fallback path 1): writeback billableYards
       if (!has(merged.yards_needed) || merged.yards_needed === 0) {
         updates.yards_needed = fb.billableYards
@@ -3637,6 +3779,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = dualQuote.standard.totalCents
       updates.zone = dualQuote.standard.zone
       updates.state = "QUOTING"
+      await applyArbitrageGuard(phone, agentId, agent?.name || null, qMerged.customer_name, qMerged.delivery_address, updates)
       // FIX 3 (duplicate path): same billableYards writeback
       if (!has(qMerged.yards_needed) || qMerged.yards_needed === 0) {
         updates.yards_needed = dualQuote.standard.billableYards
@@ -3694,6 +3837,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       updates.total_price_cents = fb.totalCents
       updates.zone = fb.zone
       updates.state = "QUOTING"
+      await applyArbitrageGuard(phone, agentId, agent?.name || null, qMerged.customer_name, qMerged.delivery_address, updates)
       // FIX 3 (fallback path 2): writeback billableYards
       if (!has(qMerged.yards_needed) || qMerged.yards_needed === 0) {
         updates.yards_needed = fb.billableYards
@@ -3826,7 +3970,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   // conversation update is catastrophic.
   if (updates._priority_total_cents != null) {
     try {
-      await savePriorityFields(phone, {
+      await savePriorityFields(phone, agentId, {
         priority_total_cents: updates._priority_total_cents,
         priority_guaranteed_date: updates._priority_guaranteed_date || null,
         priority_quarry_name: updates._priority_quarry_name || null,
@@ -3838,7 +3982,15 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
       console.error("[saveConv] priority persist failed, continuing with saveConv:", (prioErr as any)?.message)
     }
   }
-  await saveConv(phone, { ...conv, ...updates }, readAt)
+  await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
+
+  // Record every quoted price to the global ledger. This is what the cross-
+  // agent arbitrage guard reads on the NEXT customer contact. Only writes when
+  // total_price_cents was set/changed on this message AND we're on a real
+  // agent (not the sentinel default path).
+  if (updates.total_price_cents && updates.total_price_cents > 0) {
+    await recordQuoteHistory(phone, agentId, { ...conv, ...updates })
+  }
 
   // ── FIX 1: VERIFY ADDRESS PERSISTENCE ──
   // Dario's address was acknowledged in Sarah's reply but delivery_address
@@ -3849,7 +4001,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
     try {
       const sb = createAdminSupabase()
       const { data: verify } = await sb.from("customer_conversations")
-        .select("delivery_address").eq("phone", phone).maybeSingle()
+        .select("delivery_address").eq("phone", phone).eq("agent_id", agentId).maybeSingle()
       if (!verify?.delivery_address) {
         console.error(`[VERIFY] delivery_address LOST after saveConv for ${phone} — force-writing`)
         const forceFields: Record<string, any> = { delivery_address: updates.delivery_address }
@@ -3858,7 +4010,7 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
         if (updates.delivery_lng) forceFields.delivery_lng = updates.delivery_lng
         if (updates.distance_miles) forceFields.distance_miles = updates.distance_miles
         if (updates.zone) forceFields.zone = updates.zone
-        await sb.from("customer_conversations").update(forceFields).eq("phone", phone)
+        await sb.from("customer_conversations").update(forceFields).eq("phone", phone).eq("agent_id", agentId)
         await logAnomaly(phone, "address_lost", "critical", {
           attempted_address: updates.delivery_address,
           state: updates.state || conv.state,
