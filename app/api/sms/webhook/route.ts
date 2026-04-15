@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { after } from 'next/server'
 import { smsDispatchService } from '@/lib/services/brain.service'
+import { computeFinalDelay, shouldSplitMessage } from '@/lib/services/response-delay.service'
 import { createAdminSupabase } from '@/lib/supabase'
 import crypto from 'crypto'
 
@@ -137,27 +138,52 @@ export async function POST(request: Request) {
     } catch (logErr) {
       console.error('[webhook] outbound log failed:', logErr)
     }
+    // Phase 2 — human timing (gated by JESSE_HUMAN_TIMING=1). When off, fall back
+    // to the existing naive length-bucketed delay. When on, use log-normal pipeline.
+    const humanTiming = process.env.JESSE_HUMAN_TIMING === '1'
     const replyLen = reply.length
-    const baseDelay = replyLen < 20 ? 3000 : replyLen < 80 ? 6000 : 10000
-    const jitter = replyLen < 20 ? 5000 : replyLen < 80 ? 9000 : 15000
-    const delay = baseDelay + Math.floor(Math.random() * jitter)
+
+    let delay: number
+    let splitDecision: { split: boolean; parts: string[] }
+
+    if (humanTiming) {
+      // Pull state hint from reply for delay categorization. We don't have the full
+      // conv record here, so use a coarse classifier: very short → SIMPLE, else COMPLEX.
+      const stateHint = replyLen < 30 ? 'ASKING_TRUCK' : 'DISCOVERY'
+      delay = computeFinalDelay(body.length, replyLen, stateHint)
+      splitDecision = shouldSplitMessage(reply)
+      console.log(`[TIMING] delay=${delay}ms split=${splitDecision.split} parts=${splitDecision.parts.length}`)
+    } else {
+      const baseDelay = replyLen < 20 ? 3000 : replyLen < 80 ? 6000 : 10000
+      const jitter = replyLen < 20 ? 5000 : replyLen < 80 ? 9000 : 15000
+      delay = baseDelay + Math.floor(Math.random() * jitter)
+      splitDecision = { split: false, parts: [reply] }
+    }
 
     after(async () => {
       await new Promise(r => setTimeout(r, delay))
-      let sent = false
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          await sendViaTwilioAPI(phone, reply)
-          sent = true
-          break
-        } catch (err) {
-          console.error(`[jesse] SMS send attempt ${attempt + 1} failed:`, err)
-          if (attempt === 0) await new Promise(r => setTimeout(r, 5000))
+
+      for (let partIdx = 0; partIdx < splitDecision.parts.length; partIdx++) {
+        const part = splitDecision.parts[partIdx]
+        // Inter-part pause: 2-8s between split messages
+        if (partIdx > 0) await new Promise(r => setTimeout(r, 2000 + Math.floor(Math.random() * 6000)))
+
+        let sent = false
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            await sendViaTwilioAPI(phone, part)
+            sent = true
+            break
+          } catch (err) {
+            console.error(`[jesse] SMS part ${partIdx + 1} attempt ${attempt + 1} failed:`, err)
+            if (attempt === 0) await new Promise(r => setTimeout(r, 5000))
+          }
         }
-      }
-      if (!sent) {
-        console.error(`[jesse] SMS FAILED BOTH ATTEMPTS for ${phone}: ${reply.slice(0, 100)}`)
-        await alertAdminViaTwilio(`Jesse SMS delivery failed for ${phone}. Reply was: ${reply.slice(0, 120)}`)
+        if (!sent) {
+          console.error(`[jesse] SMS FAILED BOTH ATTEMPTS for ${phone}: ${part.slice(0, 100)}`)
+          await alertAdminViaTwilio(`Jesse SMS delivery failed for ${phone}. Part was: ${part.slice(0, 120)}`)
+          break // don't send second part if first failed
+        }
       }
     })
 

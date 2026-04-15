@@ -69,18 +69,26 @@ async function geocode(input: string): Promise<GeoResult | null> {
   const direct = await parseCoordinatesOrMapsLink(input)
   if (direct) return direct
 
+  // Phase 3: DFW alias resolution — turn "ftw" into "Fort Worth, TX" before hitting Google
+  const { resolveDFWAlias, fuzzyMatchDFWCity } = await import("../constants/dfw-aliases")
+  const aliased = resolveDFWAlias(input) || fuzzyMatchDFWCity(input)
+  const effectiveInput = aliased || input
+
   // Try Google Maps first (address-level precision)
   if (GOOGLE_MAPS_KEY) {
     try {
-      const q = encodeURIComponent(input.includes('TX') || input.includes('Texas') ? input : `${input}, Texas, USA`)
-      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${q}&key=${GOOGLE_MAPS_KEY}&components=country:US`
+      const q = encodeURIComponent(effectiveInput.includes('TX') || effectiveInput.includes('Texas') ? effectiveInput : `${effectiveInput}, Texas, USA`)
+      // Phase 3: DFW metro bounding box (Fort Worth SW corner → Frisco NE corner)
+      const bounds = '32.5,-97.5|33.3,-96.5'
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${q}&key=${GOOGLE_MAPS_KEY}&components=country:US&bounds=${bounds}`
       // Hard 5s timeout — without it a slow Google response hangs the entire SMS webhook
       const ctrl = new AbortController()
       const t = setTimeout(() => ctrl.abort(), 5000)
       const r = await fetch(url, { signal: ctrl.signal })
       clearTimeout(t)
       const data = await r.json()
-      if (data.status === 'OK' && data.results?.[0]) {
+      const partialMatch = data.results?.[0]?.partial_match === true
+      if (data.status === 'OK' && data.results?.[0] && !partialMatch) {
         const loc = data.results[0].geometry.location
         const types = data.results[0].types || []
         // Determine precision — street_address or route = address-level, locality = city-level
@@ -92,6 +100,31 @@ async function geocode(input: string): Promise<GeoResult | null> {
           lng: loc.lng,
           precision: isAddressLevel ? 'address' : 'city',
           formattedAddress: data.results[0].formatted_address,
+        }
+      }
+
+      // Phase 3: retry once with ", TX" appended if the first attempt was partial/empty.
+      if ((partialMatch || data.status === 'ZERO_RESULTS') && !effectiveInput.toUpperCase().includes('TX')) {
+        const retryQ = encodeURIComponent(`${effectiveInput}, TX`)
+        const retryUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${retryQ}&key=${GOOGLE_MAPS_KEY}&components=country:US&bounds=${bounds}`
+        const ctrl2 = new AbortController()
+        const t2 = setTimeout(() => ctrl2.abort(), 5000)
+        const r2 = await fetch(retryUrl, { signal: ctrl2.signal })
+        clearTimeout(t2)
+        const data2 = await r2.json()
+        if (data2.status === 'OK' && data2.results?.[0] && !data2.results[0].partial_match) {
+          const loc = data2.results[0].geometry.location
+          const types = data2.results[0].types || []
+          const isAddressLevel = types.some((t: string) =>
+            ['street_address', 'route', 'premise', 'subpremise', 'intersection'].includes(t)
+          )
+          console.log('[geocode] recovered partial_match via ", TX" retry for:', input)
+          return {
+            lat: loc.lat,
+            lng: loc.lng,
+            precision: isAddressLevel ? 'address' : 'city',
+            formattedAddress: data2.results[0].formatted_address,
+          }
         }
       }
     } catch (err) {
@@ -144,7 +177,7 @@ export interface JobMatch {
 export async function findNearbyJobs(
   driverLocation: string,
   truckType?: string | null,
-  maxMiles = 15
+  maxMiles = 25  // Phase 6: default 25mi
 ): Promise<JobMatch[]> {
   const supabase = createAdminSupabase()
 
@@ -234,9 +267,10 @@ export async function findNearbyJobs(
       else tier3.push(o)
     }
     let tiered = tier1.length ? tier1 : tier2.length ? tier2 : tier3
-    // Within tier, also enforce maxMiles softness: try 15, then 30, then keep top 5
+    // Phase 6: maxMiles softness — try maxMiles, then 50, then keep top 5 regardless.
+    // Never return empty if there's ANY order in DB — expand radius before giving up.
     let nearby = tiered.filter(o => o.distanceMiles <= maxMiles)
-    if (!nearby.length) nearby = tiered.filter(o => o.distanceMiles <= 30)
+    if (!nearby.length) nearby = tiered.filter(o => o.distanceMiles <= 50)
     if (!nearby.length) nearby = tiered.slice(0, 5)
     withDistance = nearby
   } else {
