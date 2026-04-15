@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk"
+import { distance as levenshteinDistance } from "fastest-levenshtein"
 import { createAdminSupabase } from "../supabase"
 import { DEFAULT_DRIVER_PAY_CENTS, NEGOTIATION_CEILING_CENTS } from "../driver-pay-rates"
 import { findNearbyJobs, atomicClaimJob, JobMatch } from "./routing.service"
@@ -11,6 +12,96 @@ import {
 } from "./approval.service"
 import twilio from "twilio"
 import crypto from "crypto"
+
+// ─────────────────────────────────────────────────────────────
+// ANTI-REPETITION HELPERS (Phase 1)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Phase 10 — fire-and-forget brain_decisions logger. Never blocks the response path.
+ * Table-missing failures are swallowed so the brain keeps running if Phase 10 migration
+ * hasn't been applied yet.
+ */
+export function logBrainDecision(opts: {
+  phone: string
+  messageSid?: string
+  incomingBody?: string
+  stateBefore?: string
+  stateAfter?: string
+  handler: "template" | "sonnet" | "safety_net" | "fallback"
+  responseText?: string
+  validatorReplaced?: boolean
+  validatorReason?: string
+  latencyMs?: number
+  delayMs?: number
+  modelUsed?: string
+  experimentId?: string
+  experimentVariant?: string
+}): void {
+  try {
+    createAdminSupabase().from("brain_decisions").insert({
+      conversation_phone: opts.phone.replace(/\D/g, ""),
+      message_sid: opts.messageSid,
+      incoming_body: opts.incomingBody?.slice(0, 500),
+      state_before: opts.stateBefore,
+      state_after: opts.stateAfter,
+      handler: opts.handler,
+      response_text: opts.responseText?.slice(0, 500),
+      response_length: opts.responseText?.length,
+      validator_replaced: opts.validatorReplaced ?? false,
+      validator_reason: opts.validatorReason,
+      latency_ms: opts.latencyMs,
+      delay_ms: opts.delayMs,
+      model_used: opts.modelUsed,
+      experiment_id: opts.experimentId,
+      experiment_variant: opts.experimentVariant,
+    }).then(() => {}, (err: any) => {
+      // Table may not exist yet — silent fail by design
+      if (err?.code !== "42P01") console.error("[MONITOR] decision log failed:", err?.message || err)
+    })
+  } catch (err) {
+    // Never throw from logging
+  }
+}
+
+/** Normalized Levenshtein similarity: 1.0 = identical, 0 = totally different. */
+export function similarity(a: string, b: string): number {
+  const maxLen = Math.max(a.length, b.length)
+  if (maxLen === 0) return 1
+  return 1 - (levenshteinDistance(a.toLowerCase(), b.toLowerCase()) / maxLen)
+}
+
+/** True if `candidate` is >70% similar to ANY prior assistant message. */
+export function isTooSimilar(
+  candidate: string,
+  history: { role: string; content: string }[],
+  threshold = 0.7,
+): boolean {
+  const priors = history.filter(h => h.role === "assistant").map(h => h.content)
+  for (const prior of priors) {
+    if (similarity(candidate, prior) > threshold) return true
+  }
+  return false
+}
+
+/**
+ * Pick from `options` while avoiding any entry that appears verbatim in the last
+ * `windowSize` assistant messages. Falls back to full pool if everything has been used.
+ */
+export function pickNoRepeat(
+  options: string[],
+  history: { role: string; content: string }[] = [],
+  windowSize = 5,
+): string {
+  if (options.length === 0) return ""
+  if (history.length === 0) return options[Math.floor(Math.random() * options.length)]
+  const recent = new Set(
+    history.filter(h => h.role === "assistant").slice(-windowSize).map(h => h.content.toLowerCase().trim()),
+  )
+  const unused = options.filter(o => !recent.has(o.toLowerCase().trim()))
+  const pool = unused.length > 0 ? unused : options
+  return pool[Math.floor(Math.random() * pool.length)]
+}
 
 const anthropic = new Anthropic()
 const _ADMIN_PHONE_RAW = (process.env.ADMIN_PHONE || "").replace(/\D/g, "")
@@ -481,7 +572,7 @@ function validateBeforeSend(response: string, driverAddr: string|null, state: st
 // ─────────────────────────────────────────────────────────────
 function pick(arr: string[]): string { return arr[Math.floor(Math.random() * arr.length)] }
 
-function tryTemplate(
+export function tryTemplate(
   body: string, lower: string, hasPhoto: boolean,
   conv: any, profile: any, lang: "en"|"es",
   nearbyJobs: any[], activeJob: any, isKnownDriver: boolean,
@@ -901,7 +992,9 @@ function tryTemplate(
   }
 
   if (/\b(on my way|otw|heading there|headed there|leaving now|en camino|voy para alla|saliendo|on the way|im on my way|i.?m otw|bout to leave|pulling out|headed to site|ya voy|voy pa ya)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
-    return { response: pick(lang==="es" ? ["10.4 avisame cuando llegues","dale avisame cuando estes ahi"] : ["10.4 let me know when you pull up","10.4"]), updates: { state: "OTW_PENDING" }, action: "NONE" }
+    return { response: pick(lang==="es"
+      ? ["10.4 avisame cuando llegues","dale avisame cuando estes ahi","listo, avisa cuando llegues","sale, me avisas al llegar","va, llegando me avisas","orale, mandame texto al llegar"]
+      : ["10.4 let me know when you pull up","10.4","copy that, text me when you pull in","bet, lmk when you arrive","copy, holler when you get there","got it, hit me up at the site"]), updates: { state: "OTW_PENDING" }, action: "NONE" }
   }
 
   if (/\b(resend|send again|lost.*address|what was the address|address again|direccion de nuevo|manda la direccion|whats the addy again|donde era|send it again)\b/i.test(lower) && (state === "ACTIVE" || state === "OTW_PENDING")) {
@@ -1046,16 +1139,24 @@ function tryTemplate(
 
   if (isYes && (state === "DISCOVERY" || state === "GETTING_NAME" || state === "ASKING_TRUCK" || state === "ASKING_TRUCK_COUNT" || state === "ASKING_ADDRESS")) {
     if (!hasYards) {
-      return { response: pick(lang==="es" ? ["cuantas yardas hay disponibles","cuantas yardas tienen"] : ["how many yards are available","how many yards you got available"]), updates: {}, action: "NONE" }
+      return { response: pick(lang==="es"
+        ? ["cuantas yardas hay disponibles","cuantas yardas tienen","cuantos yds tienes","cuantas yardas son","que cantidad tienes","cuantas yds"]
+        : ["how many yards are available","how many yards you got available","how many yds you sitting on","how many yards you got","what kind of yardage we talking","how many yards we looking at"]), updates: {}, action: "NONE" }
     }
     if (!hasTruck) {
-      return { response: pick(lang==="es" ? ["que tipo de camion tienes","que clase de camion traes"] : ["what kind of truck are you hauling in","what kind of truck you running"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
+      return { response: pick(lang==="es"
+        ? ["que tipo de camion tienes","que clase de camion traes","que camion tienes","en que camion andas","que tipo de troca","que camion traes"]
+        : ["what kind of truck are you hauling in","what kind of truck you running","what you running","what kind of truck","what truck you got","what you hauling with"]), updates: { state: "ASKING_TRUCK" }, action: "NONE" }
     }
     if (!hasTruckCount) {
-      return { response: pick(lang==="es" ? ["cuantas camionetas tienes corriendo","cuantos camiones traes"] : ["how many trucks you got running","how many trucks you running"]), updates: { state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
+      return { response: pick(lang==="es"
+        ? ["cuantas camionetas tienes corriendo","cuantos camiones traes","cuantos camiones son","con cuantos camiones andas","cuantas trocas tienes","cuantos traes"]
+        : ["how many trucks you got running","how many trucks you running","how many trucks total","running how many","how many trucks on this","just one truck or more"]), updates: { state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
     }
     if (!hasCity) {
-      return { response: pick(lang==="es" ? ["cual es la direccion de donde van a cargar, para ver cual de mis sitios les queda mas cerca"] : ["whats the address your coming from so I can put into my system and see which site is closest","whats addy your coming from so I can see which of my sites is closest"]), updates: { state: "ASKING_ADDRESS" }, action: "NONE" }
+      return { response: pick(lang==="es"
+        ? ["cual es la direccion de donde van a cargar, para ver cual de mis sitios les queda mas cerca","de donde cargan","cual es la direccion de donde cargan","de donde salen","donde estan cargando","de donde vienen"]
+        : ["whats the address your coming from so I can put into my system and see which site is closest","whats addy your coming from so I can see which of my sites is closest","where you guys coming from","where you loading at","whats the pickup address","loading from where"]), updates: { state: "ASKING_ADDRESS" }, action: "NONE" }
     }
     return null
   }
@@ -1064,7 +1165,9 @@ function tryTemplate(
   if (yardMatch && !activeJob && !hasYards) {
     const yards = parseInt(yardMatch[1])
     if (yards > 0 && yards < 50000) {
-      return { response: pick(lang==="es" ? ["que tipo de camion tienes","que clase de camion traes"] : ["what kind of truck are you hauling in","what kind of truck you running"]), updates: { extracted_yards: yards, state: "ASKING_TRUCK" }, action: "NONE" }
+      return { response: pick(lang==="es"
+        ? ["que tipo de camion tienes","que clase de camion traes","que camion tienes","en que camion andas","que tipo de troca","que camion traes"]
+        : ["what kind of truck are you hauling in","what kind of truck you running","what you running","what kind of truck","what truck you got","what you hauling with"]), updates: { extracted_yards: yards, state: "ASKING_TRUCK" }, action: "NONE" }
     }
   }
 
@@ -1084,7 +1187,9 @@ function tryTemplate(
   ]
   for (const [rx, val] of truckPatterns) {
     if (rx.test(lower) && (state === "ASKING_TRUCK" || state === "DISCOVERY" || !hasTruck)) {
-      return { response: pick(lang==="es" ? ["cuantas camionetas tienes corriendo","cuantos camiones traes"] : ["how many trucks you got running","how many trucks you running"]), updates: { extracted_truck_type: val, state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
+      return { response: pick(lang==="es"
+        ? ["cuantas camionetas tienes corriendo","cuantos camiones traes","cuantos camiones son","con cuantos camiones andas","cuantas trocas tienes","cuantos traes"]
+        : ["how many trucks you got running","how many trucks you running","how many trucks total","running how many","just one truck or more","how many trucks on this"]), updates: { extracted_truck_type: val, state: "ASKING_TRUCK_COUNT" }, action: "NONE" }
     }
   }
   // Fallback: if state is ASKING_TRUCK and driver said something short, accept it
@@ -1101,10 +1206,10 @@ function tryTemplate(
     if (/^\d/.test(lower)) count = parseInt(lower)
     else if (/two|dos/i.test(lower)) count = 2
     else if (/three|tres/i.test(lower)) count = 3
-    
-    return { response: pick(lang==="es" 
-      ? ["cual es la direccion de donde van a cargar, para ver cual de mis sitios les queda mas cerca"]
-      : ["whats the address your coming from so I can put into my system and see which site is closest","whats addy your coming from so I can see which of my sites is closest"]), 
+
+    return { response: pick(lang==="es"
+      ? ["cual es la direccion de donde van a cargar, para ver cual de mis sitios les queda mas cerca","de donde cargan","cual es la direccion de donde cargan","de donde salen","donde estan cargando","de donde vienen"]
+      : ["whats the address your coming from so I can put into my system and see which site is closest","whats addy your coming from so I can see which of my sites is closest","where you guys coming from","where you loading at","whats the pickup address","loading from where"]),
       updates: { extracted_truck_count: count, state: "ASKING_ADDRESS" }, action: "NONE" }
   }
 
@@ -1236,7 +1341,7 @@ function tryTemplate(
 // ─────────────────────────────────────────────────────────────
 // POST-SEND VALIDATOR — safety net catches anything robotic
 // ─────────────────────────────────────────────────────────────
-function validateResponse(r: string, driverAddr: string|null, state: string, lang: "en"|"es"): string {
+export function validateResponse(r: string, driverAddr: string|null, state: string, lang: "en"|"es"): string {
   // Block driver own address as dump site
   if (driverAddr) {
     const words = driverAddr.toLowerCase().split(/[\s,]+/).filter(w => w.length > 3)
@@ -1246,6 +1351,28 @@ function validateResponse(r: string, driverAddr: string|null, state: string, lan
   }
   // Block job codes
   r = r.replace(/DS-[A-Z0-9]{4,}/g, "").replace(/\s{2,}/g, " ").trim()
+
+  // Phase 5B — strip ALL emoji (unicode ranges: dingbats, misc symbols, emoticons, supplementary)
+  r = r.replace(/[\u{1F600}-\u{1FFFF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FEFF}]|[\u{1F000}-\u{1F02F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F900}-\u{1F9FF}]|[\u{200D}]|[\u{20E3}]|[\u{FE0F}]/gu, "").trim()
+
+  // Phase 5E — strip markdown (bold, italic, headers, lists, numbered lists)
+  r = r.replace(/\*\*/g, "").replace(/\*/g, "").replace(/^#+\s/gm, "").replace(/^[-*]\s/gm, "").replace(/^\d+\.\s/gm, "").trim()
+
+  // Phase 5C — strip exclamation marks
+  r = r.replace(/!/g, "")
+
+  // Phase 5D — collapse stuttering duplicate words ("the the" → "the")
+  r = r.replace(/\b(\w+)\s+\1\b/gi, "$1")
+
+  // Phase 5F — enforce contractions (formal → informal)
+  r = r.replace(/\bdo not\b/gi, "dont").replace(/\bcannot\b/gi, "cant")
+       .replace(/\bwill not\b/gi, "wont").replace(/\bI am\b/gi, "im")
+       .replace(/\bI will\b/gi, "ill").replace(/\bI have\b/gi, "ive")
+       .replace(/\bit is\b/gi, "its").replace(/\bthat is\b/gi, "thats")
+       .replace(/\bwhat is\b/gi, "whats").replace(/\bwhere is\b/gi, "wheres")
+       .replace(/\bgoing to\b/gi, "gonna").replace(/\bgot to\b/gi, "gotta")
+       .replace(/\bwant to\b/gi, "wanna").replace(/\byou all\b/gi, "yall")
+
   // Block Reply: menus
   if (/reply\s*:/i.test(r) || /option\s+\d/i.test(r) || /select\s+one/i.test(r)) {
     return lang==="es" ? "que tipo de camion tienes" : "what kind of truck are you hauling in"
@@ -1258,9 +1385,27 @@ function validateResponse(r: string, driverAddr: string|null, state: string, lan
   if ((/what\s+city/i.test(r) || /which\s+city/i.test(r)) && state !== "DISCOVERY") {
     return lang==="es" ? "que tipo de camion tienes" : "what kind of truck are you hauling in"
   }
-  // Block AI admission
-  for (const p of ["i am an ai","i'm an ai","language model","artificial","claude","anthropic","i am a bot","i'm a bot","as an ai"]) {
+  // Block AI admission — covers pre- and post-contraction forms
+  for (const p of ["i am an ai","i'm an ai","im an ai","language model","artificial","claude","anthropic","i am a bot","i'm a bot","im a bot","as an ai","i am a language"]) {
     if (r.toLowerCase().includes(p)) return "this is jesse"
+  }
+
+  // Phase 5A — corporate language filter (replace with state-appropriate fallback)
+  const CORPORATE_POISON = [
+    /\bcertainly\b/i, /\babsolutely\b/i, /\bi would be happy to\b/i, /\bi'?d be happy to\b/i,
+    /\bdelve\b/i, /\bleverage\b/i, /\butilize\b/i, /\bfacilitate\b/i, /\bfurthermore\b/i,
+    /\badditionally\b/i, /\bi understand your concern\b/i, /\bgreat question\b/i,
+    /\bhappy to help\b/i, /\brest assured\b/i, /\bi appreciate\b/i, /\bthank you for\b/i,
+    /\bexcellent question\b/i, /\bthat'?s a great\b/i, /\bi'?m here to help\b/i,
+    /\bdon'?t hesitate\b/i, /\bfeel free to\b/i, /\bplease note that\b/i,
+    /\bit'?s important to\b/i, /\bi want to assure\b/i, /\bmoving forward\b/i,
+    /\bat this time\b/i, /\bregarding your\b/i, /\bin regards to\b/i,
+    /\bper your request\b/i, /\bas mentioned\b/i, /\bplease be advised\b/i,
+    /\bkindly\b/i, /\bwhilst\b/i, /\bhenceforth\b/i, /\bsubsequently\b/i,
+    /\bi comprehend\b/i, /\backnowledged\b/i, /\baffirmative\b/i,
+  ]
+  if (CORPORATE_POISON.some(p => p.test(r))) {
+    return lang==="es" ? "dale pues" : "copy that"
   }
   // Enforce max length
   if (r.length > 180) {
@@ -1274,11 +1419,19 @@ function validateResponse(r: string, driverAddr: string|null, state: string, lan
   }
   // Remove trailing period
   r = r.replace(/\.\s*$/, "").trim()
+
+  // Phase 5G — lowercase first letter (trucker casual casing). Skip if it looks like
+  // a proper noun ("McKinney") — simple heuristic: only lowercase first char if the
+  // next character isn't also uppercase (avoids butchering "DumpSite" style names).
+  if (r.length > 1 && r[0] === r[0].toUpperCase() && r[0] !== r[0].toLowerCase() && r[1] !== r[1].toUpperCase()) {
+    r = r[0].toLowerCase() + r.slice(1)
+  }
+
   return r || (lang==="es" ? "dame un segundo" : "give me a sec")
 }
 
 
-async function callBrain(
+export async function callBrain(
   body: string, hasPhoto: boolean, photoUrl: string|undefined,
   conv: any, profile: any, history: { role: "user"|"assistant"; content: string }[],
   nearbyJobs: JobMatch[], activeJob: any, lang: "en"|"es",
@@ -1349,12 +1502,49 @@ async function callBrain(
     ].filter(Boolean).join("\n")
   })()
 
-  const messages = [...history.slice(-20), { role: "user" as const, content: ctx }]
+  // Phase 4: fetch active brain_learnings (fire-and-forget if table missing / query fails).
+  // Up to 25 rules by priority DESC — appended to system prompt before Sonnet call.
+  let learningsBlock = ""
+  try {
+    const { data: learnings } = await createAdminSupabase()
+      .from("brain_learnings")
+      .select("id, rule")
+      .eq("brain", "jesse")
+      .eq("active", true)
+      .order("priority", { ascending: false })
+      .limit(25)
+    if (learnings && learnings.length > 0) {
+      learningsBlock = "\n\nCRITICAL RULES (never violate these):\n" +
+        learnings.map((l: any, i: number) => `${i + 1}. ${l.rule}`).join("\n")
+      // Fire-and-forget increment — never blocks
+      const ids = learnings.map((l: any) => l.id)
+      createAdminSupabase().rpc("increment_learnings_injected", { learning_ids: ids }).then(() => {}, () => {})
+    }
+  } catch (err) {
+    console.error("[LEARNINGS] fetch failed, proceeding without:", err)
+  }
+
+  // Phase 1A: Anti-repetition XML block — expose last 5 assistant messages to Claude
+  const priorAssistant = history.filter(h => h.role === "assistant").slice(-5)
+  const antiRepBlock = priorAssistant.length > 0
+    ? [
+        "",
+        "<anti_repetition>",
+        "Your previous messages in this conversation:",
+        ...priorAssistant.map((m, i) => `[${i + 1}]: '${m.content.slice(0, 120)}'`),
+        "NEVER repeat these exact phrases. Use different opening words, different sentence structures, different vocabulary.",
+        "Vary your opening style across: greeting, direct, question, acknowledgment, update, statement.",
+        "</anti_repetition>",
+      ].join("\n")
+    : ""
+
+  const messages = [...history.slice(-20), { role: "user" as const, content: ctx + antiRepBlock }]
   let raw = ""
 
-  const attemptBrain = async (): Promise<BrainOutput> => {
+  const attemptBrain = async (temperature?: number): Promise<BrainOutput> => {
     const resp = await anthropic.messages.create({
-      model: "claude-sonnet-4-6", max_tokens: 250, system: JESSE_PROMPT, messages,
+      model: "claude-sonnet-4-6", max_tokens: 250, system: JESSE_PROMPT + learningsBlock, messages,
+      ...(temperature !== undefined ? { temperature } : {}),
     })
     raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""
     raw = raw.replace(/^```json\s*/i,"").replace(/```\s*$/i,"").trim()
@@ -1371,14 +1561,28 @@ async function callBrain(
     return parsed
   }
 
+  // Phase 1B: Levenshtein similarity — regenerate if >70% similar to any prior assistant message.
+  // Max 2 regenerations with rising temperature. If all attempts stay similar, return last anyway
+  // (never block on repetition — driver gets a response).
+  const attemptWithRepetitionCheck = async (): Promise<BrainOutput> => {
+    const temps = [undefined, 0.9, 1.0]
+    let last: BrainOutput | null = null
+    for (const temp of temps) {
+      const result = await attemptBrain(temp)
+      last = result
+      if (!result.response || !isTooSimilar(result.response, priorAssistant)) return result
+    }
+    return last!
+  }
+
   try {
-    return await attemptBrain()
+    return await attemptWithRepetitionCheck()
   } catch (firstErr) {
     console.error("[Brain] attempt 1 failed, retrying in 2s:", raw?.slice(0,200), firstErr)
     // Retry once after 2s
     try {
       await new Promise(r => setTimeout(r, 2000))
-      return await attemptBrain()
+      return await attemptWithRepetitionCheck()
     } catch (retryErr) {
       console.error("[Brain] attempt 2 failed, using template fallback:", retryErr)
       // Notify admin that Sonnet is down
@@ -2252,6 +2456,18 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
     if (!isJobPresentation && validatedTpl.toLowerCase().trim() === lastOutbound.toLowerCase().trim() && validatedTpl.length > 5) {
       validatedTpl = "10.4"
     }
+    // Phase 10 — monitoring log (fire-and-forget)
+    logBrainDecision({
+      phone,
+      messageSid: sid,
+      incomingBody: body,
+      stateBefore: convState,
+      stateAfter: toSaveTpl?.state || convState,
+      handler: "template",
+      responseText: validatedTpl,
+      validatorReplaced: validatedTpl !== tpl.response,
+    })
+
     await logMsg(phone, validatedTpl, "outbound", `tpl_${sid}`)
     return validatedTpl
   }
@@ -2466,7 +2682,40 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
 
   await saveConv(phone, toSave)
   const driverAddr = body.match(/\d+\s+\w+.*(?:st|ave|blvd|dr|rd|ln|ct|way|pkwy|hwy)/i)?.[0] || null
-  const validated = validateBeforeSend(brain.response, driverAddr, toSave?.state || convState, lang)
+  let validated = validateBeforeSend(brain.response, driverAddr, toSave?.state || convState, lang)
+
+  // Phase 7: Quality gate — final semantic check after hard-regex validators.
+  // If any of the 5 checks fail, substitute state-appropriate template fallback.
+  try {
+    const { qualityGate, qualityGateFallback } = await import("./quality-gate.service")
+    const gate = qualityGate(validated, {
+      state: toSave?.state || convState,
+      lang,
+      hasActiveApprovedJob: !!activeJob,
+      driverFirstName: profile?.first_name,
+      history,
+    })
+    if (!gate.pass) {
+      console.warn(`[QG] rejected Sonnet response: ${gate.reason} — using fallback`)
+      validated = qualityGateFallback(toSave?.state || convState, lang)
+    }
+  } catch (err) {
+    console.error("[QG] gate errored, keeping validated response:", err)
+  }
+
+  // Phase 10 — monitoring log (fire-and-forget)
+  logBrainDecision({
+    phone,
+    messageSid: sid,
+    incomingBody: body,
+    stateBefore: convState,
+    stateAfter: toSave?.state || convState,
+    handler: "sonnet",
+    responseText: validated,
+    validatorReplaced: validated !== brain.response,
+    modelUsed: "claude-sonnet-4-6",
+  })
+
   await logMsg(phone, validated, "outbound", `brain_${sid}`)
   return validated
 }

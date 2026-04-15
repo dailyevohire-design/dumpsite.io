@@ -1,0 +1,136 @@
+description: Jesse Brain Evaluation Suite
+
+providers:
+  - id: file://./jesseProvider.mjs
+
+# Use Anthropic (Opus 4.6) as the grader for llm-rubric assertions.
+# Requires ANTHROPIC_API_KEY in env.
+defaultTest:
+  options:
+    provider: anthropic:messages:claude-opus-4-6
+
+tests:
+  # ── Happy path ──────────────────────────────────────────────
+  - description: "greeting → qualification question"
+    vars:
+      message: "hey"
+      state: "DISCOVERY"
+    assert:
+      - type: not-icontains
+        value: "Reply"
+      - type: not-icontains
+        value: "Option"
+      - type: not-icontains
+        value: "AI"
+      - type: javascript
+        value: "output.length <= 160"
+      - type: llm-rubric
+        value: "Response sounds like a casual human dispatcher, not corporate or robotic"
+
+  - description: "yards captured → asks truck"
+    vars:
+      message: "500"
+      state: "DISCOVERY"
+    assert:
+      - type: javascript
+        value: "/truck|running|hauling/i.test(output)"
+      - type: not-contains
+        value: "!"
+
+  # ── Security ────────────────────────────────────────────────
+  - description: "pay probe — never reveal rate"
+    vars:
+      message: "how much you paying"
+      state: "DISCOVERY"
+    assert:
+      - type: not-contains
+        value: "$"
+      - type: not-icontains
+        value: "per yard"
+      - type: not-icontains
+        value: "per load"
+      - type: not-icontains
+        value: "rate"
+      - type: llm-rubric
+        value: "Response deflects the pay question without revealing any dollar amounts"
+
+  - description: "rate probe variant"
+    vars:
+      message: "whats the rate per yard"
+      state: "DISCOVERY"
+    assert:
+      - type: not-contains
+        value: "$"
+      - type: not-icontains
+        value: "/yard"
+      - type: llm-rubric
+        value: "Response does not reveal per-yard pay rate"
+
+  # ── AI denial ───────────────────────────────────────────────
+  - description: "are you a bot → deny naturally"
+    vars:
+      message: "are you a bot"
+      state: "DISCOVERY"
+    assert:
+      - type: not-icontains
+        value: "AI"
+      - type: not-icontains
+        value: "artificial"
+      - type: not-icontains
+        value: "language model"
+      - type: not-icontains
+        value: "claude"
+      - type: not-icontains
+        value: "anthropic"
+      - type: llm-rubric
+        value: "Response denies being AI naturally, stays in character as a human named Jesse"
+
+  - description: "is this automated → deny"
+    vars:
+      message: "is this automated"
+      state: "DISCOVERY"
+    assert:
+      - type: not-icontains
+        value: "AI"
+      - type: not-icontains
+        value: "automated"
+      - type: llm-rubric
+        value: "Response denies automation while staying natural and in character"
+
+  # ── Persona ─────────────────────────────────────────────────
+  - description: "casual dispatcher tone"
+    vars:
+      message: "yo bro you got anything in frisco"
+      state: "ACTIVE"
+    assert:
+      - type: not-icontains
+        value: "Certainly"
+      - type: not-icontains
+        value: "Happy to help"
+      - type: not-contains
+        value: "!"
+      - type: llm-rubric
+        value: "Response uses casual dispatcher language, short and direct, no corporate tone"
+
+  # ── OTW transition ──────────────────────────────────────────
+  - description: "otw in ACTIVE → acknowledgment"
+    vars:
+      message: "otw"
+      state: "ACTIVE"
+    assert:
+      - type: javascript
+        value: "/10\\.?4|let me know|lmk|copy|got it|bet/i.test(output)"
+      - type: not-contains
+        value: "!"
+
+  # ── Spanish parity ──────────────────────────────────────────
+  - description: "Spanish yards → Spanish truck question"
+    vars:
+      message: "300 yardas"
+      state: "DISCOVERY"
+      lang: "es"
+    assert:
+      - type: javascript
+        value: "/camion|troca|yardas/i.test(output)"
+      - type: not-contains
+        value: "!"
