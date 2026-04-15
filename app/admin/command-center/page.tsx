@@ -1,730 +1,656 @@
-"use client"
-import { useState, useEffect, useRef, useCallback } from "react"
-import { createBrowserSupabase } from "@/lib/supabase"
+'use client'
 
-// ═══════════════════════════════════════════════════════
-// TYPES
-// ═══════════════════════════════════════════════════════
-interface CommandData {
-  timestamp: string
-  error?: string
-  revenue: {
-    today: { orders: number; completed: number; yards: number; revenue: number; driverPay: number; margin: number }
-    week: { orders: number; completed: number; yards: number; revenue: number; driverPay: number; margin: number }
-    month: { orders: number; completed: number; revenue: number; driverPay: number; margin: number }
-  } | null
-  financial: { pipelineCents: number; outstandingCents: number; collectedCents: number; unpaidCustomerCents: number; pendingDriverPayCents: number } | null
-  funnel: { leads: number; quoted: number; ordered: number; delivered: number; paid: number } | null
-  stateFunnel: Record<string, number> | null
-  alerts: {
-    staleOrders: number; unpaidCustomers: number; unpaidCustomerTotal: number
-    stuckDriverConvs: number; stuckCustomerConvs: number; driverNoShows: number
-    pendingDriverPayments: number; pendingDriverPayTotal: number
-  } | null
-  activeConversations: { drivers: any[]; customers: any[] } | null
-  agentPipeline: AgentPipeline[] | null
-  unassignedLeads: number | null
-  salesAgents: { id: string; name: string }[] | null
-  cityIntel: CityData[] | null
-  dailyTrend: { date: string; orders: number; completed: number; revenue: number; margin: number }[] | null
-  brainHealth: { crashesThisWeek: number; pendingActionsByType: Record<string, number>; totalPendingActions: number } | null
-  staleOrders: any[] | null
-  unpaidCustomers: any[] | null
-  stuckDrivers: any[] | null
-  stuckCustomers: any[] | null
-  noShows: any[] | null
-  recentSms: any[] | null
-  recentCustSms: any[] | null
-  driverCount: number | null
-  pendingActions: PendingAction[] | null
-  mapPins: MapPin[] | null
-}
+import { useState, useEffect, useRef } from "react";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
-interface MapPin {
-  lat: number; lng: number; name: string; phone: string
-  city: string; address: string; state: string; yards: number
-  totalCents: number; material: string; hasOrder: boolean; agentName: string; updated: string
-}
+// ═══════════════════════════════════════════════════════════
+// EARTH COMMAND v3 — OPERATIONS ASSURANCE EDITION
+// "No order left behind. No delivery unverified. No lead forgotten."
+// ═══════════════════════════════════════════════════════════
 
-interface AgentPipeline {
-  id: string; name: string; commissionRate: number
-  totalLeads: number; activeLeads: number; quotedCount: number; orderedCount: number; completedCount: number; paidCount: number
-  quotedCents: number; orderedCents: number; completedCents: number; paidCents: number
-  closeRate: number; avgDealCents: number; commissionCents: number
-}
+const C = {
+  bg:"#04060a",s:"#090b12",card:"#0e1018",cardH:"#151720",
+  b:"#191c2c",bA:"#2a2e44",
+  amber:"#e8a308",amberB:"#fbbf24",amberD:"rgba(232,163,8,.12)",
+  green:"#10b981",greenB:"#34d399",greenD:"rgba(16,185,129,.1)",
+  red:"#ef4444",redB:"#f87171",redD:"rgba(239,68,68,.12)",
+  blue:"#3b82f6",blueB:"#60a5fa",blueD:"rgba(59,130,246,.1)",
+  cyan:"#06b6d4",purple:"#a78bfa",pink:"#f472b6",
+  t:"#e2e8f0",tM:"#8892a8",tD:"#4a5068",
+};
+const m="'JetBrains Mono',monospace",sn="'DM Sans',sans-serif";
 
-interface CityData {
-  name: string; orders: number; completed: number; revenue: number; driverPay: number; yards: number; dispatching: number; margin: number; marginPct: number
-}
+type OrderStatus =
+  | "quoted" | "payment_pending" | "scheduled" | "dispatched"
+  | "loading" | "in_transit" | "arriving" | "delivered" | "verified" | "complete";
 
-interface PendingAction {
-  id: string; phone: string; type: string; message: string; created_at: string; minutesOld: number
-  customer_name: string | null; state: string | null; delivery_city: string | null
-  yards_needed: number | null; total_price_cents: number | null
-}
+type Order = {
+  id: string; customer: string; driver: string | null; material: string;
+  yards: number; city: string; status: OrderStatus; statusTime: number;
+  value: number; phone: string; verified: boolean; photoSent: boolean;
+  customerConfirmed: boolean; paid: boolean; eta: string; progress: number;
+};
 
-// ═══════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════
-const fmt$ = (v: number) => "$" + v.toLocaleString("en-US", { maximumFractionDigits: 0 })
-const fmtCents = (cents: number | null | undefined) => {
-  if (!cents && cents !== 0) return "$0"
-  return "$" + (cents / 100).toLocaleString("en-US", { maximumFractionDigits: 0 })
-}
+type HeatZone = {
+  id: string; name: string; lat: number; lng: number; orders: number;
+  drivers: number; revenue: number; temp: "hot"|"warm"|"cool"|"cold";
+  permits: number; txdot: number;
+};
 
-const ago = (ts: string | null | undefined) => {
-  if (!ts) return "unknown"
-  const m = Math.round((Date.now() - new Date(ts).getTime()) / 60000)
-  if (m < 1) return "now"
-  if (m < 60) return m + "m ago"
-  if (m < 1440) return Math.round(m / 60) + "h ago"
-  return Math.round(m / 1440) + "d ago"
-}
+type ConvMsg = { f: "cust"|"ai"|"drv"; t: string; tm: string };
+type Conversation = {
+  id: number; agent: "sarah"|"jesse"; name: string; phone: string;
+  status: string; msgs: ConvMsg[]; value: number; yards: number;
+};
 
-const STATE_LABELS: Record<string, string> = {
-  NEW: "New Lead", COLLECTING: "Collecting", ASKING_DIMENSIONS: "Collecting",
-  QUOTING: "Qualifying", FOLLOW_UP: "Follow Up", ORDER_PLACED: "Placed",
-  AWAITING_PAYMENT: "Awaiting Pay", AWAITING_PRIORITY_PAYMENT: "Awaiting Pay",
-  DELIVERED: "Complete", CLOSED: "Lost", OUT_OF_AREA: "Lost", CANCELED: "Lost",
-}
+type StatusConfig = {
+  label: string; color: string; icon: string;
+  maxMin: number | null; escalateMsg: string | null;
+};
 
-const STATE_COLORS: Record<string, string> = {
-  NEW: "bg-gray-600", COLLECTING: "bg-blue-600", ASKING_DIMENSIONS: "bg-blue-600",
-  QUOTING: "bg-amber-600", FOLLOW_UP: "bg-yellow-600", ORDER_PLACED: "bg-emerald-600",
-  AWAITING_PAYMENT: "bg-orange-600", AWAITING_PRIORITY_PAYMENT: "bg-orange-600",
-  DELIVERED: "bg-green-600", CLOSED: "bg-gray-700", OUT_OF_AREA: "bg-gray-700", CANCELED: "bg-gray-700",
-}
+// ── ORDER LIFECYCLE (The Andon Board data) ──
+const ORDERS: Order[] = [
+  {id:"DS-C7EF5F",customer:"Mike Rodriguez",driver:"Carlos M.",material:"Fill Dirt",yards:90,city:"Dallas",status:"in_transit",statusTime:42,value:1080,phone:"(214)555-0187",verified:false,photoSent:false,customerConfirmed:false,paid:false,eta:"14 min",progress:72},
+  {id:"DS-A3B21D",customer:"Tom Builder Inc",driver:"Marcus T.",material:"Base Course",yards:500,city:"Arlington",status:"loading",statusTime:18,value:9000,phone:"(682)555-0445",verified:false,photoSent:false,customerConfirmed:false,paid:true,eta:"45 min",progress:30},
+  {id:"DS-F9E1C4",customer:"Lisa Chen",driver:"Ricky P.",material:"Topsoil",yards:45,city:"Plano",status:"arriving",statusTime:3,value:675,phone:"(972)555-0891",verified:false,photoSent:false,customerConfirmed:false,paid:true,eta:"2 min",progress:95},
+  {id:"DS-2D8A7B",customer:"Big D Excavation",driver:"DeShawn B.",material:"Structural Fill",yards:200,city:"Fort Worth",status:"delivered",statusTime:22,value:3600,phone:"(817)555-0342",verified:true,photoSent:true,customerConfirmed:true,paid:true,eta:"—",progress:100},
+  {id:"DS-8E3F1A",customer:"Metro Grading Co",driver:"James W.",material:"Crushed Limestone",yards:1000,city:"Fort Worth",status:"dispatched",statusTime:95,value:18000,phone:"(817)555-0623",verified:false,photoSent:false,customerConfirmed:false,paid:false,eta:"—",progress:10},
+  {id:"DS-4C2E9F",customer:"Apex Builders",driver:null,material:"Sand",yards:60,city:"Irving",status:"quoted",statusTime:180,value:1080,phone:"(469)555-0199",verified:false,photoSent:false,customerConfirmed:false,paid:false,eta:"—",progress:0},
+  {id:"DS-7F1A3B",customer:"Crown Development",driver:null,material:"Fill Dirt",yards:300,city:"McKinney",status:"payment_pending",statusTime:240,value:4500,phone:"(214)555-0287",verified:false,photoSent:false,customerConfirmed:false,paid:false,eta:"—",progress:0},
+  {id:"DS-9D5E2C",customer:"Smith Residential",driver:"Tyler K.",material:"Topsoil",yards:24,city:"Frisco",status:"scheduled",statusTime:30,value:480,phone:"(469)555-0445",verified:false,photoSent:false,customerConfirmed:false,paid:true,eta:"Tomorrow 8AM",progress:5},
+  {id:"DS-B3F7A1",customer:"DFW Grading LLC",driver:"Carlos M.",material:"Base Course",yards:800,city:"Dallas",status:"delivered",statusTime:45,value:14400,phone:"(214)555-0511",verified:true,photoSent:true,customerConfirmed:false,paid:true,eta:"—",progress:100},
+];
 
-const FUNNEL_STAGES = [
-  { key: "NEW", label: "New Lead", states: ["NEW"] },
-  { key: "COLLECTING", label: "Collecting Info", states: ["COLLECTING", "ASKING_DIMENSIONS"] },
-  { key: "QUOTING", label: "Quoted", states: ["QUOTING"] },
-  { key: "FOLLOW_UP", label: "Follow Up", states: ["FOLLOW_UP"] },
-  { key: "ORDER_PLACED", label: "Order Placed", states: ["ORDER_PLACED", "AWAITING_PAYMENT", "AWAITING_PRIORITY_PAYMENT"] },
-  { key: "DELIVERED", label: "Completed", states: ["DELIVERED"] },
-  { key: "LOST", label: "Lost", states: ["CLOSED", "OUT_OF_AREA", "CANCELED"] },
-]
+const STATUS_CONFIG: Record<OrderStatus, StatusConfig> = {
+  quoted:{label:"QUOTED",color:C.blue,icon:"Q",maxMin:120,escalateMsg:"Lead going cold"},
+  payment_pending:{label:"AWAITING PAY",color:C.amber,icon:"$",maxMin:180,escalateMsg:"Payment overdue"},
+  scheduled:{label:"SCHEDULED",color:C.cyan,icon:"S",maxMin:null,escalateMsg:null},
+  dispatched:{label:"DISPATCHED",color:C.blue,icon:"D",maxMin:60,escalateMsg:"No driver update"},
+  loading:{label:"LOADING",color:C.cyan,icon:"L",maxMin:45,escalateMsg:"Loading too long"},
+  in_transit:{label:"IN TRANSIT",color:C.green,icon:"T",maxMin:90,escalateMsg:"Delivery overdue"},
+  arriving:{label:"ARRIVING",color:C.greenB,icon:"A",maxMin:15,escalateMsg:"Not confirmed"},
+  delivered:{label:"DELIVERED",color:C.amber,icon:"V",maxMin:120,escalateMsg:"Unverified delivery"},
+  verified:{label:"VERIFIED",color:C.green,icon:"✓",maxMin:null,escalateMsg:null},
+  complete:{label:"COMPLETE",color:C.green,icon:"★",maxMin:null,escalateMsg:null},
+};
 
-// ═══════════════════════════════════════════════════════
-// SKELETON COMPONENTS
-// ═══════════════════════════════════════════════════════
-function SkeletonCard() {
+const HEAT_ZONES: HeatZone[] = [
+  {id:"h1",name:"Downtown Dallas",lat:32.78,lng:-96.80,orders:34,drivers:8,revenue:18200,temp:"hot",permits:12,txdot:2},
+  {id:"h2",name:"North Dallas",lat:32.92,lng:-96.77,orders:22,drivers:5,revenue:11400,temp:"warm",permits:8,txdot:0},
+  {id:"h3",name:"Fort Worth",lat:32.75,lng:-97.33,orders:28,drivers:7,revenue:15600,temp:"hot",permits:15,txdot:3},
+  {id:"h4",name:"Arlington",lat:32.73,lng:-97.11,orders:18,drivers:4,revenue:9200,temp:"warm",permits:6,txdot:1},
+  {id:"h5",name:"Plano",lat:33.02,lng:-96.70,orders:15,drivers:3,revenue:7800,temp:"warm",permits:9,txdot:0},
+  {id:"h6",name:"Irving",lat:32.81,lng:-96.95,orders:8,drivers:2,revenue:4100,temp:"cool",permits:4,txdot:1},
+  {id:"h7",name:"Mesquite",lat:32.77,lng:-96.60,orders:12,drivers:3,revenue:6400,temp:"warm",permits:3,txdot:0},
+  {id:"h8",name:"Denton",lat:33.21,lng:-97.13,orders:3,drivers:0,revenue:1500,temp:"cold",permits:7,txdot:2},
+  {id:"h9",name:"Frisco",lat:33.15,lng:-96.82,orders:10,drivers:2,revenue:5200,temp:"warm",permits:14,txdot:0},
+  {id:"h10",name:"Mansfield",lat:32.56,lng:-97.14,orders:7,drivers:1,revenue:3600,temp:"cool",permits:2,txdot:0},
+  {id:"h11",name:"Rockwall",lat:32.93,lng:-96.46,orders:5,drivers:1,revenue:2600,temp:"cool",permits:5,txdot:1},
+  {id:"h12",name:"Southlake",lat:32.94,lng:-97.13,orders:11,drivers:2,revenue:5800,temp:"warm",permits:6,txdot:0},
+];
+
+const LEARNING=[
+  {w:"W1",p:62,d:58,m:55,c:61},{w:"W2",p:65,d:63,m:59,c:66},
+  {w:"W3",p:71,d:68,m:64,c:72},{w:"W4",p:76,d:74,m:71,c:78},
+  {w:"W5",p:79,d:78,m:76,c:82},{w:"W6",p:83,d:82,m:80,c:86},
+  {w:"W7",p:86,d:85,m:83,c:89},{w:"W8",p:88,d:87,m:86,c:91},
+];
+
+const CONVERSATIONS: Conversation[] = [
+  {id:1,agent:"sarah",name:"Mike Rodriguez",phone:"(214)555-0187",status:"quoting",msgs:[
+    {f:"cust",t:"Hi need fill dirt in Dallas",tm:"2:41"},
+    {f:"ai",t:"Hey Mike! What's the delivery address so I can quote you?",tm:"2:41"},
+    {f:"cust",t:"4521 Oak Lawn Ave Dallas TX",tm:"2:42"},
+    {f:"ai",t:"For fill dirt in Dallas, standard $12/yd (3-5 days) or priority $15/yd (by Friday). How many yards?",tm:"2:42"},
+  ],value:2400,yards:200},
+  {id:2,agent:"jesse",name:"Carlos M. (DR-47)",phone:"(817)555-0342",status:"dispatched",msgs:[
+    {f:"ai",t:"DS-C7EF5F — Blue Ridge — 90 yds $50/load. Send pic",tm:"1:15"},
+    {f:"drv",t:"[Photo]",tm:"1:18"},
+    {f:"ai",t:"Clean. Customer approved. Head to 713 N Texas 78, Blue Ridge TX",tm:"1:22"},
+    {f:"drv",t:"On route ETA 25 min",tm:"1:45"},
+  ],value:4500,yards:90},
+  {id:3,agent:"sarah",name:"Tom Builder Inc",phone:"(682)555-0445",status:"closing",msgs:[
+    {f:"cust",t:"500 yards base course for commercial project",tm:"11:30"},
+    {f:"ai",t:"500 yards — where's the delivery?",tm:"11:30"},
+    {f:"cust",t:"2100 E Lamar Blvd Arlington",tm:"11:31"},
+    {f:"ai",t:"Standard $18/yd ($9,000) or Priority $22/yd ($11,000). Both include delivery.",tm:"11:33"},
+    {f:"cust",t:"Priority. Venmo right?",tm:"2:15"},
+  ],value:11000,yards:500},
+];
+
+// ── Components ──
+function Pulse({color, sz = 6}: {color: string; sz?: number}) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 animate-pulse">
-      <div className="h-3 w-20 bg-gray-800 rounded mb-3" />
-      <div className="h-7 w-24 bg-gray-800 rounded mb-2" />
-      <div className="h-3 w-16 bg-gray-800 rounded" />
-    </div>
-  )
+    <span style={{position:"relative",display:"inline-block",width:sz,height:sz}}>
+      <span style={{position:"absolute",inset:-2,borderRadius:"50%",background:color,opacity:0.4,animation:"ep 2s ease-out infinite"}} />
+      <span style={{display:"block",width:sz,height:sz,borderRadius:"50%",background:color}} />
+    </span>
+  );
 }
-
-function SkeletonList({ rows = 5 }: { rows?: number }) {
+function Bdg({children, color, bg}: {children: React.ReactNode; color: string; bg?: string}) {
   return (
-    <div className="space-y-2 animate-pulse">
-      {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="h-12 bg-gray-800/50 rounded" />
-      ))}
-    </div>
-  )
+    <span style={{fontSize:8,fontWeight:700,fontFamily:m,color:color,background:bg || `${color}20`,padding:"2px 6px",borderRadius:3,letterSpacing:0.6}}>{children}</span>
+  );
 }
 
-// ═══════════════════════════════════════════════════════
-// PER-SECTION ERROR COMPONENT
-// ═══════════════════════════════════════════════════════
-function SectionError({ label, onRetry }: { label: string; onRetry: () => void }) {
-  return (
-    <div className="p-4 text-center">
-      <div className="text-sm text-gray-300">{label} unavailable</div>
-      <button onClick={onRetry} className="text-xs text-gray-400 hover:text-gray-400 mt-1">Tap to retry</button>
-    </div>
-  )
-}
+function AndonCard({order,onClick,isSelected}: {order: Order; onClick: () => void; isSelected: boolean}){
+  const cfg=STATUS_CONFIG[order.status]||STATUS_CONFIG.quoted;
+  const isEscalated=cfg.maxMin!=null&&order.statusTime>cfg.maxMin;
+  const isWarning=cfg.maxMin!=null&&order.statusTime>(cfg.maxMin*0.7);
+  const needsVerify=order.status==="delivered"&&!order.customerConfirmed;
+  const borderColor=isEscalated?C.red:isWarning?C.amber:needsVerify?C.amber:cfg.color;
 
-// ═══════════════════════════════════════════════════════
-// MAIN COMPONENT
-// ═══════════════════════════════════════════════════════
-export default function CommandCenterPage() {
-  const [data, setData] = useState<CommandData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [selectedPhone, setSelectedPhone] = useState<string | null>(null)
-  const [funnelFilter, setFunnelFilter] = useState<string[] | null>(null)
-  const [convLoading, setConvLoading] = useState(false)
-  const [convDetail, setConvDetail] = useState<{ sms: any[]; conv: any } | null>(null)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const conversationRef = useRef<HTMLDivElement>(null)
-
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch("/api/command-center", { credentials: "include" })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const json = await res.json()
-      setData(json)
-      setError(null)
-    } catch (e: any) {
-      setError(e.message || "Failed to load dashboard")
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  const loadConversation = useCallback(async (phone: string) => {
-    setConvLoading(true)
-    setConvDetail(null)
-    try {
-      const res = await fetch(
-        `/api/command-center/conversation?phone=${encodeURIComponent(phone)}`,
-        { credentials: "include" }
-      )
-      const d = await res.json()
-      setConvDetail(d)
-    } catch (err) {
-      console.error("[conv-viewer]", err)
-    } finally {
-      setConvLoading(false)
-    }
-  }, [])
-
-  const selectConversation = useCallback((phone: string | null) => {
-    setSelectedPhone(phone)
-    if (phone) loadConversation(phone)
-    else setConvDetail(null)
-  }, [loadConversation])
-
-  useEffect(() => {
-    fetchData()
-    intervalRef.current = setInterval(fetchData, 30000)
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
-  }, [fetchData])
-
-  // Supabase realtime subscriptions
-  useEffect(() => {
-    const sb = createBrowserSupabase()
-    const channel = sb.channel("command-center-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "customer_conversations" }, () => {
-        fetchData()
-      })
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "customer_sms_logs" }, () => {
-        fetchData()
-      })
-      .subscribe()
-
-    return () => { sb.removeChannel(channel) }
-  }, [fetchData])
-
-  // Scroll to conversation viewer when selected
-  useEffect(() => {
-    if (selectedPhone && conversationRef.current) {
-      conversationRef.current.scrollIntoView({ behavior: "smooth", block: "start" })
-    }
-  }, [selectedPhone])
-
-  // ─── Derived data ───
-  const customers = data?.activeConversations?.customers || []
-  const filteredCustomers = funnelFilter
-    ? customers.filter((c: any) => funnelFilter.includes(c.state))
-    : customers
-
-  // On-demand loaded SMS thread (from /api/command-center/conversation)
-  const smsForSelected = convDetail?.sms || []
-  const selectedConv = convDetail?.conv
-    || (selectedPhone ? customers.find((c: any) => c.phone === selectedPhone) : null)
-
-  // Funnel stage counts from stateFunnel API response (preferred) or fallback to customer array
-  const funnelCounts: Record<string, number> = {}
-  if (data?.stateFunnel) {
-    const sf = data.stateFunnel
-    for (const stage of FUNNEL_STAGES) {
-      funnelCounts[stage.key] = stage.states.reduce((sum, s) => sum + (sf[s] || 0), 0)
-    }
-  } else {
-    for (const stage of FUNNEL_STAGES) {
-      funnelCounts[stage.key] = customers.filter((c: any) => stage.states.includes(c.state)).length
-    }
-  }
-
-  // Pipeline value
-  const pipelineCents = data?.financial?.pipelineCents || 0
-
-  // Anomaly count from brain health
-  const anomalyCount = data?.brainHealth?.crashesThisWeek || 0
-
-  // Pending follow-ups: conversations in FOLLOW_UP state
-  const pendingFollowUps = customers.filter((c: any) => c.state === "FOLLOW_UP").length
-
-  // ─── Error state ───
-  if (error && !data) {
-    return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
-        <div className="text-center">
-          <div className="text-red-400 text-lg font-semibold mb-2">Dashboard unavailable</div>
-          <div className="text-gray-300 text-sm mb-4">{error}</div>
-          <button
-            onClick={() => { setLoading(true); setError(null); fetchData() }}
-            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg transition-colors"
-          >
-            Tap to retry
-          </button>
+  return(
+    <div onClick={onClick} style={{
+      padding:"8px 10px",background:isSelected?C.cardH:C.card,borderRadius:6,
+      border:`1px solid ${isSelected?borderColor:C.b}`,borderLeft:`3px solid ${borderColor}`,
+      cursor:"pointer",marginBottom:4,transition:"all .15s",position:"relative",
+    }}>
+      {isEscalated&&<div style={{position:"absolute",top:4,right:6,width:8,height:8,borderRadius:"50%",background:C.red,animation:"ep 1s ease infinite"}}/>}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+        <div style={{display:"flex",alignItems:"center",gap:5}}>
+          <span style={{fontSize:10,fontWeight:700,fontFamily:m,color:C.amberB}}>{order.id}</span>
+          <Bdg color={cfg.color}>{cfg.label}</Bdg>
         </div>
+        <span style={{fontSize:11,fontWeight:800,fontFamily:m,color:C.green}}>${order.value.toLocaleString()}</span>
       </div>
-    )
-  }
+      <div style={{fontSize:10,color:C.t,marginBottom:2}}>{order.customer} — {order.city}</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:9,color:C.tD}}>{order.yards} yds {order.material}</span>
+        <span style={{fontSize:9,fontFamily:m,color:isEscalated?C.red:isWarning?C.amber:C.tD}}>
+          {order.statusTime}m in state{isEscalated?" — ESCALATED":""}
+        </span>
+      </div>
+      {/* Verification checklist */}
+      <div style={{display:"flex",gap:8,marginTop:4}}>
+        {[
+          {l:"Paid",v:order.paid},{l:"Photo",v:order.photoSent},{l:"Delivered",v:order.status==="delivered"||order.status==="verified"||order.status==="complete"},
+          {l:"Verified",v:order.verified},{l:"Confirmed",v:order.customerConfirmed},
+        ].map((c,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:2}}>
+            <div style={{width:5,height:5,borderRadius:"50%",background:c.v?C.green:C.b}}/>
+            <span style={{fontSize:7,color:c.v?C.green:C.tD,fontFamily:m}}>{c.l}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
-  return (
-    <div className="min-h-screen bg-gray-950 text-gray-100">
-      {/* Header */}
-      <div className="border-b border-gray-800 px-4 py-3 flex items-center justify-between sticky top-0 bg-gray-950/95 backdrop-blur z-10">
-        <div className="flex items-center gap-3">
-          <h1 className="text-lg font-bold tracking-tight">Command Center</h1>
-          {data?.timestamp && (
-            <span className="text-xs text-gray-300">Updated {ago(data.timestamp)}</span>
+function HeatMap({zones,sel,onSel,showPermits,showDOT}: {
+  zones: HeatZone[]; sel: HeatZone | null; onSel: (z: HeatZone | null) => void;
+  showPermits: boolean; showDOT: boolean;
+}){
+  const W=480,H=300;
+  const lr:[number,number]=[32.45,33.30],lnr:[number,number]=[-97.90,-96.35];
+  const toX=(lng:number)=>((lng-lnr[0])/(lnr[1]-lnr[0]))*W;
+  const toY=(lat:number)=>((lr[1]-lat)/(lr[1]-lr[0]))*H;
+  const tc:Record<HeatZone["temp"],string>={hot:C.red,warm:C.amber,cool:C.blue,cold:"#1e3a5f"};
+  const tg:Record<HeatZone["temp"],string>={hot:"rgba(239,68,68,.35)",warm:"rgba(245,158,11,.25)",cool:"rgba(59,130,246,.12)",cold:"rgba(30,58,95,.08)"};
+
+  return(
+    <div style={{position:"relative",width:W,height:H,background:C.bg,borderRadius:8,border:`1px solid ${C.b}`,overflow:"hidden"}}>
+      <svg width={W} height={H} style={{position:"absolute",inset:0}}>
+        {Array.from({length:10},(_,i)=><line key={`v${i}`} x1={i*(W/9)} y1={0} x2={i*(W/9)} y2={H} stroke={C.b} strokeWidth={.4} opacity={.3}/>)}
+        {Array.from({length:7},(_,i)=><line key={`h${i}`} x1={0} y1={i*(H/6)} x2={W} y2={i*(H/6)} stroke={C.b} strokeWidth={.4} opacity={.3}/>)}
+      </svg>
+      {zones.map(z=>{
+        const x=toX(z.lng),y=toY(z.lat),r=Math.max(12,Math.min(34,z.orders*1.1));
+        const isSel=sel?.id===z.id;
+        return(
+          <div key={z.id} onClick={()=>onSel(isSel?null:z)} style={{
+            position:"absolute",left:x-r,top:y-r,width:r*2,height:r*2,borderRadius:"50%",cursor:"pointer",
+            background:`radial-gradient(circle,${tg[z.temp]},transparent 70%)`,
+            border:isSel?`2px solid ${tc[z.temp]}`:`1px solid ${tc[z.temp]}40`,
+            display:"flex",alignItems:"center",justifyContent:"center",
+            boxShadow:isSel?`0 0 16px ${tc[z.temp]}40`:"none",zIndex:isSel?10:1,transition:"all .2s",
+          }}>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:10,fontWeight:800,fontFamily:m,color:tc[z.temp]}}>{z.orders}</div>
+              {r>18&&<div style={{fontSize:6,color:C.tD,fontFamily:m}}>{z.name.split(" ")[0]}</div>}
+            </div>
+          </div>
+        );
+      })}
+      {/* Permit overlays */}
+      {showPermits&&zones.filter(z=>z.permits>5).map(z=>{
+        const x=toX(z.lng),y=toY(z.lat);
+        return (<div key={`p${z.id}`} style={{position:"absolute",left:x+12,top:y-14,fontSize:7,fontFamily:m,color:C.purple,background:`${C.purple}15`,padding:"1px 3px",borderRadius:2,border:`1px solid ${C.purple}30`,pointerEvents:"none"}}>
+          {z.permits} permits
+        </div>);
+      })}
+      {/* DOT overlays */}
+      {showDOT&&zones.filter(z=>z.txdot>0).map(z=>{
+        const x=toX(z.lng),y=toY(z.lat);
+        return (<div key={`d${z.id}`} style={{position:"absolute",left:x-16,top:y+12,fontSize:7,fontFamily:m,color:C.cyan,background:`${C.cyan}15`,padding:"1px 3px",borderRadius:2,border:`1px solid ${C.cyan}30`,pointerEvents:"none"}}>
+          {z.txdot} TxDOT
+        </div>);
+      })}
+      <div style={{position:"absolute",top:5,left:6,fontSize:8,fontFamily:m,color:C.tD,letterSpacing:1}}>DFW DEMAND INTELLIGENCE</div>
+      <div style={{position:"absolute",bottom:4,right:5,display:"flex",gap:6,background:`${C.bg}cc`,padding:"2px 5px",borderRadius:3}}>
+        {([["HOT",C.red],["WARM",C.amber],["COOL",C.blue],["COLD","#1e3a5f"]] as const).map(([l,c])=>(
+          <div key={l} style={{display:"flex",alignItems:"center",gap:2}}>
+            <div style={{width:5,height:5,borderRadius:"50%",background:c}}/><span style={{fontSize:6,fontFamily:m,color:C.tD}}>{l}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Main ──
+export default function EarthCommandV3(){
+  const [tab,setTab]=useState<"orders"|"map"|"convos"|"brain">("orders");
+  const [selOrder,setSelOrder]=useState<Order|null>(null);
+  const [selConv,setSelConv]=useState<Conversation|null>(null);
+  const [selZone,setSelZone]=useState<HeatZone|null>(null);
+  const [takeover,setTakeover]=useState(false);
+  const [msgIn,setMsgIn]=useState("");
+  const [sentMsgs,setSentMsgs]=useState<Array<{cid:number;f:string;t:string;tm:string}>>([]);
+  const [showPermits,setShowPermits]=useState(true);
+  const [showDOT,setShowDOT]=useState(true);
+  const [now,setNow]=useState(new Date());
+  const [orderFilter,setOrderFilter]=useState<string>("all");
+  const ref=useRef<HTMLDivElement>(null);
+
+  useEffect(()=>{const t=setInterval(()=>setNow(new Date()),1000);return()=>clearInterval(t)},[]);
+  useEffect(()=>{ref.current?.scrollIntoView({behavior:"smooth"})},[selConv,sentMsgs]);
+
+  const latestIQ=LEARNING[LEARNING.length-1];
+  const pIQ=Math.round((latestIQ.p+latestIQ.d+latestIQ.m+latestIQ.c)/4);
+
+  const escalated=ORDERS.filter(o=>{const cfg=STATUS_CONFIG[o.status];return cfg?.maxMin!=null&&o.statusTime>cfg.maxMin});
+  const needsAttention=ORDERS.filter(o=>o.status==="delivered"&&!o.customerConfirmed);
+  const activeOrders=ORDERS.filter(o=>!["verified","complete"].includes(o.status));
+  const filteredOrders=orderFilter==="all"?ORDERS:orderFilter==="escalated"?escalated:orderFilter==="attention"?[...escalated,...needsAttention]:ORDERS.filter(o=>o.status===orderFilter);
+
+  const totalPipeline=ORDERS.reduce((s,o)=>s+o.value,0);
+  const todayRevenue=ORDERS.filter(o=>o.paid).reduce((s,o)=>s+o.value,0);
+
+  const sendMsg=()=>{if(!msgIn.trim()||!selConv)return;setSentMsgs(p=>[...p,{cid:selConv.id,f:"admin",t:msgIn,tm:now.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})}]);setMsgIn("")};
+
+  return(
+    <div style={{background:C.bg,minHeight:"100vh",color:C.t,fontFamily:sn,overflow:"hidden"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:${C.b};border-radius:3px}
+        @keyframes ep{0%,100%{transform:scale(1);opacity:.5}50%{transform:scale(2.2);opacity:0}}
+        @keyframes ef{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes eg{0%,100%{opacity:.5}50%{opacity:1}}
+      `}</style>
+
+      {/* HEADER */}
+      <div style={{background:C.s,borderBottom:`1px solid ${C.b}`,padding:"5px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",height:42}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{width:24,height:24,borderRadius:4,background:`linear-gradient(135deg,${C.amber},${C.amber}88)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:900,color:C.bg}}>E</div>
+          <div><div style={{fontSize:11,fontWeight:800,letterSpacing:2.5,fontFamily:m,lineHeight:1}}>EARTH COMMAND</div><div style={{fontSize:6,color:C.tD,letterSpacing:2.5,fontFamily:m}}>OPERATIONS ASSURANCE</div></div>
+          <div style={{width:1,height:18,background:C.b,margin:"0 4px"}}/>
+          <div style={{display:"flex",alignItems:"center",gap:6,fontSize:8,fontFamily:m}}>
+            <span style={{display:"flex",alignItems:"center",gap:2}}><Pulse color={C.green}/><span style={{color:C.green}}>SARAH</span></span>
+            <span style={{display:"flex",alignItems:"center",gap:2}}><Pulse color={C.amber}/><span style={{color:C.amber}}>JESSE</span></span>
+          </div>
+          <div style={{width:1,height:18,background:C.b,margin:"0 4px"}}/>
+          {/* Platform IQ */}
+          <div style={{display:"flex",alignItems:"center",gap:3,background:`${C.green}12`,padding:"2px 7px",borderRadius:4,border:`1px solid ${C.green}25`}}>
+            <span style={{fontSize:7,fontFamily:m,color:C.tD}}>IQ</span>
+            <span style={{fontSize:12,fontWeight:800,fontFamily:m,color:C.green,animation:"eg 3s ease infinite"}}>{pIQ}</span>
+          </div>
+          {/* Escalation counter */}
+          {escalated.length>0&&(
+            <div style={{display:"flex",alignItems:"center",gap:3,background:C.redD,padding:"2px 7px",borderRadius:4,border:`1px solid ${C.red}30`}}>
+              <Pulse color={C.red} sz={5}/>
+              <span style={{fontSize:9,fontFamily:m,color:C.red,fontWeight:700}}>{escalated.length} ESCALATED</span>
+            </div>
+          )}
+          {needsAttention.length>0&&(
+            <div style={{display:"flex",alignItems:"center",gap:3,background:C.amberD,padding:"2px 7px",borderRadius:4,border:`1px solid ${C.amber}30`}}>
+              <span style={{fontSize:9,fontFamily:m,color:C.amber,fontWeight:700}}>{needsAttention.length} UNVERIFIED</span>
+            </div>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          {error && <span className="text-xs text-red-400">Refresh failed</span>}
-          <div className={`w-2 h-2 rounded-full ${error ? "bg-red-500" : "bg-emerald-500"} ${!error ? "animate-pulse" : ""}`} />
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{display:"flex",gap:2}}>
+            {([{k:"orders",l:"ORDERS"},{k:"map",l:"INTEL MAP"},{k:"convos",l:"LIVE CHAT"},{k:"brain",l:"BRAIN"}] as const).map(t=>(
+              <button key={t.k} onClick={()=>{setTab(t.k);setSelOrder(null);setSelConv(null)}} style={{
+                background:tab===t.k?`${C.amber}15`:"transparent",border:tab===t.k?`1px solid ${C.amber}35`:"1px solid transparent",
+                color:tab===t.k?C.amber:C.tD,fontSize:8,fontFamily:m,fontWeight:600,padding:"3px 7px",borderRadius:3,cursor:"pointer",letterSpacing:.7,
+              }}>{t.l}</button>
+            ))}
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:11,fontWeight:700,fontFamily:m}}>{now.toLocaleTimeString("en-US",{hour12:true,hour:"2-digit",minute:"2-digit",second:"2-digit"})}</div>
+            <div style={{fontSize:6,color:C.tD,fontFamily:m}}>{now.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}</div>
+          </div>
         </div>
       </div>
 
-      <div className="p-4 max-w-[1600px] mx-auto space-y-4">
-        {/* ═══ ROW 1: KPI Cards ═══ */}
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-          {loading ? (
-            Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)
-          ) : (
-            <>
-              <KPICard
-                label="Revenue Today"
-                value={data?.revenue ? fmt$(data.revenue.today.revenue) : "--"}
-                sub={data?.revenue ? `Margin ${fmt$(data.revenue.today.margin)}` : undefined}
-                color="text-emerald-400"
-              />
-              {data && !data.revenue && (
-                <div className="col-span-1"><SectionError label="Revenue" onRetry={fetchData} /></div>
+      {/* KPI BAR */}
+      <div style={{background:C.s,borderBottom:`1px solid ${C.b}`,padding:"5px 14px",display:"flex",gap:6}}>
+        {[
+          {l:"PIPELINE",v:`$${totalPipeline.toLocaleString()}`,c:C.amberB,s:`${ORDERS.length} orders`},
+          {l:"COLLECTED",v:`$${todayRevenue.toLocaleString()}`,c:C.green,s:`${ORDERS.filter(o=>o.paid).length} paid`},
+          {l:"ACTIVE",v:activeOrders.length,c:C.blue,s:`${ORDERS.filter(o=>o.status==="in_transit").length} transit`},
+          {l:"ESCALATED",v:escalated.length,c:escalated.length>0?C.red:C.green,s:escalated.length>0?"NEEDS ACTION":"All clear"},
+          {l:"UNVERIFIED",v:needsAttention.length,c:needsAttention.length>0?C.amber:C.green,s:needsAttention.length>0?"Confirm delivery":"All verified"},
+          {l:"IQ TREND",v:`${pIQ}/100`,c:C.green,s:"+3 this week"},
+        ].map((k,i)=>(
+          <div key={i} style={{flex:1,padding:"6px 8px",background:C.card,borderRadius:5,border:`1px solid ${C.b}`,minWidth:0}}>
+            <div style={{fontSize:7,color:C.tD,fontFamily:m,letterSpacing:1,marginBottom:2}}>{k.l}</div>
+            <div style={{fontSize:16,fontWeight:800,fontFamily:m,color:k.c,lineHeight:1}}>{k.v}</div>
+            <div style={{fontSize:8,color:C.tD,marginTop:1}}>{k.s}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* MAIN */}
+      <div style={{display:"flex",height:"calc(100vh - 42px - 50px)"}}>
+
+        {/* LEFT CONTENT */}
+        <div style={{flex:1,overflow:"auto",padding:12,animation:"ef .2s ease"}}>
+
+          {tab==="orders"&&(
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <div style={{fontSize:10,fontFamily:m,color:C.tD,letterSpacing:1}}>ORDER ASSURANCE BOARD</div>
+                <div style={{display:"flex",gap:3}}>
+                  {[{k:"all",l:"ALL"},{k:"escalated",l:"ESCALATED"},{k:"attention",l:"NEEDS ATTN"},{k:"in_transit",l:"TRANSIT"},{k:"delivered",l:"DELIVERED"}].map(f=>(
+                    <button key={f.k} onClick={()=>setOrderFilter(f.k)} style={{
+                      background:orderFilter===f.k?`${C.amber}15`:"transparent",border:orderFilter===f.k?`1px solid ${C.amber}30`:"1px solid transparent",
+                      color:orderFilter===f.k?C.amber:C.tD,fontSize:7,fontFamily:m,padding:"2px 6px",borderRadius:3,cursor:"pointer",fontWeight:600,
+                    }}>{f.l} ({f.k==="all"?ORDERS.length:f.k==="escalated"?escalated.length:f.k==="attention"?escalated.length+needsAttention.length:ORDERS.filter(o=>o.status===f.k).length})</button>
+                  ))}
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                {filteredOrders.map(o=><AndonCard key={o.id} order={o} isSelected={selOrder?.id===o.id} onClick={()=>setSelOrder(selOrder?.id===o.id?null:o)}/>)}
+              </div>
+              {selOrder&&(
+                <div style={{marginTop:10,background:C.card,borderRadius:8,border:`1px solid ${C.b}`,padding:14,animation:"ef .2s ease"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:700}}>{selOrder.customer}</div>
+                      <div style={{fontSize:10,fontFamily:m,color:C.tD}}>{selOrder.id} — {selOrder.phone} — {selOrder.city}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontSize:18,fontWeight:800,fontFamily:m,color:C.green}}>${selOrder.value.toLocaleString()}</div>
+                      <Bdg color={STATUS_CONFIG[selOrder.status]?.color||C.blue}>{STATUS_CONFIG[selOrder.status]?.label}</Bdg>
+                    </div>
+                  </div>
+                  {/* Progress bar */}
+                  <div style={{marginBottom:10}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:8,fontFamily:m,color:C.tD,marginBottom:3}}>
+                      {["Quoted","Paid","Dispatched","Loading","Transit","Delivered","Verified"].map((s,i)=><span key={i}>{s}</span>)}
+                    </div>
+                    <div style={{height:6,background:C.b,borderRadius:3,overflow:"hidden"}}>
+                      <div style={{width:`${selOrder.progress}%`,height:"100%",background:`linear-gradient(90deg,${C.blue},${C.green})`,borderRadius:3,transition:"width .5s"}}/>
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,fontSize:10}}>
+                    <div><span style={{color:C.tD}}>Material:</span> <span style={{color:C.t}}>{selOrder.yards} yds {selOrder.material}</span></div>
+                    <div><span style={{color:C.tD}}>Driver:</span> <span style={{color:C.t}}>{selOrder.driver||"Unassigned"}</span></div>
+                    <div><span style={{color:C.tD}}>ETA:</span> <span style={{color:C.amber,fontFamily:m}}>{selOrder.eta}</span></div>
+                    <div><span style={{color:C.tD}}>Time in state:</span> <span style={{color:selOrder.statusTime>90?C.red:C.t,fontFamily:m}}>{selOrder.statusTime} min</span></div>
+                    <div><span style={{color:C.tD}}>Paid:</span> <span style={{color:selOrder.paid?C.green:C.red}}>{selOrder.paid?"Yes":"No"}</span></div>
+                    <div><span style={{color:C.tD}}>Verified:</span> <span style={{color:selOrder.verified?C.green:C.amber}}>{selOrder.verified?"Yes":"Pending"}</span></div>
+                  </div>
+                  {!selOrder.customerConfirmed&&selOrder.status==="delivered"&&(
+                    <div style={{marginTop:8,padding:"6px 10px",background:C.amberD,borderRadius:4,border:`1px solid ${C.amber}30`,fontSize:10,color:C.amber,fontFamily:m}}>
+                      ACTION REQUIRED: Customer has not confirmed delivery. Auto follow-up in {120-selOrder.statusTime} min. Click to send manual confirmation request.
+                    </div>
+                  )}
+                </div>
               )}
-              <KPICard
-                label="Active Conversations"
-                value={String(customers.length)}
-                sub={data?.funnel ? `${data.funnel.leads} total leads (30d)` : undefined}
-                color="text-blue-400"
-              />
-              <KPICard
-                label="Orders Today"
-                value={data?.revenue ? String(data.revenue.today.orders) : "--"}
-                sub={data?.revenue ? `${data.revenue.today.completed} completed` : undefined}
-                color="text-amber-400"
-              />
-              <KPICard
-                label="Pipeline Value"
-                value={data?.financial ? fmtCents(pipelineCents) : "--"}
-                sub={`${funnelCounts["QUOTING"] || 0} quoted conversations`}
-                color="text-purple-400"
-              />
-              {data && !data.financial && (
-                <div className="col-span-1"><SectionError label="Financial" onRetry={fetchData} /></div>
-              )}
-              <KPICard
-                label="Anomalies"
-                value={data?.brainHealth ? String(anomalyCount) : "--"}
-                sub={data?.brainHealth ? `${data.brainHealth.totalPendingActions || 0} pending actions` : undefined}
-                color={anomalyCount > 0 ? "text-red-400" : "text-gray-400"}
-                alert={anomalyCount > 0}
-              />
-              {data && !data.brainHealth && (
-                <div className="col-span-1"><SectionError label="Brain Health" onRetry={fetchData} /></div>
-              )}
-              <KPICard
-                label="Pending Follow-ups"
-                value={String(pendingFollowUps)}
-                sub={pendingFollowUps > 5 ? "High volume" : "Normal"}
-                color={pendingFollowUps > 5 ? "text-orange-400" : "text-gray-400"}
-              />
-            </>
+              {/* Daily Briefing */}
+              <div style={{marginTop:14,background:C.card,borderRadius:8,border:`1px solid ${C.b}`,padding:12}}>
+                <div style={{fontSize:10,fontFamily:m,color:C.tD,letterSpacing:1,marginBottom:8}}>DAILY BRIEFING — {now.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</div>
+                {[
+                  {icon:"!",color:C.red,msg:`${escalated.length} orders escalated — DS-8E3F1A dispatched 95 min ago with no driver update. DS-7F1A3B payment pending for 4 hours.`},
+                  {icon:"$",color:C.green,msg:`$${todayRevenue.toLocaleString()} collected today. $${(totalPipeline-todayRevenue).toLocaleString()} outstanding. Tom Builder $11K closing now.`},
+                  {icon:"~",color:C.amber,msg:`DS-B3F7A1 delivered but customer hasn't confirmed (45 min). Auto text fires in 75 min if no response.`},
+                  {icon:"^",color:C.purple,msg:`Platform IQ at ${pIQ} (+3 this week). Sarah close rate 42%. Pricing model learned $12/yd optimal for Zone A fill dirt.`},
+                  {icon:"*",color:C.cyan,msg:`Fort Worth demand up 34% WoW — 15 new building permits filed. Denton has 7 permits but 0 drivers. Deploy fleet.`},
+                ].map((b,i)=>(
+                  <div key={i} style={{padding:"5px 8px",borderLeft:`2px solid ${b.color}`,background:`${C.bg}80`,borderRadius:"0 4px 4px 0",marginBottom:3}}>
+                    <span style={{fontSize:10,color:C.t,lineHeight:1.4}}>{b.msg}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
-        </div>
 
-        {/* ═══ ROW 2: Funnel + Live Feed ═══ */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* Sales Funnel */}
-          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-300">Sales Funnel</h2>
-              {funnelFilter && (
-                <button
-                  onClick={() => setFunnelFilter(null)}
-                  className="text-xs text-gray-300 hover:text-gray-300"
-                >
-                  Clear filter
-                </button>
-              )}
-            </div>
-            {loading ? (
-              <div className="p-4"><SkeletonList rows={8} /></div>
-            ) : data && !data.stateFunnel && !data.activeConversations ? (
-              <SectionError label="Funnel" onRetry={fetchData} />
-            ) : (
-              <div className="divide-y divide-gray-800/50">
-                {FUNNEL_STAGES.map((stage, i) => {
-                  const count = funnelCounts[stage.key] || 0
-                  const prevCount = i > 0 ? (funnelCounts[FUNNEL_STAGES[i - 1].key] || 0) : 0
-                  const conversionPct = i > 0 && prevCount > 0
-                    ? Math.round((count / prevCount) * 100)
-                    : null
-                  const isActive = funnelFilter && JSON.stringify(funnelFilter) === JSON.stringify(stage.states)
-                  const maxCount = Math.max(...Object.values(funnelCounts), 1)
-                  const barWidth = Math.max((count / maxCount) * 100, 2)
-
-                  return (
-                    <button
-                      key={stage.key}
-                      onClick={() => stage.states.length > 0 ? setFunnelFilter(isActive ? null : stage.states) : null}
-                      className={`w-full px-4 py-2.5 flex items-center justify-between hover:bg-gray-800/50 transition-colors text-left ${isActive ? "bg-gray-800/70" : ""}`}
-                    >
-                      <div className="flex items-center gap-3 flex-1 min-w-0">
-                        <span className="text-sm text-gray-300 w-24 shrink-0">{stage.label}</span>
-                        <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-blue-600/60 rounded-full transition-all"
-                            style={{ width: `${barWidth}%` }}
-                          />
+          {tab==="map"&&(
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <div style={{fontSize:10,fontFamily:m,color:C.tD,letterSpacing:1}}>DEMAND INTELLIGENCE + GOV DATA</div>
+                <div style={{display:"flex",gap:6}}>
+                  <label style={{display:"flex",alignItems:"center",gap:3,fontSize:8,fontFamily:m,color:showPermits?C.purple:C.tD,cursor:"pointer"}}>
+                    <input type="checkbox" checked={showPermits} onChange={e=>setShowPermits(e.target.checked)} style={{width:10,height:10,accentColor:C.purple}}/>PERMITS
+                  </label>
+                  <label style={{display:"flex",alignItems:"center",gap:3,fontSize:8,fontFamily:m,color:showDOT?C.cyan:C.tD,cursor:"pointer"}}>
+                    <input type="checkbox" checked={showDOT} onChange={e=>setShowDOT(e.target.checked)} style={{width:10,height:10,accentColor:C.cyan}}/>TxDOT
+                  </label>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <HeatMap zones={HEAT_ZONES} sel={selZone} onSel={setSelZone} showPermits={showPermits} showDOT={showDOT}/>
+                <div style={{width:200}}>
+                  {selZone?(
+                    <div style={{background:C.card,borderRadius:6,border:`1px solid ${C.b}`,padding:10}}>
+                      <div style={{fontSize:13,fontWeight:700,marginBottom:6}}>{selZone.name}</div>
+                      {([["Orders",selZone.orders,C.amber],["Revenue",`$${selZone.revenue.toLocaleString()}`,C.green],["Drivers",selZone.drivers,C.blue],
+                        ["Permits",selZone.permits,C.purple],["TxDOT Projects",selZone.txdot,C.cyan],
+                      ] as const).map(([l,v,c],i)=>(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderBottom:i<4?`1px solid ${C.b}`:"none"}}>
+                          <span style={{fontSize:9,color:C.tD}}>{l}</span>
+                          <span style={{fontSize:11,fontWeight:700,fontFamily:m,color:c}}>{v}</span>
                         </div>
+                      ))}
+                      {selZone.permits>10&&<div style={{marginTop:6,padding:"4px 6px",background:`${C.purple}12`,borderRadius:3,border:`1px solid ${C.purple}25`,fontSize:8,color:C.purple,fontFamily:m}}>HIGH PERMIT ZONE — Future demand predicted +{Math.round(selZone.permits*2.5)}%</div>}
+                      {selZone.txdot>0&&<div style={{marginTop:4,padding:"4px 6px",background:`${C.cyan}12`,borderRadius:3,border:`1px solid ${C.cyan}25`,fontSize:8,color:C.cyan,fontFamily:m}}>{selZone.txdot} DOT project(s) — estimated {selZone.txdot*500} yds aggregate demand</div>}
+                      {selZone.drivers===0&&<div style={{marginTop:4,padding:"4px 6px",background:C.redD,borderRadius:3,border:`1px solid ${C.red}25`,fontSize:8,color:C.red,fontFamily:m}}>DEAD ZONE — 0 drivers. Deploy fleet here.</div>}
+                    </div>
+                  ):(
+                    <div style={{background:C.card,borderRadius:6,border:`1px solid ${C.b}`,padding:10,fontSize:9,color:C.tD}}>Click a zone. Toggle permit and TxDOT overlays to see future demand prediction.</div>
+                  )}
+                  <div style={{marginTop:8,fontSize:9,fontFamily:m,color:C.tD,letterSpacing:1,marginBottom:4}}>DEMAND FORECAST</div>
+                  {HEAT_ZONES.filter(z=>z.permits>5).sort((a,b)=>b.permits-a.permits).slice(0,4).map(z=>(
+                    <div key={z.id} style={{display:"flex",justifyContent:"space-between",padding:"3px 6px",marginBottom:2,background:C.card,borderRadius:3,cursor:"pointer"}} onClick={()=>setSelZone(z)}>
+                      <span style={{fontSize:9,color:C.t}}>{z.name}</span>
+                      <span style={{fontSize:8,fontFamily:m,color:C.purple}}>+{z.permits} permits</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab==="convos"&&(
+            <div style={{display:"flex",gap:10,height:"100%"}}>
+              <div style={{width:260,overflowY:"auto"}}>
+                <div style={{fontSize:10,fontFamily:m,color:C.tD,letterSpacing:1,marginBottom:6}}>LIVE CONVERSATIONS</div>
+                {CONVERSATIONS.map(c=>{
+                  const ac=c.agent==="sarah"?C.blue:C.amber;
+                  return(
+                    <div key={c.id} onClick={()=>{setSelConv(c);setTakeover(false);setSentMsgs([])}} style={{
+                      padding:"8px 10px",background:selConv?.id===c.id?C.cardH:C.card,borderRadius:6,
+                      border:`1px solid ${selConv?.id===c.id?ac:C.b}`,borderLeft:`3px solid ${ac}`,
+                      cursor:"pointer",marginBottom:4,
+                    }}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                        <div style={{display:"flex",alignItems:"center",gap:4}}>
+                          <Bdg color={ac}>{c.agent.toUpperCase()}</Bdg>
+                          <span style={{fontSize:10,fontWeight:600}}>{c.name}</span>
+                        </div>
+                        <span style={{fontSize:10,fontFamily:m,color:C.green,fontWeight:700}}>${c.value?.toLocaleString()}</span>
                       </div>
-                      <div className="flex items-center gap-3 ml-3">
-                        <span className="text-sm font-mono font-semibold text-gray-200 w-8 text-right">{count}</span>
-                        {conversionPct !== null && (
-                          <span className="text-xs text-gray-300 w-10 text-right">{conversionPct}%</span>
-                        )}
-                      </div>
-                    </button>
-                  )
+                      <div style={{fontSize:9,color:C.tD,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.msgs[c.msgs.length-1]?.t}</div>
+                    </div>
+                  );
                 })}
               </div>
-            )}
-          </div>
-
-          {/* Live Conversation Feed */}
-          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden flex flex-col" style={{ maxHeight: 480 }}>
-            <div className="px-4 py-3 border-b border-gray-800">
-              <h2 className="text-sm font-semibold text-gray-300">
-                Live Conversations
-                {funnelFilter && <span className="text-gray-300 font-normal ml-2">(filtered)</span>}
-              </h2>
-            </div>
-            {loading ? (
-              <div className="p-4"><SkeletonList rows={8} /></div>
-            ) : data && !data.activeConversations ? (
-              <SectionError label="Conversations" onRetry={fetchData} />
-            ) : filteredCustomers.length === 0 ? (
-              <div className="p-8 text-center text-gray-400 text-sm">No conversations match filter</div>
-            ) : (
-              <div className="overflow-y-auto flex-1 divide-y divide-gray-800/30">
-                {filteredCustomers.map((c: any) => {
-                  const lastMsg = (data?.recentCustSms || []).find((s: any) => s.phone === c.phone)
-                  const isSelected = selectedPhone === c.phone
-                  return (
-                    <button
-                      key={c.phone}
-                      onClick={() => selectConversation(isSelected ? null : c.phone)}
-                      className={`w-full px-4 py-3 flex items-start gap-3 hover:bg-gray-800/40 transition-colors text-left ${isSelected ? "bg-gray-800/60 border-l-2 border-blue-500" : ""}`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-0.5">
-                          <span className="text-sm font-medium text-gray-200 truncate">
-                            {c.customer_name || c.phone}
-                          </span>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${STATE_COLORS[c.state] || "bg-gray-700"} text-white shrink-0`}>
-                            {STATE_LABELS[c.state] || c.state}
-                          </span>
-                          {c.needs_human_review && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900 text-red-300 shrink-0">REVIEW</span>
-                          )}
-                        </div>
-                        {lastMsg && (
-                          <p className="text-xs text-gray-300 truncate">{lastMsg.body}</p>
-                        )}
-                      </div>
-                      <div className="text-right shrink-0">
-                        {c.total_price_cents && c.total_price_cents > 0 && (
-                          <div className="text-xs font-semibold text-emerald-400">{fmtCents(c.total_price_cents)}</div>
-                        )}
-                        <div className="text-[10px] text-gray-400">{ago(c.updated_at)}</div>
-                      </div>
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* ═══ ROW 3: Conversation Viewer ═══ */}
-        <div ref={conversationRef} className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-          {!selectedPhone ? (
-            <div className="px-4 py-8 text-center text-gray-400 text-sm">
-              Select a conversation above to view the SMS thread
-            </div>
-          ) : (
-            <>
-              {/* Conversation Header */}
-              <div className="px-4 py-3 border-b border-gray-800 flex flex-wrap items-center gap-x-4 gap-y-1">
-                <span className="font-semibold text-gray-200">{selectedConv?.customer_name || selectedPhone}</span>
-                <span className="text-xs text-gray-300 font-mono">{selectedPhone}</span>
-                {selectedConv && (
+              <div style={{flex:1,display:"flex",flexDirection:"column",background:C.card,borderRadius:8,border:`1px solid ${C.b}`}}>
+                {selConv?(
                   <>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${STATE_COLORS[selectedConv.state] || "bg-gray-700"} text-white`}>
-                      {STATE_LABELS[selectedConv.state] || selectedConv.state}
-                    </span>
-                    {selectedConv.delivery_address && (
-                      <span className="text-xs text-gray-300">{selectedConv.delivery_address}</span>
-                    )}
-                    {selectedConv.yards_needed && (
-                      <span className="text-xs text-gray-400">{selectedConv.yards_needed} yards</span>
-                    )}
-                    {selectedConv.material_type && (
-                      <span className="text-xs text-gray-400">{selectedConv.material_type}</span>
-                    )}
-                    {selectedConv.total_price_cents > 0 && (
-                      <span className="text-xs font-semibold text-emerald-400">{fmtCents(selectedConv.total_price_cents)}</span>
-                    )}
-                  </>
-                )}
-                <button
-                  onClick={() => selectConversation(null)}
-                  className="ml-auto text-xs text-gray-300 hover:text-gray-300"
-                >
-                  Close
-                </button>
-              </div>
-              {/* SMS Thread */}
-              <div className="p-4 space-y-2 max-h-96 overflow-y-auto">
-                {convLoading ? (
-                  <SkeletonList rows={4} />
-                ) : smsForSelected.length === 0 ? (
-                  <div className="text-center text-gray-400 text-sm py-4">No messages found for this number</div>
-                ) : (
-                  smsForSelected.map((msg: any, i: number) => {
-                    const isCustomer = msg.direction === "inbound"
-                    return (
-                      <div key={i} className={`flex ${isCustomer ? "justify-start" : "justify-end"}`}>
-                        <div className={`max-w-[80%] px-3 py-2 rounded-lg text-sm ${
-                          isCustomer
-                            ? "bg-gray-800 text-gray-200 rounded-bl-none"
-                            : "bg-blue-600 text-white rounded-br-none"
-                        }`}>
-                          <p className="whitespace-pre-wrap break-words">{msg.body}</p>
-                          <div className={`text-[10px] mt-1 ${isCustomer ? "text-gray-300" : "text-blue-200"}`}>
-                            {new Date(msg.created_at).toLocaleString("en-US", { hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })}
+                    <div style={{padding:"6px 12px",borderBottom:`1px solid ${C.b}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div><span style={{fontSize:11,fontWeight:600}}>{selConv.name}</span><span style={{fontSize:9,fontFamily:m,color:C.tD,marginLeft:6}}>{selConv.phone}</span></div>
+                      <button onClick={()=>setTakeover(!takeover)} style={{
+                        background:takeover?C.redD:`${C.amber}12`,border:`1px solid ${takeover?C.red:C.amber}35`,
+                        color:takeover?C.red:C.amber,fontSize:8,fontFamily:m,fontWeight:700,padding:"3px 8px",borderRadius:3,cursor:"pointer",
+                      }}>{takeover?"LIVE — AI PAUSED":"TAKE OVER"}</button>
+                    </div>
+                    {takeover&&<div style={{padding:"3px 12px",background:C.redD,borderBottom:`1px solid ${C.red}25`,fontSize:8,fontFamily:m,color:C.red,display:"flex",alignItems:"center",gap:4}}><Pulse color={C.red} sz={4}/>HUMAN OVERRIDE — Sends from {selConv.agent==="sarah"?"Sarah":"Jesse"}&apos;s Twilio number</div>}
+                    <div style={{flex:1,overflowY:"auto",padding:12}}>
+                      {selConv.msgs.map((msg,i)=>{
+                        const isAI=msg.f==="ai";const ac=selConv.agent==="sarah"?C.blue:C.amber;
+                        return(
+                          <div key={i} style={{display:"flex",justifyContent:isAI?"flex-end":"flex-start",marginBottom:6}}>
+                            <div style={{maxWidth:"78%",padding:"6px 10px",borderRadius:isAI?"8px 8px 2px 8px":"8px 8px 8px 2px",background:isAI?`${ac}12`:C.s,border:`1px solid ${isAI?`${ac}25`:C.b}`}}>
+                              <div style={{fontSize:11,color:C.t,lineHeight:1.4}}>{msg.t}</div>
+                              <div style={{fontSize:7,color:isAI?ac:C.tD,fontFamily:m,marginTop:2,textAlign:isAI?"right":"left"}}>{isAI?selConv.agent.toUpperCase():msg.f==="drv"?"DRIVER":"CUSTOMER"} — {msg.tm}</div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {sentMsgs.filter(s=>s.cid===selConv.id).map((msg,i)=>(
+                        <div key={`s${i}`} style={{display:"flex",justifyContent:"flex-end",marginBottom:6}}>
+                          <div style={{maxWidth:"78%",padding:"6px 10px",borderRadius:"8px 8px 2px 8px",background:C.redD,border:`1px solid ${C.red}25`}}>
+                            <div style={{fontSize:11,color:C.t,lineHeight:1.4}}>{msg.t}</div>
+                            <div style={{fontSize:7,color:C.red,fontFamily:m,marginTop:2,textAlign:"right"}}>YOU (as {selConv.agent.toUpperCase()}) — {msg.tm}</div>
                           </div>
                         </div>
-                      </div>
-                    )
-                  })
-                )}
-              </div>
-              {/* Admin Actions */}
-              {selectedConv && (
-                <div className="px-4 py-3 border-t border-gray-800 flex flex-wrap gap-2">
-                  <button className="text-xs px-3 py-1.5 bg-emerald-900/50 text-emerald-300 rounded hover:bg-emerald-900/70 transition-colors">
-                    Mark Resolved
-                  </button>
-                  <button className="text-xs px-3 py-1.5 bg-orange-900/50 text-orange-300 rounded hover:bg-orange-900/70 transition-colors">
-                    Escalate
-                  </button>
-                  <button className="text-xs px-3 py-1.5 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition-colors">
-                    Override State
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* ═══ ROW 4: Anomaly Monitor ═══ */}
-        {(() => {
-          const actions = data?.pendingActions || []
-          const crashCount = actions.filter(a => a.type === "BRAIN_CRASH").length
-          const manualQuoteCount = actions.filter(a => a.type === "MANUAL_QUOTE").length
-          return (
-            <div className="bg-gray-900 rounded-lg border border-gray-700/50 overflow-hidden">
-              <div className="bg-gray-800 border-b border-gray-700 px-5 py-4 flex items-center gap-3">
-                <h2 className="text-white text-lg font-bold">Anomaly Monitor</h2>
-                {crashCount > 0 && (
-                  <span className="bg-red-600 text-white font-bold px-3 py-1 rounded text-sm">
-                    {crashCount} crash{crashCount !== 1 ? "es" : ""}
-                  </span>
-                )}
-                {manualQuoteCount > 0 && (
-                  <span className="bg-amber-500 text-white font-bold px-3 py-1 rounded text-sm">
-                    {manualQuoteCount} manual quote{manualQuoteCount !== 1 ? "s" : ""}
-                  </span>
-                )}
-              </div>
-              {loading ? (
-                <div className="p-4"><SkeletonList rows={3} /></div>
-              ) : data && !data.brainHealth ? (
-                <SectionError label="Anomaly Monitor" onRetry={fetchData} />
-              ) : actions.length === 0 ? (
-                <div className="bg-gray-900 px-5 py-8 text-center">
-                  <span className="text-emerald-400 text-lg">&#10003;</span>
-                  <div className="text-gray-400 text-sm mt-1">No anomalies in the last 7 days</div>
-                </div>
-              ) : (
-                <div>
-                  {actions.map((a) => {
-                    const typeBadge = a.type === "BRAIN_CRASH"
-                      ? "bg-red-600 text-white"
-                      : a.type === "MANUAL_QUOTE"
-                        ? "bg-amber-500 text-black"
-                        : "bg-blue-600 text-white"
-                    const stateMatch = a.type === "BRAIN_CRASH" ? a.message.match(/\b([A-Z][A-Z_]{3,})\b/) : null
-                    const extractedState = stateMatch ? stateMatch[1] : null
-                    const truncatedMsg = a.message.length > 120 ? a.message.slice(0, 120) + "..." : a.message
-                    return (
-                      <div key={a.id} className="bg-gray-900 hover:bg-gray-800 transition border-b border-gray-800 px-5 py-4 flex items-center gap-3" style={{ minHeight: 64 }}>
-                        <span className="text-gray-300 text-sm font-medium w-16 shrink-0">{ago(a.created_at)}</span>
-                        <span className={`${typeBadge} font-bold text-xs px-3 py-1.5 rounded-md uppercase tracking-wide shrink-0`}>
-                          {a.type.replace(/_/g, " ")}
-                        </span>
-                        <span className="text-white font-semibold text-sm w-20 shrink-0 truncate">{a.customer_name || a.phone}</span>
-                        {extractedState && (
-                          <span className="bg-gray-700 text-gray-200 text-xs px-2 py-1 rounded shrink-0">{extractedState}</span>
-                        )}
-                        <span className="text-gray-300 text-sm flex-1 leading-relaxed truncate" title={a.message}>{truncatedMsg}</span>
-                        {a.type === "BRAIN_CRASH" && (
-                          <button className="bg-red-900 hover:bg-red-700 text-red-300 hover:text-white text-xs px-3 py-1.5 rounded border border-red-700 hover:border-red-500 transition font-medium shrink-0">
-                            Reset
-                          </button>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          )
-        })()}
-
-        {/* ═══ ROW 5: Jesse Driver Feed ═══ */}
-        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-800">
-            <h2 className="text-sm font-semibold text-gray-300">Driver Feed (Jesse)</h2>
-          </div>
-          {loading ? (
-            <div className="p-4"><SkeletonList rows={5} /></div>
-          ) : data && !data.activeConversations ? (
-            <SectionError label="Driver Feed" onRetry={fetchData} />
-          ) : (data?.activeConversations?.drivers || []).length === 0 ? (
-            <div className="p-8 text-center text-gray-400 text-sm">No active driver conversations</div>
-          ) : (
-            <div className="divide-y divide-gray-800/30">
-              {(data?.activeConversations?.drivers || []).slice(0, 10).map((d: any) => {
-                const lastMsg = (data?.recentSms || []).find((s: any) => s.phone === d.phone)
-                return (
-                  <div key={d.phone} className="px-4 py-3 flex items-center gap-3">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <span className="text-sm font-medium text-gray-200">{d.phone}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 text-white font-medium">{d.state}</span>
-                        {d.extracted_truck_type && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 font-medium">{d.extracted_truck_type}</span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {d.extracted_city && (
-                          <span className="text-xs text-gray-300">{d.extracted_city}</span>
-                        )}
-                        {lastMsg && (
-                          <span className="text-xs text-gray-400 truncate">{(lastMsg.body || "").slice(0, 50)}</span>
-                        )}
-                      </div>
+                      ))}
+                      <div ref={ref}/>
                     </div>
-                    <span className="text-[10px] text-gray-400 shrink-0">{ago(d.updated_at)}</span>
+                    {takeover&&(
+                      <div style={{padding:"6px 10px",borderTop:`1px solid ${C.b}`,display:"flex",gap:4}}>
+                        <input value={msgIn} onChange={e=>setMsgIn(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendMsg()}
+                          placeholder={`Message as ${selConv.agent==="sarah"?"Sarah":"Jesse"}...`}
+                          style={{flex:1,background:C.s,border:`1px solid ${C.red}35`,borderRadius:5,padding:"6px 10px",color:C.t,fontSize:11,fontFamily:sn,outline:"none"}}/>
+                        <button onClick={sendMsg} style={{background:C.red,border:"none",color:"#fff",fontSize:9,fontFamily:m,fontWeight:700,padding:"6px 12px",borderRadius:5,cursor:"pointer"}}>SEND</button>
+                      </div>
+                    )}
+                  </>
+                ):<div style={{display:"flex",alignItems:"center",justifyContent:"center",flex:1,color:C.tD,fontSize:10,fontFamily:m}}>Select a conversation</div>}
+              </div>
+            </div>
+          )}
+
+          {tab==="brain"&&(
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div><div style={{fontSize:10,fontFamily:m,color:C.tD,letterSpacing:1}}>PLATFORM INTELLIGENCE</div><div style={{fontSize:8,color:C.tM,marginTop:2}}>Every order makes us smarter. Every conversation trains us. Every delivery calibrates us.</div></div>
+                <div style={{textAlign:"right"}}><div style={{fontSize:32,fontWeight:900,fontFamily:m,color:C.green,lineHeight:1}}>{pIQ}</div><div style={{fontSize:8,color:C.tD}}>Platform IQ</div></div>
+              </div>
+              <div style={{background:C.card,borderRadius:8,border:`1px solid ${C.b}`,padding:"10px 6px 2px",marginBottom:12}}>
+                <ResponsiveContainer width="100%" height={140}>
+                  <AreaChart data={LEARNING}>
+                    <defs>
+                      <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.amber} stopOpacity={.2}/><stop offset="100%" stopColor={C.amber} stopOpacity={0}/></linearGradient>
+                      <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.green} stopOpacity={.2}/><stop offset="100%" stopColor={C.green} stopOpacity={0}/></linearGradient>
+                      <linearGradient id="g3" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.blue} stopOpacity={.2}/><stop offset="100%" stopColor={C.blue} stopOpacity={0}/></linearGradient>
+                      <linearGradient id="g4" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={C.purple} stopOpacity={.2}/><stop offset="100%" stopColor={C.purple} stopOpacity={0}/></linearGradient>
+                    </defs>
+                    <XAxis dataKey="w" tick={{fontSize:8,fill:C.tD,fontFamily:m}} axisLine={false} tickLine={false}/>
+                    <YAxis domain={[50,100]} tick={{fontSize:8,fill:C.tD,fontFamily:m}} axisLine={false} tickLine={false}/>
+                    <Tooltip contentStyle={{background:C.card,border:`1px solid ${C.b}`,borderRadius:4,fontFamily:m,fontSize:9}}/>
+                    <Area type="monotone" dataKey="p" name="Pricing" stroke={C.amber} fill="url(#g1)" strokeWidth={2}/>
+                    <Area type="monotone" dataKey="d" name="Delivery" stroke={C.green} fill="url(#g2)" strokeWidth={2}/>
+                    <Area type="monotone" dataKey="m" name="Matching" stroke={C.blue} fill="url(#g3)" strokeWidth={2}/>
+                    <Area type="monotone" dataKey="c" name="Conversation" stroke={C.purple} fill="url(#g4)" strokeWidth={2}/>
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={{fontSize:10,fontFamily:m,color:C.tD,letterSpacing:1,marginBottom:6}}>WHAT THE SYSTEM LEARNED</div>
+              {[
+                {msg:"Dallas downtown orders peak 7-9 AM — pre-position 3 drivers by 6:30 AM",type:"dispatch",conf:94},
+                {msg:"Fill dirt at $12/yd: 89% acceptance in Zone A. $14/yd drops to 61%. Keep $12 floor.",type:"pricing",conf:91},
+                {msg:"Customers quoted within 2 min close at 3.2x vs 10+ min quotes",type:"conversion",conf:88},
+                {msg:"Carlos accepts 97% of jobs within 15 mi — prioritize him for North Dallas",type:"matching",conf:86},
+                {msg:"Fort Worth +34% WoW — correlates with 15 new building permits",type:"demand",conf:82},
+                {msg:"Rain forecast Thursday — historically reduces orders 40%. Pre-notify scheduled customers.",type:"weather",conf:79},
+              ].map((l,i)=>(
+                <div key={i} style={{padding:"5px 8px",borderLeft:`2px solid ${l.type==="pricing"?C.amber:l.type==="dispatch"?C.green:l.type==="conversion"?C.purple:l.type==="matching"?C.blue:l.type==="demand"?C.cyan:C.pink}`,marginBottom:3,background:`${C.bg}80`,borderRadius:"0 4px 4px 0"}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span style={{fontSize:10,color:C.t,lineHeight:1.3}}>{l.msg}</span>
+                    <span style={{fontSize:8,fontFamily:m,color:C.green,minWidth:28,textAlign:"right"}}>{l.conf}%</span>
                   </div>
-                )
-              })}
+                </div>
+              ))}
+              <div style={{marginTop:14,fontSize:10,fontFamily:m,color:C.tD,letterSpacing:1,marginBottom:6}}>5-YEAR VISION — FEATURES WE HAVE BEFORE ANYONE ELSE</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                {[
+                  {l:"Permit-to-Order Pipeline",d:"Auto-generate material estimates from new building permits. 185M+ permits via Shovels.ai integration.",s:"Patent XLVI",c:C.purple,ready:"Building"},
+                  {l:"Weather-Responsive Dispatch",d:"Auto-adjust schedules based on NOAA forecasts. Pre-notify customers. Redistribute fleet.",s:"Patent V",c:C.cyan,ready:"Building"},
+                  {l:"Material Quality CV",d:"Computer vision analyzes dirt/aggregate quality from driver photos. Auto-approve clean material.",s:"Patent I",c:C.amber,ready:"Active"},
+                  {l:"AI-to-AI Negotiation",d:"Sarah and Jesse negotiate pricing and scheduling autonomously with supplier AI systems.",s:"Patent V",c:C.pink,ready:"2027"},
+                  {l:"Autonomous Fleet Orchestration",d:"Air traffic control for autonomous dump trucks across public roads between quarries.",s:"Patent XXXVII",c:C.green,ready:"2028"},
+                  {l:"Carbon Credit Per Delivery",d:"Track emissions per haul. Generate verified carbon credits. ESG compliance built-in.",s:"Patent XXVIII",c:C.greenB,ready:"2027"},
+                  {l:"Digital Twin Job Sites",d:"3D model of every active construction site showing material needs in real-time.",s:"Patent XLVI",c:C.blue,ready:"2029"},
+                  {l:"Federated Learning Network",d:"Multiple quarries train shared models without exposing proprietary data.",s:"Patent XLII",c:C.red,ready:"2030"},
+                ].map((f,i)=>(
+                  <div key={i} style={{background:C.card,borderRadius:6,border:`1px solid ${C.b}`,padding:10}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                      <span style={{fontSize:10,fontWeight:700,color:f.c}}>{f.l}</span>
+                      <Bdg color={f.ready==="Active"?C.green:f.ready==="Building"?C.amber:C.tD}>{f.ready}</Bdg>
+                    </div>
+                    <div style={{fontSize:9,color:C.tM,lineHeight:1.3,marginBottom:3}}>{f.d}</div>
+                    <div style={{fontSize:7,fontFamily:m,color:C.tD}}>{f.s}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
 
-        {/* ═══ ROW 6: System Health Bar ═══ */}
-        <div className="bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
-          {loading ? (
-            <div className="flex gap-6 animate-pulse">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="h-4 w-32 bg-gray-800 rounded" />
-              ))}
-            </div>
-          ) : data && !data.alerts ? (
-            <SectionError label="System Health" onRetry={fetchData} />
-          ) : (
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
-              <HealthPill
-                label="Last Webhook"
-                value={
-                  data?.recentCustSms && data.recentCustSms.length > 0
-                    ? ago(data.recentCustSms[0].created_at)
-                    : "N/A"
-                }
-                ok={
-                  data?.recentCustSms && data.recentCustSms.length > 0
-                    ? (Date.now() - new Date(data.recentCustSms[0].created_at).getTime()) < 3600000
-                    : false
-                }
-              />
-              <HealthPill
-                label="Pending Follow-ups"
-                value={String(pendingFollowUps)}
-                ok={pendingFollowUps <= 10}
-              />
-              <HealthPill
-                label="Brain Crashes (7d)"
-                value={String(data?.brainHealth?.crashesThisWeek || 0)}
-                ok={(data?.brainHealth?.crashesThisWeek || 0) === 0}
-              />
-              <HealthPill
-                label="Stuck Customers"
-                value={String(data?.alerts?.stuckCustomerConvs || 0)}
-                ok={(data?.alerts?.stuckCustomerConvs || 0) === 0}
-              />
-              <HealthPill
-                label="Stale Orders"
-                value={String(data?.alerts?.staleOrders || 0)}
-                ok={(data?.alerts?.staleOrders || 0) === 0}
-              />
-              <HealthPill
-                label="Active Drivers"
-                value={String(data?.driverCount || 0)}
-                ok={(data?.driverCount || 0) > 0}
-              />
-            </div>
-          )}
+        {/* RIGHT PANEL */}
+        <div style={{width:220,minWidth:220,borderLeft:`1px solid ${C.b}`,display:"flex",flexDirection:"column",background:C.s,overflowY:"auto"}}>
+          <div style={{padding:"8px 8px",borderBottom:`1px solid ${C.b}`}}>
+            <div style={{fontSize:9,fontFamily:m,color:C.tD,letterSpacing:1,marginBottom:4}}>FOLLOW-UP QUEUE</div>
+            {[
+              {name:"Crown Development",hrs:4,val:"$4,500",reason:"Payment pending",urgent:true},
+              {name:"DFW Grading LLC",hrs:0.75,val:"$14,400",reason:"Delivered — no customer confirm",urgent:true},
+              {name:"Lisa Chen",hrs:24,val:"$3,600",reason:"Quoted — no response",urgent:false},
+              {name:"Apex Builders",hrs:3,val:"$1,080",reason:"Quoted — going cold",urgent:false},
+            ].map((f,i)=>(
+              <div key={i} style={{padding:"5px 7px",background:C.card,borderRadius:4,border:`1px solid ${f.urgent?`${C.red}30`:C.b}`,marginBottom:3,borderLeft:`2px solid ${f.urgent?C.red:C.amber}`}}>
+                <div style={{display:"flex",justifyContent:"space-between"}}>
+                  <span style={{fontSize:10,fontWeight:600}}>{f.name}</span>
+                  <span style={{fontSize:9,fontFamily:m,color:C.amber,fontWeight:700}}>{f.val}</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",marginTop:1}}>
+                  <span style={{fontSize:8,color:C.tD}}>{f.reason}</span>
+                  <span style={{fontSize:8,fontFamily:m,color:f.hrs>3?C.red:C.tD}}>{f.hrs}h</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{padding:"8px 8px",borderBottom:`1px solid ${C.b}`}}>
+            <div style={{fontSize:9,fontFamily:m,color:C.tD,letterSpacing:1,marginBottom:4}}>SYSTEM</div>
+            {([["Twilio SMS","operational","120ms"],["Supabase","operational","45ms"],["Claude Sonnet","operational","1.2s"],["Vercel","operational","32ms"],["10DLC","pending","—"]] as const).map(([l,s,ms],i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"2px 0"}}>
+                <div style={{display:"flex",alignItems:"center",gap:4}}><div style={{width:4,height:4,borderRadius:"50%",background:s==="operational"?C.green:C.amber}}/><span style={{fontSize:8,color:C.tM}}>{l}</span></div>
+                <span style={{fontSize:7,fontFamily:m,color:C.tD}}>{ms}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{padding:"8px 8px"}}>
+            <div style={{fontSize:9,fontFamily:m,color:C.tD,letterSpacing:1,marginBottom:4}}>DATA SOURCES</div>
+            {[
+              {l:"TxDOT ArcGIS",n:"11,000+ projects",c:C.cyan},
+              {l:"Shovels.ai Permits",n:"185M+ permits",c:C.purple},
+              {l:"SAM.gov",n:"Fed contracts",c:C.blue},
+              {l:"NOAA Weather",n:"7-day forecast",c:C.pink},
+              {l:"Supabase Fleet",n:"Real-time GPS",c:C.green},
+            ].map((d,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"2px 0"}}>
+                <span style={{fontSize:8,color:d.c}}>{d.l}</span>
+                <span style={{fontSize:7,fontFamily:m,color:C.tD}}>{d.n}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>
-  )
-}
-
-// ═══════════════════════════════════════════════════════
-// SUB-COMPONENTS
-// ═══════════════════════════════════════════════════════
-function KPICard({ label, value, sub, color, alert }: {
-  label: string; value: string; sub?: string; color?: string; alert?: boolean
-}) {
-  return (
-    <div className={`rounded-lg p-4 border ${alert ? "bg-red-950/30 border-red-900/50" : "bg-gray-900 border-gray-800"}`}>
-      <div className="text-[11px] text-gray-400 uppercase tracking-wide font-medium">{label}</div>
-      <div className={`text-2xl font-bold mt-1 ${color || "text-white"}`}>{value}</div>
-      {sub && <div className="text-[11px] text-gray-400 mt-1">{sub}</div>}
-    </div>
-  )
-}
-
-function HealthPill({ label, value, ok }: { label: string; value: string; ok: boolean }) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <div className={`w-1.5 h-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-red-500"}`} />
-      <span className="text-gray-300">{label}:</span>
-      <span className={ok ? "text-gray-300" : "text-red-400 font-semibold"}>{value}</span>
-    </div>
-  )
+  );
 }
