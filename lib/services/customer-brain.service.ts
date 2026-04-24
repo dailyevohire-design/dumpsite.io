@@ -6,6 +6,7 @@ import { createCustomerPaymentCheckout, checkPaymentStatus } from "./payment.ser
 import twilio from "twilio"
 import { extractCustomerName } from "./customer-name"
 import { notifyRepDashboard } from "@/lib/analytics-notify"
+import { geocode } from "../geo/geocode"
 
 const anthropic = new Anthropic()
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
@@ -215,74 +216,6 @@ function depthToFeet(value: number, text: string): number {
 }
 function fmt$(cents: number): string { return "$" + (cents/100).toLocaleString("en-US", { maximumFractionDigits: 0 }) }
 function fmtMaterial(k: string): string { return ({ fill_dirt:"fill dirt", screened_topsoil:"screened topsoil", structural_fill:"structural fill", sand:"sand" })[k] || k.replace(/_/g," ") }
-
-// ─────────────────────────────────────────────────────────
-// GEOCODE
-// ─────────────────────────────────────────────────────────
-async function geocode(address: string): Promise<{ lat: number; lng: number; city: string } | null> {
-  // Cache lookup (geocode_cache table — see migration 027)
-  const addressKey = address.trim().toLowerCase().replace(/\s+/g, " ")
-  try {
-    const sb = createAdminSupabase()
-    const { data: cached } = await sb
-      .from("geocode_cache")
-      .select("lat, lng, city")
-      .eq("address_key", addressKey)
-      .maybeSingle()
-    if (cached) {
-      // Bump usage stats async — don't await
-      sb.from("geocode_cache")
-        .update({ last_used_at: new Date().toISOString(), hits: ((cached as any).hits || 0) + 1 })
-        .eq("address_key", addressKey)
-        .then(() => {}, () => {})
-      return { lat: cached.lat, lng: cached.lng, city: cached.city || "" }
-    }
-  } catch {}
-
-  const cacheResult = async (lat: number, lng: number, city: string, source: string) => {
-    try {
-      await createAdminSupabase().from("geocode_cache").upsert({
-        address_key: addressKey, raw_address: address, lat, lng, city, source,
-      }, { onConflict: "address_key" })
-    } catch {}
-  }
-
-  const key = process.env.GOOGLE_MAPS_API_KEY
-  // Try Google Maps first
-  if (key) {
-    try {
-      const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${key}`)
-      const d = await r.json()
-      if (d.status === "OK" && d.results[0]) {
-        const loc = d.results[0].geometry.location
-        const city = d.results[0].address_components?.find((c: any) => c.types.includes("locality"))?.long_name || ""
-        await cacheResult(loc.lat, loc.lng, city, "google")
-        return { lat: loc.lat, lng: loc.lng, city }
-      }
-    } catch (err) {
-      console.error("[customer geocode] Google Maps error:", err)
-    }
-  }
-  // Fallback: Nominatim (city-level)
-  try {
-    await new Promise(r => setTimeout(r, 300))
-    // Don't assume Texas — check if address already has a state, otherwise leave as-is
-    const hasState = /\b(Texas|TX|Colorado|CO|Denver)\b/i.test(address)
-    const q = encodeURIComponent(hasState ? address : `${address} USA`)
-    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`
-    const r = await fetch(url, { headers: { "User-Agent": "DumpSite.io/1.0" } })
-    const data = await r.json()
-    if (data?.[0]) {
-      const city = data[0].display_name?.split(",")[0] || ""
-      const lat = parseFloat(data[0].lat), lng = parseFloat(data[0].lon)
-      await cacheResult(lat, lng, city, "nominatim")
-      return { lat, lng, city }
-    }
-  } catch (err) {
-    console.error("[customer geocode] Nominatim fallback error:", err)
-  }
-  return null
-}
 
 // ─────────────────────────────────────────────────────────
 // CODE-BASED EXTRACTION — AI never sets these fields
@@ -868,6 +801,73 @@ async function sendSMS(to: string, body: string, sid: string) {
   }
   const msg = await twilioClient.messages.create({ body, from: CUSTOMER_FROM, to: `+1${phone}` })
   await logMsg(phone, body, "outbound", msg.sid || `out_${sid}`)
+}
+
+// ─────────────────────────────────────────────────────────
+// sendSMSWithAgent — outbound Twilio send with explicit per-agent
+// fromNumber + agent_id stamped on the customer_sms_logs row. Used by
+// /api/internal/sms/send (rep-portal manual-order confirmations + resends).
+// Structured return; never throws. sendSMS above is untouched.
+// ─────────────────────────────────────────────────────────
+export async function sendSMSWithAgent(
+  to: string,
+  body: string,
+  sid: string,
+  fromNumber: string,
+  agentId: string,
+): Promise<{ sent: true; message_sid: string } | { sent: false; error: string }> {
+  const phone = normalizePhone(to)
+  // Mirror the synthetic test-number short-circuit Sarah uses in sendSMS
+  if (/^5555550\d{3}$/.test(phone)) {
+    try {
+      await createAdminSupabase().from("customer_sms_logs").insert({
+        phone, body, direction: "outbound",
+        message_sid: `synth_${sid}`, agent_id: agentId,
+      })
+    } catch {}
+    return { sent: true, message_sid: `synth_${sid}` }
+  }
+  try {
+    const msg = await twilioClient.messages.create({ body, from: fromNumber, to: `+1${phone}` })
+    const messageSid = msg.sid || `out_${sid}`
+    try {
+      await createAdminSupabase().from("customer_sms_logs").insert({
+        phone, body, direction: "outbound",
+        message_sid: messageSid, agent_id: agentId,
+      })
+    } catch {}
+    return { sent: true, message_sid: messageSid }
+  } catch (err: any) {
+    try {
+      await createAdminSupabase().from("customer_sms_logs").insert({
+        phone, body, direction: "error",
+        message_sid: null, agent_id: agentId,
+      })
+    } catch {}
+    return { sent: false, error: err?.message || "twilio_send_failed" }
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// resolveReusableDispatchOrderId — Stage 2 QUOTING guard helper.
+// Returns the id of the existing dispatch_order to reuse when the
+// customer-brain transitions QUOTING → ORDER_PLACED; otherwise null
+// (caller falls through to createDispatchOrder). Only 'dispatching'
+// orders are reused — cancelled / completed / in_progress / missing
+// all fall through so manual-entry + SMS-entry double-yes both resolve
+// safely.
+// ─────────────────────────────────────────────────────────
+export async function resolveReusableDispatchOrderId(
+  dispatchOrderId: string | null | undefined,
+): Promise<string | null> {
+  if (!dispatchOrderId) return null
+  const { data } = await createAdminSupabase()
+    .from("dispatch_orders")
+    .select("id, status")
+    .eq("id", dispatchOrderId)
+    .maybeSingle()
+  if (data && (data as any).status === "dispatching") return (data as any).id as string
+  return null
 }
 
 const ADMIN_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
@@ -2908,30 +2908,25 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
           await logMsg(phone, reply, "outbound", `dispatch_refused_${sid}`)
           return reply
         }
-        // Idempotency guard: if this conversation already has a dispatch_order_id,
-        // a previous "yes" already placed the order. A second rapid "yes" would
-        // double-dispatch. Re-confirm instead.
-        if (conv.dispatch_order_id) {
-          console.warn(`[customer dispatch] Duplicate yes for ${phone} — already has order ${conv.dispatch_order_id}, not re-dispatching`)
-          reply = validate(presentStandardConfirmText({
-            firstName: (conv.customer_name || "").split(/\s+/)[0],
-            yards: conv.yards_needed,
-            material: fmtMaterial(conv.material_type),
-            city: conv.delivery_city,
-            totalCents: conv.total_price_cents,
-            delivery_date: conv.delivery_date,
-          }), lastOut)
-          await saveConv(phone, agentId, { ...conv, ...updates }, readAt)
-          await logMsg(phone, reply, "outbound", `dup_yes_${sid}`)
-          return reply
-        }
+        // Manual-entry path: reuse pre-created dispatch_order
+        // Two scenarios bring us here with conv.dispatch_order_id set:
+        //   (1) The rep-portal manual-order RPC inserted dispatch_orders and
+        //       customer_conversations atomically at state='QUOTING', with
+        //       dispatch_order_id pre-populated. Customer's "yes" should flip
+        //       state → ORDER_PLACED reusing that order.
+        //   (2) Legacy double-yes / state-reversion edge cases. If the referenced
+        //       order is still 'dispatching', reuse; otherwise fall through and
+        //       let createDispatchOrder make a fresh one. No early return — the
+        //       old duplicate-yes re-confirm path would strand manual orders in
+        //       QUOTING forever.
+        const reuseOrderId = await resolveReusableDispatchOrderId(conv.dispatch_order_id)
         updates.order_type = "standard"
         try {
           await savePriorityFields(phone, agentId, { order_type: "standard" })
         } catch {
           // Non-fatal for standard path — order_type is denormalized convenience
         }
-        const orderId = await createDispatchOrder({ ...conv, ...updates }, phone)
+        const orderId = reuseOrderId ?? await createDispatchOrder({ ...conv, ...updates }, phone)
         if (orderId) {
           updates.state = "ORDER_PLACED"
           updates.dispatch_order_id = orderId

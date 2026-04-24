@@ -76,3 +76,23 @@ vi.mock('@/lib/sms', () => ({
   sendAdminAlert: vi.fn().mockResolvedValue({ success: true }),
   batchDispatchSMS: vi.fn().mockResolvedValue({ sent: 5, failed: 0 }),
 }))
+
+// ── Mock @anthropic-ai/sdk ──────────────────────────────────────────────────
+// The SDK refuses to construct in jsdom ("It looks like you're running in a
+// browser-like environment") and customer-brain.service.ts evaluates
+// `new Anthropic()` at module scope in production. Stub both the default and
+// named exports so every test file can import customer-brain without the
+// module-load throw. Individual tests can override with mockResolvedValueOnce.
+vi.mock('@anthropic-ai/sdk', () => {
+  const mockMessages = {
+    create: vi.fn().mockResolvedValue({
+      content: [{ type: 'text', text: '' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 0, output_tokens: 0 },
+    }),
+  }
+  return {
+    default: vi.fn(() => ({ messages: mockMessages })),
+    Anthropic: vi.fn(() => ({ messages: mockMessages })),
+  }
+})
