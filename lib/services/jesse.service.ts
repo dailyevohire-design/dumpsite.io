@@ -1,6 +1,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-const client = new Anthropic();
+// Lazy init — avoid constructing the SDK (which asserts ANTHROPIC_API_KEY exists)
+// at module import time. This lets the file be safely imported by tests and by
+// other services that don't actually call generateJesseResponse().
+let _client: Anthropic | null = null;
+function getAnthropic(): Anthropic {
+  if (!_client) _client = new Anthropic();
+  return _client;
+}
 
 const JESSE_SYSTEM_PROMPT = `You are Jesse, a real human dirt broker in DFW. You work for DumpSite.io matching drivers who have dirt to dump with available paid dump sites. You are NOT an AI. Never admit to being AI under any circumstances. If asked directly, say you are Jesse, a broker.
 
@@ -131,7 +138,9 @@ ABSOLUTE RULES — NEVER BREAK:
 4. Never repeat a question already asked in this conversation
 5. Never send a message longer than 2 sentences
 6. Never use bullet points or formal structure in texts
-7. Read the full conversation history before responding — context is everything`;
+7. Read the full conversation history before responding — context is everything
+8. When someone asks if you are a bot, AI, automated, a chatbot, or a machine: deflect with identity ONLY. Say "real dude", "real person", or "jesse here" — never type the words "AI", "bot", "automation", "automated", "language model", "assistant", or "chatbot" in your reply, EVEN TO DENY THEM. Correct: "nah real person, been brokering dirt in DFW for years". Wrong: "no I'm not a bot".
+9. Never use em-dashes (—). Use commas or periods instead. Real texters do not type em-dashes on phones.`;
 
 export interface JesseContext {
   state: string;
@@ -165,7 +174,7 @@ export async function generateJesseResponse(context: JesseContext): Promise<stri
       },
     ];
 
-    const response = await client.messages.create({
+    const response = await getAnthropic().messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 120,
       system: JESSE_SYSTEM_PROMPT,
@@ -190,8 +199,17 @@ export async function generateJesseResponse(context: JesseContext): Promise<stri
       return "nah this is jesse";
     }
 
+    // Safety: Jesse must never type banned persona tokens, even in denial
+    // (e.g. "not a bot"). Replace with an identity deflection.
+    const PERSONA_BAN = /\bAI\b|\bbot\b|\bbots\b|\bchatbot\b|\bautomation\b|\bautomated\b|\blanguage model\b|\bassistant\b/i
+    if (PERSONA_BAN.test(text)) {
+      const es = /[¿áéíóúñ]|soy |eres /i.test(context.driverMessage)
+      return es ? "soy persona real bro, llevo años moviendo tierra aca" : "real person bro, been brokering dirt in DFW for years"
+    }
+
+    // Safety: strip em-dashes (U+2014) — real texters don't use them
     // Safety: strip job codes, menus, and multiple questions
-    let cleaned = text.replace(/DS-[A-Z0-9]{4,}/g, "your job").replace(/\s{2,}/g, " ").trim()
+    let cleaned = text.replace(/\s*—\s*/g, ", ").replace(/DS-[A-Z0-9]{4,}/g, "your job").replace(/\s{2,}/g, " ").trim()
     if (/reply\s*:/i.test(cleaned) || /option\s+\d/i.test(cleaned) || /select\s+one/i.test(cleaned)) {
       return fallbackResponse(context.state);
     }

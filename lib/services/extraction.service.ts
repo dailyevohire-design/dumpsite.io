@@ -13,7 +13,13 @@ export interface ExtractionResult {
   confidence: number
 }
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+// Lazy init — avoid constructing the SDK at import time so this file can be
+// imported by tests / other services without ANTHROPIC_API_KEY set.
+let _client: Anthropic | null = null
+function client(): Anthropic {
+  if (!_client) _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  return _client
+}
 
 export async function extractIntent(
   text: string,
@@ -64,7 +70,7 @@ Rules:
   18_wheeler: 18 wheeler, eighteen wheeler, semi, tractor trailer
   NOTE: triaxel and triaxle are the same thing — always map to tri_axle`
 
-    const response = await client.messages.create({
+    const response = await client().messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 200,
       system: systemPrompt,

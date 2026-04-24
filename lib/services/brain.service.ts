@@ -12,7 +12,13 @@ import {
 import twilio from "twilio"
 import crypto from "crypto"
 
-const anthropic = new Anthropic()
+// Lazy init — avoid constructing the SDK at import time so this file can be
+// imported by tests / other services without ANTHROPIC_API_KEY set.
+let _anthropic: Anthropic | null = null
+function anthropic(): Anthropic {
+  if (!_anthropic) _anthropic = new Anthropic()
+  return _anthropic
+}
 const _ADMIN_PHONE_RAW = (process.env.ADMIN_PHONE || "").replace(/\D/g, "")
 if (_ADMIN_PHONE_RAW.length < 10) {
   throw new Error("ADMIN_PHONE env var missing or invalid (must normalize to 10+ digits)")
@@ -1353,7 +1359,7 @@ async function callBrain(
   let raw = ""
 
   const attemptBrain = async (): Promise<BrainOutput> => {
-    const resp = await anthropic.messages.create({
+    const resp = await anthropic().messages.create({
       model: "claude-sonnet-4-6", max_tokens: 250, system: JESSE_PROMPT, messages,
     })
     raw = resp.content[0].type === "text" ? resp.content[0].text.trim() : ""

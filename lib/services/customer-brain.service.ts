@@ -7,7 +7,13 @@ import twilio from "twilio"
 import { extractCustomerName } from "./customer-name"
 import { notifyRepDashboard } from "@/lib/analytics-notify"
 
-const anthropic = new Anthropic()
+// Lazy init — avoid constructing the SDK at import time so this file can be
+// imported by tests / other services without ANTHROPIC_API_KEY set.
+let _anthropic: Anthropic | null = null
+function anthropic(): Anthropic {
+  if (!_anthropic) _anthropic = new Anthropic()
+  return _anthropic
+}
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
@@ -802,7 +808,7 @@ Output ONLY a single valid JSON object. No prose, no markdown code fences, no ad
 
     const userMsg = `Conversation:\n${fullTranscript}\n\nExtract the structured state as JSON.`
 
-    const resp = await anthropic.messages.create({
+    const resp = await anthropic().messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 800,
       system: sys,
@@ -1367,7 +1373,7 @@ async function callSarah(
     const systemWithLearnings = SARAH_SYSTEM + learningsBlock
 
     const attemptSarah = async () => {
-      const resp = await anthropic.messages.create({
+      const resp = await anthropic().messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 250,
         // Low temperature: Sonnet at 1.0 samples customer-service-script tokens
