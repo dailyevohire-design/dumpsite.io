@@ -137,6 +137,21 @@ export interface JobMatch {
   clientName: string
 }
 
+// CP2: the dispatch_orders column that flags 18-wheeler site access.
+// Exported so tests and future code reference a single source of truth.
+export const ACCESS_COLUMN = 'eighteen_wheeler_access'
+
+const BIG_TRUCK_TYPES = new Set(['end_dump', '18_wheeler', 'eighteen_wheeler', 'semi'])
+const SMALL_TRUCK_TYPES = new Set(['tandem_axle', 'dump_truck', 'tandem'])
+
+export function normalizeTruckClass(truckType?: string | null): 'small' | 'big' {
+  if (!truckType) return 'small'
+  if (BIG_TRUCK_TYPES.has(truckType)) return 'big'
+  // tandem/dump_truck match small explicitly; anything else also defaults small
+  // (if we guess wrong on an unknown type, small is safer — no sites filtered out).
+  return 'small'
+}
+
 // ─────────────────────────────────────────────────────────────
 // FIND NEARBY JOBS
 // Now accepts full address OR city name. Geocodes to actual coordinates.
@@ -148,14 +163,79 @@ export async function findNearbyJobs(
 ): Promise<JobMatch[]> {
   const supabase = createAdminSupabase()
 
-  // Get ALL open orders — including ones without coordinates (we'll geocode them)
-  const { data: orders, error } = await supabase
-    .from('dispatch_orders')
-    .select('id, city_id, yards_needed, driver_pay_cents, truck_type_needed, status, delivery_latitude, delivery_longitude, client_phone, client_name, client_address, cities(name)')
-    .in('status', ['dispatching', 'active', 'pending'])
-    .order('created_at', { ascending: false })
+  // CP2: 18-wheeler access gate. Normalize driver truck class, then filter at
+  // the query level so we never pick up a site that can't physically accept
+  // an 18-wheeler. Tandem/dump-truck drivers get everything — they fit anywhere.
+  const truckClass = normalizeTruckClass(truckType)
+  const baseSelect = 'id, city_id, yards_needed, driver_pay_cents, truck_type_needed, status, delivery_latitude, delivery_longitude, client_phone, client_name, client_address, cities(name)'
 
-  if (error) console.error('[routing]', error.message)
+  let orders: any[] | null = null
+  let accessColumnUsed: string | null = null
+  let candidatesBeforeFilter = 0
+
+  if (truckClass === 'big') {
+    const q = supabase
+      .from('dispatch_orders')
+      .select(baseSelect)
+      .in('status', ['dispatching', 'active', 'pending'])
+      .eq(ACCESS_COLUMN, true)
+      .order('created_at', { ascending: false })
+    const { data, error } = await q
+    if (error && error.message?.includes(ACCESS_COLUMN)) {
+      // Column not applied yet (migration pending). Log and fall back to
+      // unfiltered behavior so routing doesn't break in prod before the
+      // dashboard DDL run. Once the migration is in, this branch is dead.
+      console.warn(`[routing] ${ACCESS_COLUMN} column missing — running without access filter`)
+      const { data: unfiltered } = await supabase
+        .from('dispatch_orders')
+        .select(baseSelect)
+        .in('status', ['dispatching', 'active', 'pending'])
+        .order('created_at', { ascending: false })
+      orders = unfiltered
+      accessColumnUsed = null
+      candidatesBeforeFilter = unfiltered?.length || 0
+    } else {
+      if (error) console.error('[routing]', error.message)
+      orders = data
+      accessColumnUsed = ACCESS_COLUMN
+      // For observability we also need pre-filter count
+      const { count } = await supabase
+        .from('dispatch_orders')
+        .select('id', { count: 'exact', head: true })
+        .in('status', ['dispatching', 'active', 'pending'])
+      candidatesBeforeFilter = count || 0
+    }
+  } else {
+    const { data, error } = await supabase
+      .from('dispatch_orders')
+      .select(baseSelect)
+      .in('status', ['dispatching', 'active', 'pending'])
+      .order('created_at', { ascending: false })
+    if (error) console.error('[routing]', error.message)
+    orders = data
+    accessColumnUsed = null
+    candidatesBeforeFilter = data?.length || 0
+  }
+
+  const candidatesAfterFilter = orders?.length || 0
+
+  // Fire-and-forget observability — never blocks routing on log failure.
+  try {
+    await supabase.from('jesse_routing_log').insert({
+      driver_location: driverLocation,
+      truck_type_input: truckType || null,
+      normalized_class: truckClass,
+      candidates_before_filter: candidatesBeforeFilter,
+      candidates_after_filter: candidatesAfterFilter,
+      access_column_used: accessColumnUsed,
+    })
+  } catch (err: any) {
+    // Table may not exist yet (migration pending). Silent fail — routing must continue.
+    if (!err?.message?.includes('jesse_routing_log')) {
+      console.error('[routing log]', err?.message)
+    }
+  }
+
   if (!orders?.length) return []
 
   // Filter out already-reserved orders
@@ -245,25 +325,8 @@ export async function findNearbyJobs(
     return []
   }
 
-  // Asymmetric truck access matrix:
-  //   - Dump trucks (tandem/tri/quad/super) go EVERYWHERE — no filter applied.
-  //   - 18-wheelers / end-dumps / transfers can only go to sites flagged for big-rig access.
-  //   - Sites with no `allows_eighteen_wheeler` flag are assumed dump-truck-only.
-  if (truckType) {
-    const dumpFamily = ['tandem_axle', 'tri_axle', 'quad_axle', 'super_dump']
-    const isDumpDriver = dumpFamily.includes(truckType)
-    if (!isDumpDriver) {
-      // 18-wheeler family driver — only sites whose own truck_type_needed is in the big-rig family
-      const eighteenFamily = ['end_dump', 'belly_dump', 'side_dump', '18_wheeler', 'transfer', 'semi']
-      const truckFiltered = withDistance.filter(o => {
-        const orderTruck = o.truck_type_needed || ''
-        return eighteenFamily.includes(orderTruck)
-      })
-      if (truckFiltered.length) withDistance = truckFiltered
-      else withDistance = []
-    }
-    // Dump truck driver — never block, allow everything
-  }
+  // (CP2 replaced the old post-fetch truck_type_needed filter with a
+  // query-level gate on eighteen_wheeler_access — see above.)
 
   return withDistance.slice(0, 5).map(o => ({
     id: o.id,
