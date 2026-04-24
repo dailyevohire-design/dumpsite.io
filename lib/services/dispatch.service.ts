@@ -83,10 +83,22 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
     }
   }
 
-  // PERMANENT FIX: Driver pay is ALWAYS determined by city rate.
-  // Never use the customer quote or admin input — prevents showing
-  // company revenue to drivers. DB column overrides config fallback.
-  const driverPayCents = getDriverPayCents(city.name, city.default_driver_pay_cents)
+  // Driver pay source of truth: FEATURE_FLAT_DRIVER_PAY flag selects between
+  // flat-by-truck-type (launch rate) and city-based (legacy). Customer price
+  // (priceQuotedCents) is never used — prevents leaking company margin to drivers.
+  const preFlatPayCents = getDriverPayCents(city.name, city.default_driver_pay_cents)
+  const FLAT_TRUCK_PAY_CENTS: Record<string, number> = {
+    tandem_axle: 3000,
+    dump_truck: 3000,
+    end_dump: 5000,
+    '18_wheeler': 5000,
+  }
+  const flatPayFlagEnabled = process.env.FEATURE_FLAT_DRIVER_PAY !== 'false'
+  const flatPayOverride = flatPayFlagEnabled && input.truckTypeNeeded
+    ? FLAT_TRUCK_PAY_CENTS[input.truckTypeNeeded]
+    : undefined
+  const driverPayCents = flatPayOverride ?? preFlatPayCents
+  const flatPayApplied = flatPayOverride !== undefined
 
   const { data: order, error: orderError } = await supabase
     .from('dispatch_orders')
@@ -202,6 +214,21 @@ export async function createDispatchOrder(input: CreateDispatchInput) {
     entity_id: order.id,
     metadata: { drivers_notified: sent, city: city.name, tier_counts: tierCounts }
   })
+
+  if (flatPayApplied) {
+    await supabase.from('audit_logs').insert({
+      action: 'dispatch.flat_pay_applied',
+      entity_type: 'dispatch_order',
+      entity_id: order.id,
+      metadata: {
+        reason: 'flat_launch_v1',
+        truck_type_needed: input.truckTypeNeeded || null,
+        driver_pay_cents: driverPayCents,
+        flag_enabled: flatPayFlagEnabled,
+        overridden_value_cents: preFlatPayCents,
+      },
+    })
+  }
 
   return { success: true, dispatchId: order.id, driversNotified: sent, cityName: city.name }
 }
