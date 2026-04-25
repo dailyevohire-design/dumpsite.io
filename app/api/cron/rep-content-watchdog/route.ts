@@ -34,9 +34,15 @@ export async function GET(req: NextRequest) {
 
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
   let healed = 0;
+  let cooled = 0;
   const failures: string[] = [];
 
   for (const r of unhealthy) {
+    const { data: shouldHeal } = await supabase.rpc('fdnm_should_auto_heal', { p_rep_id: r.rep_id, p_cooldown_min: 30 });
+    if (shouldHeal === false) {
+      cooled++;
+      continue;
+    }
     const { error } = await supabase.rpc('fdnm_emergency_generate_for_rep', {
       p_rep_id: r.rep_id, p_count: 5,
     });
@@ -47,7 +53,7 @@ export async function GET(req: NextRequest) {
   if (failures.length > 0) {
     await pageAdmin(`Rep content auto-heal failed for: ${failures.join(' | ')}`);
   }
-  return NextResponse.json({ ok: true, healed, alerted: failures.length, unhealthy_count: unhealthy.length });
+  return NextResponse.json({ ok: true, healed, cooled, alerted: failures.length, unhealthy_count: unhealthy.length });
 }
 
 async function pageAdmin(body: string) {
