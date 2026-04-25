@@ -1,6 +1,6 @@
 # DumpSite.io — Session Primer
-> Auto-generated 2026-04-13T16:08:13.171Z
-> Commit: 2f475c1 fix: rewrite anomaly monitor + fix unreadable gray text across command center
+> Auto-generated 2026-04-25T11:14:36.626Z
+> Commit: 26fe169 feat(db): migration 032 adds 'facebook' to sms_consent.source enum
 
 ## Stack
 - Next.js 16 on Vercel → dumpsite.io
@@ -10,7 +10,7 @@
 - GitHub: dailyevohire-design/dumpsite.io
 
 ## Live Stats
-- Open orders: 19
+- Open orders: 40
 - Active drivers: 136
 - Active reservations: 0
 - Material photos: 11
