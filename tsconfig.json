@@ -41,6 +41,7 @@
     "tests",
     "scripts",
     "vitest.config.ts",
-    "playwright.config.ts"
+    "playwright.config.ts",
+    "supabase/functions/**"
   ]
 }
