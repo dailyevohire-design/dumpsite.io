@@ -1199,7 +1199,7 @@ function presentStandardConfirmText(opts: {
   const dateLine = opts.delivery_date && !/flexible|whenever/i.test(opts.delivery_date)
     ? `for ${opts.delivery_date}`
     : `for delivery in 3-5 business days`
-  return `${greeting}, your order is confirmed ${dateLine} — ${opts.yards} yards of ${opts.material} to ${opts.city || "your location"} at ${fmt$(opts.totalCents)}. You'll get a text when your driver is heading your way. Payment is collected after delivery, we take Venmo, Zelle, or online invoice (card has a 3.5% fee), I'll send the details after the drop`
+  return `${greeting}, your order is confirmed ${dateLine} — ${opts.yards} yards of ${opts.material} to ${opts.city || "your location"} at ${fmt$(opts.totalCents)}. You'll get a text when your driver is heading your way. Payment is collected after delivery, we take Venmo, Zelle, or online invoice (card has a 3.5% fee), I will send details once the material is delivered`
 }
 
 // ─────────────────────────────────────────────────────────
