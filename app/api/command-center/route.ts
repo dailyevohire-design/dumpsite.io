@@ -49,9 +49,9 @@ export async function GET() {
     sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents, created_at, agent_id").gte("created_at", weekAgo),
     // Orders this month (for trends)
     sb.from("dispatch_orders").select("id, status, yards_needed, price_quoted_cents, driver_pay_cents, created_at, agent_id").gte("created_at", thirtyDaysAgo),
-    // Active driver conversations
+    // Driver conversations (30d, all states — mirrors customer panel philosophy)
     sb.from("conversations").select("phone, state, extracted_city, extracted_truck_type, active_order_id, needs_human_review, updated_at")
-      .in("state", ["ACTIVE", "OTW_PENDING", "PHOTO_PENDING", "APPROVAL_PENDING", "JOB_PRESENTED", "ASKING_TRUCK", "ASKING_ADDRESS"])
+      .gte("updated_at", thirtyDaysAgo)
       .order("updated_at", { ascending: false }).limit(20),
     // ALL customer conversations in the last 30 days — no state filter.
     // The dashboard is the source of truth for "what's happening with customers",
