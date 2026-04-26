@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+import { insertSmsLog } from "@/lib/sms"
 import Anthropic from "@anthropic-ai/sdk"
 
 // ─────────────────────────────────────────────────────────────────
@@ -417,9 +418,9 @@ export async function GET(request: NextRequest) {
         continue
       }
 
-      await sb.from("sms_logs").insert({
+      await insertSmsLog(sb, "sms_logs", {
         phone: conv.phone,
-        body: `[RESCUE ${conv.state}] ${gen.text}`,
+        body: gen.text,
         direction: "outbound",
         message_sid: `rescue_j_${Date.now()}`,
       })
@@ -579,9 +580,9 @@ export async function GET(request: NextRequest) {
         continue
       }
 
-      await sb.from("customer_sms_logs").insert({
+      await insertSmsLog(sb, "customer_sms_logs", {
         phone: conv.phone,
-        body: `[RESCUE ${conv.state}] ${gen.text}`,
+        body: gen.text,
         direction: "outbound",
         message_sid: `rescue_s_${Date.now()}`,
       })

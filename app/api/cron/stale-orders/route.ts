@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+import { insertSmsLog } from "@/lib/sms"
 import twilio from "twilio"
 
 
@@ -43,11 +44,9 @@ export async function GET(request: NextRequest) {
     alerts.push(`DRIVER NO-SHOW: ${d.phone} went OTW ${mins} min ago, no load count`)
     // Text the driver
     try {
-      await tw.messages.create({
-        body: "Hey just checking in, you make it to the site? Text me your load count when done",
-        from: FROM, to: `+1${d.phone}`,
-      })
-      await sb.from("sms_logs").insert({ phone: d.phone, body: `[NO-SHOW CHECK ${mins}min]`, direction: "outbound", message_sid: `noshow_${Date.now()}` })
+      const body = "Hey just checking in, you make it to the site? Text me your load count when done"
+      await tw.messages.create({ body, from: FROM, to: `+1${d.phone}` })
+      await insertSmsLog(sb, "sms_logs", { phone: d.phone, body, direction: "outbound", message_sid: `noshow_${Date.now()}` })
     } catch {}
   }
 
@@ -63,11 +62,9 @@ export async function GET(request: NextRequest) {
         state: "DISCOVERY", pending_approval_order_id: null, reservation_id: null,
         approval_sent_at: null, voice_call_made: null,
       }).eq("phone", c.phone)
-      await tw.messages.create({
-        body: "that one didn't pan out, lmk if you got more dirt today",
-        from: FROM, to: `+1${c.phone}`,
-      })
-      await sb.from("sms_logs").insert({ phone: c.phone, body: `[APPROVAL REAPER 2h]`, direction: "outbound", message_sid: `reaper_${Date.now()}` })
+      const body = "that one didn't pan out, lmk if you got more dirt today"
+      await tw.messages.create({ body, from: FROM, to: `+1${c.phone}` })
+      await insertSmsLog(sb, "sms_logs", { phone: c.phone, body, direction: "outbound", message_sid: `reaper_${Date.now()}` })
       alerts.push(`APPROVAL REAPED: ${c.phone} APPROVAL_PENDING > 2h, reset to DISCOVERY`)
     } catch (e) { console.error("[approval reaper]", e) }
   }
@@ -109,7 +106,7 @@ export async function GET(request: NextRequest) {
       : "whats your loading address, i can see what i got close"
     try {
       await tw.messages.create({ body: reprompt, from: FROM, to: `+1${c.phone}` })
-      await sb.from("sms_logs").insert({ phone: c.phone, body: `[STRANDED REPROMPT ${mins}m] ${reprompt}`, direction: "outbound", message_sid: `stranded_${Date.now()}` })
+      await insertSmsLog(sb, "sms_logs", { phone: c.phone, body: reprompt, direction: "outbound", message_sid: `stranded_${Date.now()}` })
       await sb.from("conversations").update({ updated_at: new Date().toISOString() }).eq("phone", c.phone)
     } catch (e) { console.error("[stranded reprompt]", e) }
   }
@@ -130,7 +127,7 @@ export async function GET(request: NextRequest) {
         ? "still need your payment info to close this out, whats your zelle or venmo"
         : "how you want it, zelle or venmo"
       await tw.messages.create({ body: reprompt, from: FROM, to: `+1${c.phone}` })
-      await sb.from("sms_logs").insert({ phone: c.phone, body: `[PAYMENT REPROMPT ${mins}m] ${reprompt}`, direction: "outbound", message_sid: `payreprompt_${Date.now()}` })
+      await insertSmsLog(sb, "sms_logs", { phone: c.phone, body: reprompt, direction: "outbound", message_sid: `payreprompt_${Date.now()}` })
       await sb.from("conversations").update({ updated_at: new Date().toISOString() }).eq("phone", c.phone)
       alerts.push(`STUCK PAYMENT: ${c.phone} in ${c.state} for ${mins} min, re-prompted`)
     } catch (e) { console.error("[payment reprompt]", e) }

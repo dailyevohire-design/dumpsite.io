@@ -1,5 +1,28 @@
 import { createAdminSupabase } from './supabase'
 
+export type SmsLogTable = "sms_logs" | "customer_sms_logs"
+
+export interface SmsLogRow {
+  phone: string
+  body: string
+  direction: string
+  message_sid?: string
+}
+
+export async function insertSmsLog(
+  sb: ReturnType<typeof createAdminSupabase>,
+  table: SmsLogTable,
+  row: SmsLogRow,
+) {
+  if (row.body.startsWith("[") && row.message_sid?.startsWith("rescue_")) {
+    console.warn(
+      "[sms_logs] body has bracket prefix on rescue row — possible audit drift",
+      { phone: row.phone, message_sid: row.message_sid, bodyPreview: row.body.slice(0, 40) },
+    )
+  }
+  return sb.from(table).insert(row)
+}
+
 function getTwilioConfig() {
   // Support two auth modes:
   // 1. API Key: TWILIO_ACCOUNT_SID (AC...), TWILIO_API_KEY (SK...), TWILIO_API_SECRET
