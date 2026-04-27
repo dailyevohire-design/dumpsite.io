@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Stripe from 'stripe'
 import { createAdminSupabase } from '@/lib/supabase'
+import { sendOutboundSMS } from '@/lib/sms'
 import twilio from 'twilio'
 
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
@@ -22,8 +23,10 @@ function normalizePhone(raw: string): string {
 }
 
 async function sendCustomerSMS(to: string, body: string) {
-  const client = getTwilio()
-  await client.messages.create({ body, from: CUSTOMER_FROM, to: `+1${normalizePhone(to)}` })
+  const result = await sendOutboundSMS({ to: normalizePhone(to), body, from: CUSTOMER_FROM })
+  if (!result.ok) {
+    console.error('[stripe webhook] customer SMS failed:', to, result.error)
+  }
 }
 
 async function sendAdminSMS(body: string) {

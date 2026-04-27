@@ -1,4 +1,9 @@
+// New Twilio sends to customers should go through sendOutboundSMS — it sanitizes
+// the body and gives a single chokepoint for future audit/lint enforcement.
 import { createAdminSupabase } from './supabase'
+import { sanitizeOutbound, OutboundSanitizationError } from './sms/sanitize-outbound'
+
+export { sanitizeOutbound, OutboundSanitizationError }
 
 export type SmsLogTable = "sms_logs" | "customer_sms_logs"
 
@@ -21,6 +26,76 @@ export async function insertSmsLog(
     )
   }
   return sb.from(table).insert(row)
+}
+
+/**
+ * Canonical customer-facing send path. Sanitizes body, posts to Twilio.
+ * Does NOT log to sms_logs — caller is responsible for logging with the
+ * correct synthetic SID prefix and table (sms_logs vs customer_sms_logs).
+ */
+export async function sendOutboundSMS(opts: {
+  to: string         // E.164 or 10-digit; normalized internally
+  body: string
+  from: string       // E.164 sending number, required
+}): Promise<{ ok: true; sid: string; sanitizedBody: string } | { ok: false; error: string }> {
+  let safeBody: string
+  try {
+    safeBody = sanitizeOutbound(opts.body)
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "sanitize failed" }
+  }
+
+  const rawSid = process.env.TWILIO_ACCOUNT_SID || ""
+  const apiKey = process.env.TWILIO_API_KEY
+  const apiSecret = process.env.TWILIO_API_SECRET
+  const authToken = process.env.TWILIO_AUTH_TOKEN
+
+  let accountSid: string, authKey: string, authSecret: string
+  if (rawSid.startsWith("SK")) {
+    accountSid = process.env.TWILIO_ACCOUNT_SID_REAL || ""
+    authKey = rawSid
+    authSecret = apiSecret || ""
+  } else if (apiKey && apiSecret) {
+    accountSid = rawSid
+    authKey = apiKey
+    authSecret = apiSecret
+  } else {
+    accountSid = rawSid
+    authKey = rawSid
+    authSecret = authToken || ""
+  }
+
+  if (!accountSid || !authSecret) {
+    return { ok: false, error: "Twilio auth not configured" }
+  }
+
+  const digits = opts.to.replace(/\D/g, "")
+  const to = opts.to.startsWith("+")
+    ? opts.to
+    : digits.length === 11 && digits.startsWith("1")
+    ? `+${digits}`
+    : `+1${digits}`
+
+  try {
+    const resp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Basic " + Buffer.from(`${authKey}:${authSecret}`).toString("base64"),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ To: to, From: opts.from, Body: safeBody }).toString(),
+      },
+    )
+    const data = await resp.json()
+    if (data.error_code || resp.status >= 400) {
+      return { ok: false, error: data.message || `HTTP ${resp.status}` }
+    }
+    return { ok: true, sid: data.sid, sanitizedBody: safeBody }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) }
+  }
 }
 
 function getTwilioConfig() {
