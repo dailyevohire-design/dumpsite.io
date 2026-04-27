@@ -2,6 +2,7 @@
 // the body and gives a single chokepoint for future audit/lint enforcement.
 import { createAdminSupabase } from './supabase'
 import { sanitizeOutbound, OutboundSanitizationError } from './sms/sanitize-outbound'
+import { validateOutbound, assertFallbackValid } from './sms/outbound-validator'
 
 export { sanitizeOutbound, OutboundSanitizationError }
 
@@ -38,9 +39,36 @@ export async function sendOutboundSMS(opts: {
   body: string
   from: string       // E.164 sending number, required
 }): Promise<{ ok: true; sid: string; sanitizedBody: string } | { ok: false; error: string }> {
+
+  // Outbound validator — runs BEFORE sanitizer per architecture decision.
+  // Catches bracket prefixes, persona leaks (EN/ES), garbage output,
+  // unrendered templates, stack-trace leaks, error prefixes, empty/oversize.
+  // On block: substitute fallback, page admin via throttled wrapper,
+  // continue with the safe fallback as the body.
+  let validatedBody = opts.body
+  {
+    const validation = validateOutbound(opts.body)
+    if (!validation.ok) {
+      assertFallbackValid(validation.fallback)
+      try {
+        const { notifyAdminThrottled } = await import('./alerts/notify-admin-throttled')
+        await notifyAdminThrottled(
+          'OUTBOUND_VALIDATION_BLOCKED',
+          opts.to,
+          `Outbound blocked: rule=${validation.ruleName} body="${validation.redactedBody}"`,
+          { source: 'lib/sms/outbound-validator' },
+        )
+      } catch (alertErr) {
+        // Never let the alert path break the send path. Log only.
+        console.error('[outbound-validator] notifyAdminThrottled failed:', alertErr)
+      }
+      validatedBody = validation.fallback
+    }
+  }
+
   let safeBody: string
   try {
-    safeBody = sanitizeOutbound(opts.body)
+    safeBody = sanitizeOutbound(validatedBody)
   } catch (e: any) {
     return { ok: false, error: e?.message || "sanitize failed" }
   }
