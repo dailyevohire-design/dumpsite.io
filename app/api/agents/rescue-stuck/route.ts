@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
-import { insertSmsLog } from "@/lib/sms"
+import { insertSmsLog, sendOutboundSMS } from "@/lib/sms"
+import { withFailClosed } from "@/lib/sms/fail-closed"
 import Anthropic from "@anthropic-ai/sdk"
 
 // ─────────────────────────────────────────────────────────────────
@@ -458,65 +459,46 @@ export async function GET(request: NextRequest) {
     .limit(20)
 
   for (const conv of stuckSarah || []) {
-    try {
-      if (conv.opted_out) {
-        results.skipped++
-        continue
+    await withFailClosed(conv.phone, async () => {
+      // Atomic shared cap+cooldown across rescue + customer-followup crons.
+      // Predicate (in RPC): mode=AI_ACTIVE, !opted_out, !human_review, !paused,
+      // follow_up_count<3, no inbound/outbound/followup in last 24h. Updates
+      // ALL rows for this phone to keep duplicate rows in sync.
+      const { data: claimed } = await sb.rpc("claim_followup_attempt", { p_phone: conv.phone })
+
+      if (!claimed) {
+        // Distinguish cap-reached from cooldown-not-elapsed using the canonical row.
+        const { data: canonRows } = await sb
+          .from("customer_conversations")
+          .select("follow_up_count, needs_human_review")
+          .eq("phone", conv.phone)
+          .order("updated_at", { ascending: false })
+          .limit(1)
+        const canon = canonRows?.[0]
+        if (canon && (canon.follow_up_count ?? 0) >= 3 && !canon.needs_human_review) {
+          await sb.from("customer_conversations")
+            .update({ needs_human_review: true }).eq("phone", conv.phone)
+          await alertAdmin(`Sarah rescue cap reached: ${conv.phone} (${conv.customer_name || "unknown"}) stuck in ${conv.state}`)
+          await logRescue(sb, {
+            system: "sarah", phone: conv.phone, stuck_state: conv.state,
+            rescue_message: "", attempt_number: (canon.follow_up_count ?? 0) + 1,
+            escalated: true, alert_type: "escalation_max_attempts",
+          })
+          results.escalated++
+        } else {
+          results.skipped++
+        }
+        return
       }
 
-      const { data: convFull } = await sb
+      // Pull the post-claim count for accurate logging.
+      const { data: postClaim } = await sb
         .from("customer_conversations")
-        .select("needs_human_review")
+        .select("follow_up_count")
         .eq("phone", conv.phone)
-        .eq("agent_id", conv.agent_id)
-        .maybeSingle()
-      if (convFull?.needs_human_review) {
-        results.skipped++
-        continue
-      }
-
-      const { data: recentRescue } = await sb
-        .from("agent_rescue_logs")
-        .select("id")
-        .eq("phone", conv.phone)
-        .eq("system", "sarah")
-        .gte("sent_at", fourHoursAgo)
+        .order("updated_at", { ascending: false })
         .limit(1)
-      if (recentRescue?.length) {
-        results.skipped++
-        continue
-      }
-
-      const { count: totalAttempts } = await sb
-        .from("agent_rescue_logs")
-        .select("id", { count: "exact", head: true })
-        .eq("phone", conv.phone)
-        .eq("system", "sarah")
-      const attemptNum = (totalAttempts || 0) + 1
-
-      if (attemptNum > 3) {
-        try {
-          await sb
-            .from("customer_conversations")
-            .update({ needs_human_review: true })
-            .eq("phone", conv.phone)
-            .eq("agent_id", conv.agent_id)
-        } catch {}
-        await alertAdmin(
-          `Sarah rescue maxed out: ${conv.phone} (${conv.customer_name || "unknown"}) stuck in ${conv.state} after 3 attempts`
-        )
-        await logRescue(sb, {
-          system: "sarah",
-          phone: conv.phone,
-          stuck_state: conv.state,
-          rescue_message: "",
-          attempt_number: attemptNum,
-          escalated: true,
-          alert_type: "escalation_max_attempts",
-        })
-        results.escalated++
-        continue
-      }
+      const attemptNum = postClaim?.[0]?.follow_up_count ?? 1
 
       const { data: msgs } = await sb
         .from("customer_sms_logs")
@@ -524,89 +506,64 @@ export async function GET(request: NextRequest) {
         .eq("phone", conv.phone)
         .order("created_at", { ascending: false })
         .limit(5)
-      const recentMsgs = (msgs || [])
-        .reverse()
-        .map((m: any) => `${m.direction}: ${m.body}`)
-
+      const recentMsgs = (msgs || []).reverse().map((m: any) => `${m.direction}: ${m.body}`)
       const gen = await generateRescue("sarah", conv.state, recentMsgs)
 
       if (!gen.ok && gen.alertType === "escalate_required") {
         await alertAdmin(`Sarah needs human eyes: ${conv.phone} stuck in ${conv.state}`)
         await logRescue(sb, {
-          system: "sarah",
-          phone: conv.phone,
-          stuck_state: conv.state,
-          rescue_message: "",
-          attempt_number: attemptNum,
-          escalated: true,
-          alert_type: "escalation_required_state",
+          system: "sarah", phone: conv.phone, stuck_state: conv.state,
+          rescue_message: "", attempt_number: attemptNum,
+          escalated: true, alert_type: "escalation_required_state",
         })
         results.escalated++
-        continue
+        return
       }
 
       if (!gen.ok) {
         await alertAdmin(`Sarah rescue AI failed (${gen.alertType}): ${conv.phone} in ${conv.state}`)
         await logRescue(sb, {
-          system: "sarah",
-          phone: conv.phone,
-          stuck_state: conv.state,
-          rescue_message: "",
-          attempt_number: attemptNum,
-          escalated: true,
-          alert_type: gen.alertType,
-          error_detail: gen.errorDetail,
-          anthropic_attempts: gen.attempts,
+          system: "sarah", phone: conv.phone, stuck_state: conv.state,
+          rescue_message: "", attempt_number: attemptNum,
+          escalated: true, alert_type: gen.alertType,
+          error_detail: gen.errorDetail, anthropic_attempts: gen.attempts,
         })
         results.failed++
-        continue
+        return
       }
 
       const rescueFrom = conv.source_number ? `+1${conv.source_number}` : FROM_CUSTOMER
-      const sent = await sendSMSraw(`+1${conv.phone}`, gen.text, rescueFrom)
-      if (!sent) {
-        await alertAdmin(`Sarah rescue Twilio send failed: ${conv.phone} in ${conv.state}`)
+      const sendResult = await sendOutboundSMS({ to: conv.phone, body: gen.text, from: rescueFrom })
+      if (!sendResult.ok) {
+        await alertAdmin(`Sarah rescue Twilio send failed: ${conv.phone} in ${conv.state} — ${sendResult.error}`)
         await logRescue(sb, {
-          system: "sarah",
-          phone: conv.phone,
-          stuck_state: conv.state,
-          rescue_message: gen.text,
-          attempt_number: attemptNum,
-          escalated: false,
-          alert_type: "twilio_send_failed",
+          system: "sarah", phone: conv.phone, stuck_state: conv.state,
+          rescue_message: gen.text, attempt_number: attemptNum,
+          escalated: false, alert_type: "twilio_send_failed",
           anthropic_attempts: gen.aiUsed ? gen.attempts : null,
         })
         results.failed++
-        continue
+        return
       }
 
       await insertSmsLog(sb, "customer_sms_logs", {
         phone: conv.phone,
-        body: gen.text,
+        body: sendResult.sanitizedBody,
         direction: "outbound",
         message_sid: `rescue_s_${Date.now()}`,
       })
-      await sb
-        .from("customer_conversations")
-        .update({ updated_at: new Date().toISOString() })
-        .eq("phone", conv.phone)
-        .eq("agent_id", conv.agent_id)
 
       await logRescue(sb, {
-        system: "sarah",
-        phone: conv.phone,
-        stuck_state: conv.state,
-        rescue_message: gen.text,
-        attempt_number: attemptNum,
-        escalated: false,
-        alert_type: "success",
+        system: "sarah", phone: conv.phone, stuck_state: conv.state,
+        rescue_message: sendResult.sanitizedBody, attempt_number: attemptNum,
+        escalated: false, alert_type: "success",
         anthropic_attempts: gen.aiUsed ? gen.attempts : null,
       })
       results.sarah_rescued++
-    } catch (e: any) {
-      console.error(`[rescue sarah] Error for ${conv.phone}:`, e.message)
-      results.failed++
-    }
+    }, {
+      source: "rescue-stuck-sarah",
+      onError: async () => { results.failed++; return null },
+    })
   }
 
   console.log(`[rescue] Done: ${JSON.stringify(results)}`)

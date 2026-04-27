@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
-import twilio from "twilio"
+import { sendOutboundSMS } from "@/lib/sms"
+import { withFailClosed } from "@/lib/sms/fail-closed"
 
-
-const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER!
 
 export async function GET(request: NextRequest) {
@@ -74,8 +73,14 @@ export async function GET(request: NextRequest) {
   if (!followUps?.length) return NextResponse.json({ checked: staleCollecting?.length || 0 })
 
   let sent = 0
+  let skipped = 0
   for (const c of followUps) {
-    try {
+    await withFailClosed(c.phone, async () => {
+      // Atomic shared cap+cooldown across rescue-stuck and customer-followup.
+      // Returns false if cap reached, in 24h cooldown, or human owns conversation.
+      const { data: claimed } = await sb.rpc("claim_followup_attempt", { p_phone: c.phone })
+      if (!claimed) { skipped++; return }
+
       const firstName = (c.customer_name || "").split(/\s+/)[0] || "Hey"
       const count = c.follow_up_count || 0
       const hasQuote = !!c.total_price_cents
@@ -98,28 +103,34 @@ export async function GET(request: NextRequest) {
         msg = `${firstName} last check in on the dirt delivery. No worries if plans changed, just text me anytime you need material delivered`
       }
 
-      // Reply FROM the agent's Twilio number to preserve per-agent illusion
       const fromNumber = c.source_number ? `+1${c.source_number}` : CUSTOMER_FROM
-      await twilioClient.messages.create({
-        body: msg, from: fromNumber,
-        to: `+1${c.phone}`,
-      })
+      const sendResult = await sendOutboundSMS({ to: c.phone, body: msg, from: fromNumber })
+      if (!sendResult.ok) {
+        console.error("[followup] send failed:", c.phone, sendResult.error)
+        return
+      }
 
       await sb.from("customer_sms_logs").insert({
-        phone: c.phone, body: msg, direction: "outbound",
+        phone: c.phone, body: sendResult.sanitizedBody, direction: "outbound",
         message_sid: `followup_${Date.now()}`,
       })
 
+      // The RPC already incremented follow_up_count on all rows. Here we only
+      // need to maintain the legacy follow_up_at/state transition for callers
+      // that still read those (canonical row only — RPC's count is the source
+      // of truth for cap enforcement).
       const nextFollowUp = new Date(Date.now() + (count === 0 ? 48 : 72) * 60 * 60 * 1000).toISOString()
       await sb.from("customer_conversations").update({
-        follow_up_count: count + 1,
         follow_up_at: count < 2 ? nextFollowUp : null,
         state: count >= 2 ? "CLOSED" : "FOLLOW_UP",
       }).eq("phone", c.phone).eq("agent_id", c.agent_id)
 
       sent++
-    } catch (e) { console.error("[followup]", e) }
+    }, {
+      source: "customer-followup",
+      onError: async () => null,
+    })
   }
 
-  return NextResponse.json({ checked: followUps.length, sent })
+  return NextResponse.json({ checked: followUps.length, sent, skipped })
 }
