@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { after } from 'next/server'
 import { smsDispatchService } from '@/lib/services/brain.service'
 import { createAdminSupabase } from '@/lib/supabase'
+import { notifyAdminThrottled } from '@/lib/alerts/notify-admin-throttled'
 import crypto from 'crypto'
 
 function validateTwilioSignature(url: string, params: Record<string, string>, signature: string): boolean {
@@ -24,22 +25,13 @@ function getTwilioAuth(): { sid: string; key: string; secret: string } {
 }
 
 async function alertAdminViaTwilio(message: string) {
-  const adminPhone = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
-  if (!adminPhone || process.env.PAUSE_ADMIN_SMS === 'true') return
-  try {
-    const { sid, key, secret } = getTwilioAuth()
-    const from = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
-    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64'),
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ To: `+1${adminPhone}`, From: from, Body: message.slice(0, 300) }).toString(),
-    })
-  } catch (err) {
-    console.error('[admin alert failed]', err)
-  }
+  // Per-driver-phone dedupe — same driver's repeated send-failures collapse,
+  // but failures across different drivers each surface.
+  const phoneMatch = message.match(/(\+?1?\s*\(?(\d{3})\)?[\s\-.]?(\d{3})[\s\-.]?(\d{4}))/)
+  const phone = phoneMatch ? `+1${phoneMatch[2]}${phoneMatch[3]}${phoneMatch[4]}` : 'system'
+  await notifyAdminThrottled('driver_webhook_failure', phone, message.slice(0, 300), {
+    source: 'webhook:driver',
+  })
 }
 
 async function sendViaTwilioAPI(to: string, body: string) {

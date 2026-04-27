@@ -245,16 +245,32 @@ export async function sendDispatchSMS(phone: string, opts: {
 }
 
 export async function sendAdminAlert(message: string) {
-  // FIX: Wrap getTwilioConfig in try/catch — never crash the calling route
-  let adminPhone: string
-  try {
-    const config = getTwilioConfig()
-    adminPhone = config.admin
-  } catch (e: any) {
-    console.error('Twilio config error in sendAdminAlert:', e.message)
-    return { success: false, error: e.message }
+  // Routes through notifyAdminThrottled — DB-side 60min cooldown per (class, phone).
+  // Class is derived from the leading uppercase marker (e.g. "PAYMENT", "RESERVATION
+  // FAILED") or known job-lifecycle keywords ("complete", "cancelled"). Phone is
+  // extracted from the message body when present, else "system" sentinel.
+  const { notifyAdminThrottled } = await import('./alerts/notify-admin-throttled')
+  const alertClass = deriveAdminAlertClass(message)
+  const phone = derivePhoneFromAdminMessage(message)
+  const result = await notifyAdminThrottled(alertClass, phone, message, { source: 'lib/sms' })
+  return { success: result.sent, error: result.sent ? undefined : result.reason }
+}
+
+function deriveAdminAlertClass(msg: string): string {
+  const stripped = msg.replace(/^[^A-Za-z0-9]+/, '')
+  const upperMatch = stripped.match(/^([A-Z][A-Z\s]{2,}?)(?=[:\-(]|[a-z]|$)/)
+  if (upperMatch) {
+    return upperMatch[1].trim().toLowerCase().replace(/\s+/g, '_').slice(0, 60)
   }
-  return sendSMS(adminPhone, `DumpSite.io Alert: ${message}`, 'admin_alert')
+  if (/\bcomplete[d]?\b/i.test(msg)) return 'job_complete'
+  if (/\bcancell?ed\b/i.test(msg)) return 'job_cancelled'
+  return 'admin_alert'
+}
+
+function derivePhoneFromAdminMessage(msg: string): string {
+  const m = msg.match(/(\+?1?\s*\(?(\d{3})\)?[\s\-.]?(\d{3})[\s\-.]?(\d{4}))/)
+  if (m) return `+1${m[2]}${m[3]}${m[4]}`
+  return 'system'
 }
 
 export async function sendSecurityAlert(message: string) {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 import twilio from "twilio"
 
 // ─────────────────────────────────────────────────────────
@@ -36,7 +37,6 @@ export async function GET(req: NextRequest) {
 
   const client = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
   const adminFrom = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-  const adminPhone = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
   const results: { phone: string; ok: boolean; error?: string }[] = []
 
   for (const row of pending) {
@@ -70,13 +70,16 @@ export async function GET(req: NextRequest) {
     } catch (e) {
       const errMsg = (e as any)?.message || "unknown"
       results.push({ phone: row.phone, ok: false, error: errMsg })
-      // Alert admin — message has been pending for 3+ minutes AND retry failed
+      // Alert admin — message has been pending for 3+ minutes AND retry failed.
+      // Per-customer-phone dedup so two simultaneous failures of the same recipient
+      // collapse, but failures across different customers each surface.
       try {
-        await client.messages.create({
-          from: adminFrom,
-          to: `+1${adminPhone}`,
-          body: `RETRY FAILED for ${row.phone}: ${errMsg}. Reply lost: ${row.body.slice(0, 120)}`,
-        })
+        await notifyAdminThrottled(
+          "cron_retry_pending",
+          `+1${row.phone.replace(/\D/g, "").slice(-10)}`,
+          `RETRY FAILED for ${row.phone}: ${errMsg}. Reply lost: ${row.body.slice(0, 120)}`,
+          { source: "cron:retry-pending-sms" },
+        )
       } catch {}
     }
   }

@@ -1,7 +1,6 @@
 import { createAdminSupabase } from '../supabase'
 import { insertSmsLog } from '../sms'
-
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
+import { notifyAdminThrottled } from '@/lib/alerts/notify-admin-throttled'
 
 function getTwilioFrom(): string {
   return process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ''
@@ -238,7 +237,12 @@ Driver: ${driverName} (${driverPhone})
 ${yards} yds — $${payPerLoad}/load
 Reply: APPROVE-${approvalCode} or REJECT-${approvalCode}`
 
-    await twilioSend(formatPhone(ADMIN_PHONE), getTwilioFrom(), message)
+    // bypassCooldown=true — each escalation carries a unique approval code the
+    // admin must reply to, so cooldown would silently swallow critical asks.
+    await notifyAdminThrottled('admin_escalation', driverPhone, message, {
+      source: 'service:approval',
+      bypassCooldown: true,
+    })
   } catch (err: any) {
     console.error('[adminEscalation]', err?.message)
   }

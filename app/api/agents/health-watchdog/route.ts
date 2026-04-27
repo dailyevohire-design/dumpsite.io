@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 
 // ─────────────────────────────────────────────────────────────────
 // SYSTEM HEALTH WATCHDOG — runs every 15 minutes
@@ -8,56 +9,13 @@ import { createAdminSupabase } from "@/lib/supabase"
 // Sends single consolidated SMS alert to admin if issues found.
 // ─────────────────────────────────────────────────────────────────
 
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || "5126161820").replace(/\D/g, "")
-const FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-
 async function sendAlertSMS(body: string) {
-  if (process.env.PAUSE_ADMIN_SMS === "true") {
-    console.log(`[WATCHDOG SMS PAUSED] ${body.slice(0, 80)}`)
-    return
-  }
-
-  const rawSid = process.env.TWILIO_ACCOUNT_SID || ""
-  const apiKey = process.env.TWILIO_API_KEY
-  const apiSecret = process.env.TWILIO_API_SECRET
-  const authToken = process.env.TWILIO_AUTH_TOKEN
-
-  let accountSid: string, authKey: string, authSecret: string
-
-  if (rawSid.startsWith("SK")) {
-    accountSid = process.env.TWILIO_ACCOUNT_SID_REAL || ""
-    authKey = rawSid
-    authSecret = apiSecret || ""
-  } else if (apiKey && apiSecret) {
-    accountSid = rawSid
-    authKey = apiKey
-    authSecret = apiSecret
-  } else if (authToken) {
-    accountSid = rawSid
-    authKey = rawSid
-    authSecret = authToken
-  } else {
-    console.error("[watchdog] No Twilio auth configured")
-    return
-  }
-
-  try {
-    const resp = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: "Basic " + Buffer.from(`${authKey}:${authSecret}`).toString("base64"),
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({ To: `+1${ADMIN_PHONE}`, From: FROM, Body: body }).toString(),
-      }
-    )
-    const data = await resp.json()
-    if (data.error_code) console.error("[watchdog] Twilio error:", data.message)
-  } catch (e: any) {
-    console.error("[watchdog] SMS send failed:", e.message)
-  }
+  // 240min cooldown — health issues persist across many 15min runs; one alert
+  // every 4 hours is plenty when something's stuck.
+  await notifyAdminThrottled("agent_health_watchdog", "system", body, {
+    source: "agent:health-watchdog",
+    cooldownMinutes: 240,
+  })
 }
 
 export async function GET(request: NextRequest) {

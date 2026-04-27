@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import { insertSmsLog, sendOutboundSMS } from "@/lib/sms"
 import { withFailClosed } from "@/lib/sms/fail-closed"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 import Anthropic from "@anthropic-ai/sdk"
 
 // ─────────────────────────────────────────────────────────────────
@@ -16,7 +17,6 @@ import Anthropic from "@anthropic-ai/sdk"
 
 const FROM_DRIVER = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
 const FROM_CUSTOMER = process.env.CUSTOMER_TWILIO_NUMBER || ""
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || "5126161820").replace(/\D/g, "")
 
 const ANTHROPIC_MODEL = "claude-sonnet-4-6"
 const MAX_ANTHROPIC_ATTEMPTS = 3
@@ -50,10 +50,9 @@ function getTwilioAuth() {
 }
 
 async function sendSMSraw(to: string, body: string, from: string): Promise<boolean> {
-  if (process.env.PAUSE_ADMIN_SMS === "true" && to.replace(/\D/g, "").endsWith(ADMIN_PHONE)) {
-    console.log("[rescue] SMS paused for admin")
-    return false
-  }
+  // Admin alerts now route through notifyAdminThrottled (which honors
+  // PAUSE_ADMIN_SMS itself). sendSMSraw is now only used for customer/driver
+  // sends, so no admin-pause check here.
   try {
     const { accountSid, authKey, authSecret } = getTwilioAuth()
     const resp = await fetch(
@@ -80,8 +79,9 @@ async function sendSMSraw(to: string, body: string, from: string): Promise<boole
 }
 
 async function alertAdmin(msg: string) {
-  if (process.env.PAUSE_ADMIN_SMS === "true") return
-  await sendSMSraw(`+1${ADMIN_PHONE}`, `DumpSite.io Rescue: ${msg}`, FROM_DRIVER)
+  await notifyAdminThrottled("agent_rescue_stuck", "system", `DumpSite.io Rescue: ${msg}`, {
+    source: "agent:rescue-stuck",
+  })
 }
 
 // ── State → rescue message maps ──

@@ -3,20 +3,13 @@ import Stripe from 'stripe'
 import { createAdminSupabase } from '@/lib/supabase'
 import { sendOutboundSMS } from '@/lib/sms'
 import { withFailClosed } from '@/lib/sms/fail-closed'
-import twilio from 'twilio'
-
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
-const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || '').replace(/\D/g, '')
+import { notifyAdminThrottled } from '@/lib/alerts/notify-admin-throttled'
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER!
 
 function getStripe(): Stripe {
   const key = process.env.STRIPE_SECRET_KEY
   if (!key) throw new Error('STRIPE_SECRET_KEY is not configured')
   return new Stripe(key, { apiVersion: '2026-02-25.clover' })
-}
-
-function getTwilio() {
-  return twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 }
 
 function normalizePhone(raw: string): string {
@@ -31,16 +24,11 @@ async function sendCustomerSMS(to: string, body: string) {
 }
 
 async function sendAdminSMS(body: string) {
-  if (process.env.PAUSE_ADMIN_SMS === 'true') { console.log(`[SMS PAUSED] Stripe webhook: ${body.slice(0, 80)}`); return }
-  const client = getTwilio()
-  try {
-    await client.messages.create({ body, from: CUSTOMER_FROM, to: `+1${ADMIN_PHONE}` })
-  } catch {}
-  if (ADMIN_PHONE_2) {
-    try {
-      await client.messages.create({ body, from: CUSTOMER_FROM, to: `+1${ADMIN_PHONE_2}` })
-    } catch {}
-  }
+  // Per-customer-phone dedupe so two webhook events for the same Stripe session
+  // collapse, but events for different customers each surface.
+  const phoneMatch = body.match(/(\+?1?\s*\(?(\d{3})\)?[\s\-.]?(\d{3})[\s\-.]?(\d{4}))/)
+  const phone = phoneMatch ? `+1${phoneMatch[2]}${phoneMatch[3]}${phoneMatch[4]}` : "system"
+  await notifyAdminThrottled('stripe_webhook', phone, body, { source: 'webhook:stripe' })
 }
 
 export async function POST(req: NextRequest) {
