@@ -362,11 +362,62 @@ async function getCompletedCount(userId: string): Promise<number> {
 }
 
 // ─────────────────────────────────────────────────────────────
+// ADDRESS RELEASE STATE GATE
+// CLAUDE.md rule: "Never expose dispatch_orders.client_address to drivers — ever"
+// Every code path that sends client_address to a driver must first verify
+// the driver's conversation.state is one of the expectedStates. Reads fresh
+// from DB (not from a passed-in conv object that may be stale).
+// ─────────────────────────────────────────────────────────────
+export class AddressReleaseBlocked extends Error {
+  readonly driverPhone: string
+  readonly currentState: string | null
+  readonly expectedStates: string[]
+  readonly callerName: string
+  readonly orderId: string | null
+  constructor(driverPhone: string, currentState: string | null, expectedStates: string[], callerName: string, orderId: string | null) {
+    super(`AddressReleaseBlocked: driver ${driverPhone} in state ${currentState ?? "null"}, expected one of ${expectedStates.join(",")} (caller=${callerName}, order=${orderId ?? "null"})`)
+    this.name = "AddressReleaseBlocked"
+    this.driverPhone = driverPhone
+    this.currentState = currentState
+    this.expectedStates = expectedStates
+    this.callerName = callerName
+    this.orderId = orderId
+  }
+}
+
+export async function assertAddressReleaseAllowed(
+  driverPhone: string,
+  expectedStates: string[],
+  callerName: string,
+  orderId: string | null,
+): Promise<void> {
+  const sb = createAdminSupabase()
+  const { data: stateRow } = await sb.from("conversations").select("state").eq("phone", driverPhone).maybeSingle()
+  const currentState: string | null = stateRow?.state ?? null
+  if (!currentState || !expectedStates.includes(currentState)) {
+    console.error(`[address-gate] BLOCKED caller=${callerName} driver=${driverPhone} state=${currentState ?? "null"} expected=${expectedStates.join(",")} order=${orderId ?? "null"}`)
+    try {
+      await sb.from("brain_alerts").insert({
+        phone: driverPhone,
+        alert_class: "ADDRESS_RELEASE_BLOCKED",
+        error_message: `Address release blocked: driver in state '${currentState ?? "null"}', expected ${expectedStates.join(" or ")} (order ${orderId ?? "null"})`,
+        source: callerName,
+      })
+    } catch (alertErr) {
+      console.error("[address-gate] failed to write brain_alert:", alertErr)
+    }
+    throw new AddressReleaseBlocked(driverPhone, currentState, expectedStates, callerName, orderId)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // SEND JOB LINK — token, map, owner notify, address
 // ─────────────────────────────────────────────────────────────
 async function sendJobLink(
-  driverPhone: string, conv: any, profile: any, job: any, lang: "en"|"es"
+  driverPhone: string, conv: any, profile: any, job: any, lang: "en"|"es",
+  expectedStates: string[], callerName: string,
 ): Promise<string> {
+  await assertAddressReleaseAllowed(driverPhone, expectedStates, callerName, job?.id ?? null)
   const sb = createAdminSupabase()
   const pay = Math.round(job.driver_pay_cents / 100)
   const city = (job.cities as any)?.name || ""
@@ -1884,9 +1935,17 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
         const dj = await getActiveJob({ active_order_id: result.orderId })
         const dl: "en"|"es" = dp?.preferred_language === "es" ? "es" : "en"
         if (approved && dj) {
-          const addr = await sendJobLink(result.driverPhone, dc, dp, dj, dl)
-          await sendSMS(result.driverPhone, addr)
-          return `Approved. Driver notified`
+          try {
+            const addr = await sendJobLink(result.driverPhone, dc, dp, dj, dl, ["APPROVAL_PENDING", "PHOTO_PENDING"], "admin_approve")
+            await sendSMS(result.driverPhone, addr)
+            return `Approved. Driver notified`
+          } catch (err: any) {
+            if (err?.name === "AddressReleaseBlocked") {
+              await sendAdminAlert(`Driver state mismatch — approval code expired or order reassigned. Driver state: ${err.currentState ?? "null"}. Order: ${err.orderId ?? result.orderId}.`)
+              return `Blocked: driver state ${err.currentState ?? "null"} not in ${err.expectedStates.join(",")}`
+            }
+            throw err
+          }
         } else {
           await sendSMS(result.driverPhone, dl==="es" ? "No se aprobo esa tierra. Sorry bro" : "Yea no go on that dirt. Sorry bro")
           // Release order back to dispatching so other drivers can claim it
@@ -1926,7 +1985,9 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
           try {
             const rid = await atomicClaimJob(result.orderId, result.driverPhone, dp?.user_id || null)
             if (rid && dc) {
-              await saveConv(result.driverPhone, { ...dc, reservation_id: rid, active_order_id: result.orderId })
+              // Explicitly set state=APPROVAL_PENDING so the address-release gate
+              // (assertAddressReleaseAllowed inside sendJobLink) accepts the release.
+              await saveConv(result.driverPhone, { ...dc, state: "APPROVAL_PENDING", reservation_id: rid, active_order_id: result.orderId })
               reservationOk = true
             }
           } catch (e) { console.error("[reservation on approval]", e) }
@@ -1941,8 +2002,16 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
           const dj = await getActiveJob({ active_order_id: result.orderId })
           const dl: "en"|"es" = dp?.preferred_language === "es" ? "es" : "en"
           if (dj) {
-            const addr = await sendJobLink(result.driverPhone, dc, dp, dj, dl)
-            await sendSMS(result.driverPhone, addr)
+            try {
+              const addr = await sendJobLink(result.driverPhone, dc, dp, dj, dl, ["APPROVAL_PENDING"], "customer_approve")
+              await sendSMS(result.driverPhone, addr)
+            } catch (err: any) {
+              if (err?.name === "AddressReleaseBlocked") {
+                await sendAdminAlert(`ADDRESS_RELEASE_BLOCKED on customer approval — driver ${result.driverPhone} state=${err.currentState ?? "null"} expected=${err.expectedStates.join(",")} order=${result.orderId}`)
+                return "Driver state changed — order cannot be confirmed. Our team has been notified."
+              }
+              throw err
+            }
           }
           return "Perfect — driver is on the way"
         }
@@ -1983,7 +2052,7 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
     await saveConv(phone, { ...conv, state: "OTW_PENDING" })
     return lang==="es" ? "10.4 avisame cuando llegues" : "10.4 let me know when you pull up"
   }
-  if (isAddressResend(body) && activeJob?.client_address) {
+  if (isAddressResend(body) && activeJob?.client_address && ["ACTIVE","OTW_PENDING"].includes(convState)) {
     return activeJob.client_address
   }
 
@@ -2202,12 +2271,12 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
     
     // Handle address resend
     if (tpl.action === "RESEND_ADDRESS") {
-      if (activeJob?.client_address) {
+      if (activeJob?.client_address && ["ACTIVE","OTW_PENDING"].includes(convState)) {
         await saveConv(phone, toSaveTpl)
         await logMsg(phone, activeJob.client_address, "outbound", `tpl_${sid}`)
         return activeJob.client_address
       }
-      // No active job or no address — don't leak internal marker
+      // No active job, no address, or driver not yet approved (state not in ACTIVE/OTW_PENDING)
       tpl.response = lang === "es" ? "no tengo una direccion activa, mandame tu ciudad" : "dont have an active address for you, text me your city"
     }
     
