@@ -1,6 +1,10 @@
 "use client"
 import { useState, useEffect, useRef, useCallback } from "react"
+import * as Sentry from "@sentry/nextjs"
 import { createBrowserSupabase } from "@/lib/supabase"
+import { formatPhone } from "@/lib/format-phone"
+
+type ConvSource = "driver" | "customer"
 
 // ═══════════════════════════════════════════════════════
 // TYPES
@@ -95,6 +99,26 @@ const STATE_COLORS: Record<string, string> = {
   DELIVERED: "bg-green-600", CLOSED: "bg-gray-700", OUT_OF_AREA: "bg-gray-700", CANCELED: "bg-gray-700",
 }
 
+const DRIVER_STATE_LABELS: Record<string, string> = {
+  DISCOVERY: "Discovery", GETTING_NAME: "Onboard",
+  ASKING_TRUCK: "Truck", ASKING_ADDRESS: "Address",
+  PHOTO_PENDING: "Photo", APPROVAL_PENDING: "Approval",
+  JOB_PRESENTED: "Job Presented", ACTIVE: "Active",
+  OTW_PENDING: "On The Way",
+  PAYMENT_METHOD_PENDING: "Payment", PAYMENT_ACCOUNT_PENDING: "Pay Account",
+  AWAITING_CUSTOMER_CONFIRM: "Confirm", CLOSED: "Closed",
+}
+
+const DRIVER_STATE_COLORS: Record<string, string> = {
+  DISCOVERY: "bg-indigo-600", GETTING_NAME: "bg-blue-600",
+  ASKING_TRUCK: "bg-purple-600", ASKING_ADDRESS: "bg-purple-600",
+  PHOTO_PENDING: "bg-amber-600", APPROVAL_PENDING: "bg-red-600",
+  JOB_PRESENTED: "bg-cyan-600", ACTIVE: "bg-emerald-600",
+  OTW_PENDING: "bg-cyan-600",
+  PAYMENT_METHOD_PENDING: "bg-orange-600", PAYMENT_ACCOUNT_PENDING: "bg-orange-600",
+  AWAITING_CUSTOMER_CONFIRM: "bg-purple-600", CLOSED: "bg-gray-700",
+}
+
 const FUNNEL_STAGES = [
   { key: "NEW", label: "New Lead", states: ["NEW"] },
   { key: "COLLECTING", label: "Collecting Info", states: ["COLLECTING", "ASKING_DIMENSIONS"] },
@@ -148,9 +172,10 @@ export default function CommandCenterPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedPhone, setSelectedPhone] = useState<string | null>(null)
+  const [selectedSource, setSelectedSource] = useState<ConvSource | null>(null)
   const [funnelFilter, setFunnelFilter] = useState<string[] | null>(null)
   const [convLoading, setConvLoading] = useState(false)
-  const [convDetail, setConvDetail] = useState<{ sms: any[]; conv: any } | null>(null)
+  const [convDetail, setConvDetail] = useState<{ sms: any[]; conv: any; source: ConvSource } | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const conversationRef = useRef<HTMLDivElement>(null)
 
@@ -168,26 +193,39 @@ export default function CommandCenterPage() {
     }
   }, [])
 
-  const loadConversation = useCallback(async (phone: string) => {
+  const loadConversation = useCallback(async (phone: string, source: ConvSource) => {
     setConvLoading(true)
     setConvDetail(null)
+    Sentry.addBreadcrumb({
+      category: "command-center.conversation",
+      message: `loadConversation phone=${phone} source=${source}`,
+      level: "info",
+    })
     try {
       const res = await fetch(
-        `/api/command-center/conversation?phone=${encodeURIComponent(phone)}`,
+        `/api/command-center/conversation?phone=${encodeURIComponent(phone)}&source=${source}`,
         { credentials: "include" }
       )
+      if (!res.ok) {
+        Sentry.captureMessage(`conversation viewer HTTP ${res.status}`, {
+          level: "error",
+          tags: { route: "admin/command-center", phone, source },
+        })
+      }
       const d = await res.json()
       setConvDetail(d)
     } catch (err) {
       console.error("[conv-viewer]", err)
+      Sentry.captureException(err, { tags: { route: "admin/command-center", phone, source } })
     } finally {
       setConvLoading(false)
     }
   }, [])
 
-  const selectConversation = useCallback((phone: string | null) => {
+  const selectConversation = useCallback((phone: string | null, source: ConvSource | null) => {
     setSelectedPhone(phone)
-    if (phone) loadConversation(phone)
+    setSelectedSource(source)
+    if (phone && source) loadConversation(phone, source)
     else setConvDetail(null)
   }, [loadConversation])
 
@@ -197,7 +235,7 @@ export default function CommandCenterPage() {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
   }, [fetchData])
 
-  // Supabase realtime subscriptions
+  // Supabase realtime subscriptions — customer side
   useEffect(() => {
     const sb = createBrowserSupabase()
     const channel = sb.channel("command-center-live")
@@ -205,6 +243,21 @@ export default function CommandCenterPage() {
         fetchData()
       })
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "customer_sms_logs" }, () => {
+        fetchData()
+      })
+      .subscribe()
+
+    return () => { sb.removeChannel(channel) }
+  }, [fetchData])
+
+  // Supabase realtime subscriptions — driver side (independent channel)
+  useEffect(() => {
+    const sb = createBrowserSupabase()
+    const channel = sb.channel("command-center-live-driver")
+      .on("postgres_changes", { event: "*", schema: "public", table: "conversations" }, () => {
+        fetchData()
+      })
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "sms_logs" }, () => {
         fetchData()
       })
       .subscribe()
@@ -221,6 +274,7 @@ export default function CommandCenterPage() {
 
   // ─── Derived data ───
   const customers = data?.activeConversations?.customers || []
+  const drivers = data?.activeConversations?.drivers || []
   const filteredCustomers = funnelFilter
     ? customers.filter((c: any) => funnelFilter.includes(c.state))
     : customers
@@ -228,7 +282,11 @@ export default function CommandCenterPage() {
   // On-demand loaded SMS thread (from /api/command-center/conversation)
   const smsForSelected = convDetail?.sms || []
   const selectedConv = convDetail?.conv
-    || (selectedPhone ? customers.find((c: any) => c.phone === selectedPhone) : null)
+    || (selectedPhone && selectedSource === "customer"
+        ? customers.find((c: any) => c.phone === selectedPhone)
+        : selectedPhone && selectedSource === "driver"
+          ? drivers.find((d: any) => d.phone === selectedPhone)
+          : null)
 
   // Funnel stage counts from stateFunnel API response (preferred) or fallback to customer array
   const funnelCounts: Record<string, number> = {}
@@ -343,57 +401,56 @@ export default function CommandCenterPage() {
           )}
         </div>
 
-        {/* ═══ ROW 2: Funnel + Live Feed ═══ */}
+        {/* ═══ ROW 2: Driver + Customer Live Conversations ═══ */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* Sales Funnel */}
-          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-300">Sales Funnel</h2>
-              {funnelFilter && (
-                <button
-                  onClick={() => setFunnelFilter(null)}
-                  className="text-xs text-gray-300 hover:text-gray-300"
-                >
-                  Clear filter
-                </button>
-              )}
+          {/* Driver Conversations (Jesse) */}
+          <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden flex flex-col" style={{ maxHeight: 480 }}>
+            <div className="px-4 py-3 border-b border-gray-800">
+              <h2 className="text-sm font-semibold text-gray-300">Driver Conversations</h2>
             </div>
             {loading ? (
               <div className="p-4"><SkeletonList rows={8} /></div>
-            ) : data && !data.stateFunnel && !data.activeConversations ? (
-              <SectionError label="Funnel" onRetry={fetchData} />
+            ) : data && !data.activeConversations ? (
+              <SectionError label="Driver Conversations" onRetry={fetchData} />
+            ) : drivers.length === 0 ? (
+              <div className="p-8 text-center text-gray-400 text-sm">No active driver conversations</div>
             ) : (
-              <div className="divide-y divide-gray-800/50">
-                {FUNNEL_STAGES.map((stage, i) => {
-                  const count = funnelCounts[stage.key] || 0
-                  const prevCount = i > 0 ? (funnelCounts[FUNNEL_STAGES[i - 1].key] || 0) : 0
-                  const conversionPct = i > 0 && prevCount > 0
-                    ? Math.round((count / prevCount) * 100)
-                    : null
-                  const isActive = funnelFilter && JSON.stringify(funnelFilter) === JSON.stringify(stage.states)
-                  const maxCount = Math.max(...Object.values(funnelCounts), 1)
-                  const barWidth = Math.max((count / maxCount) * 100, 2)
-
+              <div className="overflow-y-auto flex-1 divide-y divide-gray-800/30">
+                {drivers.map((d: any) => {
+                  const lastMsg = (data?.recentSms || []).find((s: any) => s.phone === d.phone)
+                  const isSelected = selectedPhone === d.phone && selectedSource === "driver"
                   return (
                     <button
-                      key={stage.key}
-                      onClick={() => stage.states.length > 0 ? setFunnelFilter(isActive ? null : stage.states) : null}
-                      className={`w-full px-4 py-2.5 flex items-center justify-between hover:bg-gray-800/50 transition-colors text-left ${isActive ? "bg-gray-800/70" : ""}`}
+                      key={d.phone}
+                      onClick={() => selectConversation(isSelected ? null : d.phone, isSelected ? null : "driver")}
+                      className={`w-full px-4 py-3 flex items-start gap-3 hover:bg-gray-800/40 transition-colors text-left ${isSelected ? "bg-gray-800/60 border-l-2 border-blue-500" : ""}`}
                     >
-                      <div className="flex items-center gap-3 flex-1 min-w-0">
-                        <span className="text-sm text-gray-300 w-24 shrink-0">{stage.label}</span>
-                        <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-blue-600/60 rounded-full transition-all"
-                            style={{ width: `${barWidth}%` }}
-                          />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className="text-sm font-medium text-gray-200 truncate">
+                            {formatPhone(d.phone)}
+                          </span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${DRIVER_STATE_COLORS[d.state] || "bg-gray-700"} text-white shrink-0`}>
+                            {DRIVER_STATE_LABELS[d.state] || d.state}
+                          </span>
+                          {d.needs_human_review && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900 text-red-300 shrink-0">REVIEW</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {d.extracted_city && (
+                            <span className="text-[11px] text-gray-400 shrink-0">{d.extracted_city}</span>
+                          )}
+                          {d.extracted_truck_type && (
+                            <span className="text-[11px] text-gray-400 shrink-0">{d.extracted_truck_type}</span>
+                          )}
+                          {lastMsg && (
+                            <p className="text-xs text-gray-300 truncate">{lastMsg.body}</p>
+                          )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-3 ml-3">
-                        <span className="text-sm font-mono font-semibold text-gray-200 w-8 text-right">{count}</span>
-                        {conversionPct !== null && (
-                          <span className="text-xs text-gray-300 w-10 text-right">{conversionPct}%</span>
-                        )}
+                      <div className="text-right shrink-0">
+                        <div className="text-[10px] text-gray-400">{ago(d.updated_at)}</div>
                       </div>
                     </button>
                   )
@@ -402,7 +459,7 @@ export default function CommandCenterPage() {
             )}
           </div>
 
-          {/* Live Conversation Feed */}
+          {/* Live Conversation Feed (Customer) */}
           <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden flex flex-col" style={{ maxHeight: 480 }}>
             <div className="px-4 py-3 border-b border-gray-800">
               <h2 className="text-sm font-semibold text-gray-300">
@@ -420,17 +477,17 @@ export default function CommandCenterPage() {
               <div className="overflow-y-auto flex-1 divide-y divide-gray-800/30">
                 {filteredCustomers.map((c: any) => {
                   const lastMsg = (data?.recentCustSms || []).find((s: any) => s.phone === c.phone)
-                  const isSelected = selectedPhone === c.phone
+                  const isSelected = selectedPhone === c.phone && selectedSource === "customer"
                   return (
                     <button
                       key={c.phone}
-                      onClick={() => selectConversation(isSelected ? null : c.phone)}
+                      onClick={() => selectConversation(isSelected ? null : c.phone, isSelected ? null : "customer")}
                       className={`w-full px-4 py-3 flex items-start gap-3 hover:bg-gray-800/40 transition-colors text-left ${isSelected ? "bg-gray-800/60 border-l-2 border-blue-500" : ""}`}
                     >
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-0.5">
                           <span className="text-sm font-medium text-gray-200 truncate">
-                            {c.customer_name || c.phone}
+                            {c.customer_name || formatPhone(c.phone)}
                           </span>
                           <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${STATE_COLORS[c.state] || "bg-gray-700"} text-white shrink-0`}>
                             {STATE_LABELS[c.state] || c.state}
@@ -467,9 +524,13 @@ export default function CommandCenterPage() {
             <>
               {/* Conversation Header */}
               <div className="px-4 py-3 border-b border-gray-800 flex flex-wrap items-center gap-x-4 gap-y-1">
-                <span className="font-semibold text-gray-200">{selectedConv?.customer_name || selectedPhone}</span>
-                <span className="text-xs text-gray-300 font-mono">{selectedPhone}</span>
-                {selectedConv && (
+                <span className="font-semibold text-gray-200">
+                  {selectedSource === "driver"
+                    ? formatPhone(selectedPhone)
+                    : (selectedConv?.customer_name || formatPhone(selectedPhone))}
+                </span>
+                <span className="text-xs text-gray-300 font-mono">{formatPhone(selectedPhone)}</span>
+                {selectedConv && selectedSource === "customer" && (
                   <>
                     <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${STATE_COLORS[selectedConv.state] || "bg-gray-700"} text-white`}>
                       {STATE_LABELS[selectedConv.state] || selectedConv.state}
@@ -488,8 +549,24 @@ export default function CommandCenterPage() {
                     )}
                   </>
                 )}
+                {selectedConv && selectedSource === "driver" && (
+                  <>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${DRIVER_STATE_COLORS[selectedConv.state] || "bg-gray-700"} text-white`}>
+                      {DRIVER_STATE_LABELS[selectedConv.state] || selectedConv.state}
+                    </span>
+                    {selectedConv.extracted_city && (
+                      <span className="text-xs text-gray-300">{selectedConv.extracted_city}</span>
+                    )}
+                    {selectedConv.extracted_truck_type && (
+                      <span className="text-xs text-gray-400">{selectedConv.extracted_truck_type}</span>
+                    )}
+                    {selectedConv.extracted_yards && (
+                      <span className="text-xs text-gray-400">{selectedConv.extracted_yards} yards</span>
+                    )}
+                  </>
+                )}
                 <button
-                  onClick={() => selectConversation(null)}
+                  onClick={() => selectConversation(null, null)}
                   className="ml-auto text-xs text-gray-300 hover:text-gray-300"
                 >
                   Close
@@ -536,6 +613,63 @@ export default function CommandCenterPage() {
                 </div>
               )}
             </>
+          )}
+        </div>
+
+        {/* ═══ ROW: Sales Funnel ═══ */}
+        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-gray-300">Sales Funnel</h2>
+            {funnelFilter && (
+              <button
+                onClick={() => setFunnelFilter(null)}
+                className="text-xs text-gray-300 hover:text-gray-300"
+              >
+                Clear filter
+              </button>
+            )}
+          </div>
+          {loading ? (
+            <div className="p-4"><SkeletonList rows={8} /></div>
+          ) : data && !data.stateFunnel && !data.activeConversations ? (
+            <SectionError label="Funnel" onRetry={fetchData} />
+          ) : (
+            <div className="divide-y divide-gray-800/50">
+              {FUNNEL_STAGES.map((stage, i) => {
+                const count = funnelCounts[stage.key] || 0
+                const prevCount = i > 0 ? (funnelCounts[FUNNEL_STAGES[i - 1].key] || 0) : 0
+                const conversionPct = i > 0 && prevCount > 0
+                  ? Math.round((count / prevCount) * 100)
+                  : null
+                const isActive = funnelFilter && JSON.stringify(funnelFilter) === JSON.stringify(stage.states)
+                const maxCount = Math.max(...Object.values(funnelCounts), 1)
+                const barWidth = Math.max((count / maxCount) * 100, 2)
+
+                return (
+                  <button
+                    key={stage.key}
+                    onClick={() => stage.states.length > 0 ? setFunnelFilter(isActive ? null : stage.states) : null}
+                    className={`w-full px-4 py-2.5 flex items-center justify-between hover:bg-gray-800/50 transition-colors text-left ${isActive ? "bg-gray-800/70" : ""}`}
+                  >
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                      <span className="text-sm text-gray-300 w-24 shrink-0">{stage.label}</span>
+                      <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-blue-600/60 rounded-full transition-all"
+                          style={{ width: `${barWidth}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 ml-3">
+                      <span className="text-sm font-mono font-semibold text-gray-200 w-8 text-right">{count}</span>
+                      {conversionPct !== null && (
+                        <span className="text-xs text-gray-300 w-10 text-right">{conversionPct}%</span>
+                      )}
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
           )}
         </div>
 

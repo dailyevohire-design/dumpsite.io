@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+import { insertSmsLog } from "@/lib/sms"
 import twilio from "twilio"
 
 
@@ -77,32 +78,26 @@ export async function GET(request: NextRequest) {
       if (hoursWaiting >= 1 && hoursWaiting < 2 && !alreadySentRecently) {
         // 1 hour — first nudge + notify admin
         if (fromNumber) {
-          await tw.messages.create({
-            body: `Hey ${name}, just following up on the ${total} for your delivery. We accept Venmo, Zelle, or online invoice. Which works best for you`,
-            from: fromNumber, to: `+1${c.phone}`,
-          })
-          await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 1h] First follow-up`, direction: "outbound", message_sid: `pw1h_${Date.now()}` })
+          const body = `Hey ${name}, just following up on the ${total} for your delivery. We accept Venmo, Zelle, or online invoice. Which works best for you`
+          await tw.messages.create({ body, from: fromNumber, to: `+1${c.phone}` })
+          await insertSmsLog(sb, "customer_sms_logs", { phone: c.phone, body, direction: "outbound", message_sid: `pw1h_${Date.now()}` })
         }
         await alertAdmin(`UNPAID 1h: ${c.customer_name} (${c.phone}) owes ${total}`, sb)
         actions++
       } else if (hoursWaiting >= 4 && hoursWaiting < 5 && lastOutHoursAgo >= 2) {
         // 4 hours — second nudge
         if (fromNumber) {
-          await tw.messages.create({
-            body: `${name}, checking in on the payment for your dirt delivery. ${total} via Venmo, Zelle, or we can send an invoice. Let me know`,
-            from: fromNumber, to: `+1${c.phone}`,
-          })
-          await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 4h] Second follow-up`, direction: "outbound", message_sid: `pw4h_${Date.now()}` })
+          const body = `${name}, checking in on the payment for your dirt delivery. ${total} via Venmo, Zelle, or we can send an invoice. Let me know`
+          await tw.messages.create({ body, from: fromNumber, to: `+1${c.phone}` })
+          await insertSmsLog(sb, "customer_sms_logs", { phone: c.phone, body, direction: "outbound", message_sid: `pw4h_${Date.now()}` })
         }
         actions++
       } else if (hoursWaiting >= 24 && hoursWaiting < 25 && lastOutHoursAgo >= 4) {
         // 24 hours — final text + admin escalation
         if (fromNumber) {
-          await tw.messages.create({
-            body: `${name}, last follow-up on the ${total} delivery payment. Let me know how you'd like to handle it`,
-            from: fromNumber, to: `+1${c.phone}`,
-          })
-          await sb.from("customer_sms_logs").insert({ phone: c.phone, body: `[PAYMENT 24h] Final follow-up`, direction: "outbound", message_sid: `pw24h_${Date.now()}` })
+          const body = `${name}, last follow-up on the ${total} delivery payment. Let me know how you'd like to handle it`
+          await tw.messages.create({ body, from: fromNumber, to: `+1${c.phone}` })
+          await insertSmsLog(sb, "customer_sms_logs", { phone: c.phone, body, direction: "outbound", message_sid: `pw24h_${Date.now()}` })
         }
         await alertAdmin(`UNPAID 24h — NEEDS MANUAL COLLECTION: ${c.customer_name} (${c.phone}) owes ${total}`, sb)
         actions++

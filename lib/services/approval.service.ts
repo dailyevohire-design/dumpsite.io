@@ -1,4 +1,5 @@
 import { createAdminSupabase } from '../supabase'
+import { insertSmsLog } from '../sms'
 
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
 
@@ -155,16 +156,16 @@ export async function sendCustomerApprovalRequest(
     console.error('[approval] signed URL error:', signErr?.message)
   }
 
-  // Store approval attempt in DB for tracking
+  const body = `DumpSite: ${driverName} has dirt ready to deliver to your property — ${yardsNeeded} yds. Reply YES to approve or NO to decline.`
+
+  // Store approval attempt in DB for tracking (mirrors what Twilio will receive below)
   try {
-    await supabase.from('sms_logs').insert({
+    await insertSmsLog(supabase, 'sms_logs', {
       phone: customerPhone.replace(/\D/g, ''),
-      body: `[APPROVAL REQUEST to ${customerName}] driver=${driverName} yards=${yardsNeeded} order=${orderId} code=${approvalCode}`,
+      body,
       direction: 'outbound',
     })
   } catch {}
-
-  const body = `DumpSite: ${driverName} has dirt ready to deliver to your property — ${yardsNeeded} yds. Reply YES to approve or NO to decline.`
 
   // Try MMS with photo using same auth as lib/sms.ts
   if (mediaUrlToSend) {

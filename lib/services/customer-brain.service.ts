@@ -1873,14 +1873,23 @@ export async function handleCustomerSMS(sms: { from: string; body: string; messa
   const { conv, readAt } = await getConv(phone, agentId)
   if (conv.opted_out) return ""
 
-  // ── FIX 2: NEEDS_HUMAN_REVIEW — pause button for any conversation ──
-  // When set in Supabase, Sarah goes silent and alerts admin instead.
-  // This gives operators a way to take over a conversation manually.
-  if (conv.needs_human_review === true) {
-    console.log(`[sarah] skipping ${phone} — needs_human_review`)
+  // ── FIX 2: HUMAN-OWNED CONVERSATION — silent gate ──
+  // Belt-and-suspenders to the webhook-level gate: if mode=HUMAN_ACTIVE,
+  // needs_human_review=true, or followup_paused_until is in the future,
+  // Sarah goes silent and alerts admin instead. The webhook should already
+  // catch these, but if a downstream caller bypasses the webhook gate,
+  // this ensures the brain still won't generate.
+  const pausedUntil = (conv as any).followup_paused_until
+  const isPaused = pausedUntil && new Date(pausedUntil).getTime() > Date.now()
+  const isHumanActive = (conv as any).mode === "HUMAN_ACTIVE"
+  if (conv.needs_human_review === true || isHumanActive || isPaused) {
+    const reason = conv.needs_human_review === true ? "needs_human_review"
+      : isHumanActive ? "mode=HUMAN_ACTIVE"
+      : "followup_paused_until in future"
+    console.log(`[sarah] skipping ${phone} — ${reason}`)
     await notifyAdmin(
       `Flagged customer texted: ${conv.customer_name || phone}. ` +
-      `State: ${conv.state || "NEW"}. ` +
+      `State: ${conv.state || "NEW"}. Reason: ${reason}. ` +
       `Message: "${body.slice(0, 200)}". Needs human response.`,
       `human_review_${Date.now()}`
     )
