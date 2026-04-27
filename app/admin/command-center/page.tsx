@@ -1,5 +1,6 @@
 "use client"
 import { useState, useEffect, useRef, useCallback } from "react"
+import * as Sentry from "@sentry/nextjs"
 import { createBrowserSupabase } from "@/lib/supabase"
 import { formatPhone } from "@/lib/format-phone"
 
@@ -195,15 +196,27 @@ export default function CommandCenterPage() {
   const loadConversation = useCallback(async (phone: string, source: ConvSource) => {
     setConvLoading(true)
     setConvDetail(null)
+    Sentry.addBreadcrumb({
+      category: "command-center.conversation",
+      message: `loadConversation phone=${phone} source=${source}`,
+      level: "info",
+    })
     try {
       const res = await fetch(
         `/api/command-center/conversation?phone=${encodeURIComponent(phone)}&source=${source}`,
         { credentials: "include" }
       )
+      if (!res.ok) {
+        Sentry.captureMessage(`conversation viewer HTTP ${res.status}`, {
+          level: "error",
+          tags: { route: "admin/command-center", phone, source },
+        })
+      }
       const d = await res.json()
       setConvDetail(d)
     } catch (err) {
       console.error("[conv-viewer]", err)
+      Sentry.captureException(err, { tags: { route: "admin/command-center", phone, source } })
     } finally {
       setConvLoading(false)
     }

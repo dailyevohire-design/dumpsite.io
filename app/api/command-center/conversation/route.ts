@@ -25,6 +25,10 @@ export async function GET(req: NextRequest) {
 
   const sb = createAdminSupabase()
 
+  // Customer side has duplicate rows per phone (multi-agent). Pick canonical row by
+  // most-recently-updated. Driver side is unique-per-phone but order+limit(1) is
+  // safe for both. Drops .single() which would error on != 1 rows and surface as
+  // a swallowed null → React 500 in the page.
   const [smsResult, convResult] = await Promise.allSettled([
     sb.from(tables.sms)
       .select("id, phone, body, direction, created_at")
@@ -34,11 +38,13 @@ export async function GET(req: NextRequest) {
     sb.from(tables.conv)
       .select("*")
       .eq("phone", phone)
-      .single()
+      .order("updated_at", { ascending: false })
+      .limit(1),
   ])
 
-  const sms = smsResult.status === "fulfilled" ? smsResult.value.data : []
-  const conv = convResult.status === "fulfilled" ? convResult.value.data : null
+  const sms = smsResult.status === "fulfilled" ? (smsResult.value.data || []) : []
+  const convList = convResult.status === "fulfilled" ? (convResult.value.data || []) : []
+  const conv = convList[0] ?? null
 
   return NextResponse.json({ sms, conv, source })
 }

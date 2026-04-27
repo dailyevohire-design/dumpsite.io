@@ -456,10 +456,22 @@ export async function GET() {
       pendingDriverPayTotal: Math.round(pendingPayTotal),
     },
 
-    // Conversations
+    // Conversations — customer side has duplicate rows per phone (multi-agent).
+    // Dedupe to canonical row (most-recently-updated) so the page can use phone
+    // as React key without duplicate-key warnings. The query already orders by
+    // updated_at desc, so the first occurrence per phone is the canonical row.
     activeConversations: {
       drivers: activeDriverConvs || [],
-      customers: activeCustConvs || [],
+      customers: (() => {
+        const seen = new Set<string>()
+        const out: any[] = []
+        for (const c of activeCustConvs || []) {
+          if (seen.has(c.phone)) continue
+          seen.add(c.phone)
+          out.push(c)
+        }
+        return out
+      })(),
     },
 
     // Agent pipeline (the $ tracking)
