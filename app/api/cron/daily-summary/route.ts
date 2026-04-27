@@ -1,11 +1,6 @@
 import { NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
-import twilio from "twilio"
-
-const tw = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
-const FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-const ADMIN = process.env.ADMIN_PHONE || "7134439223"
-const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 
 export async function GET(request: Request) {
   if (!process.env.CRON_SECRET) {
@@ -78,14 +73,12 @@ export async function GET(request: Request) {
     (stuckCustConvs || 0) > 0 ? `⚠ ${stuckCustConvs} stuck customer convos` : "",
   ].filter(Boolean).join("\n")
 
-  if (process.env.PAUSE_ADMIN_SMS === "true") {
-    console.log(`[SMS PAUSED] Daily summary: ${msg.slice(0, 80)}`)
-    return NextResponse.json({ sent: false, paused: true, summary: msg })
-  }
-  try {
-    await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN.replace(/\D/g, "")}` })
-  } catch (e) { console.error("[daily-summary]", e) }
-  if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[daily-summary admin2]", e) } }
+  // bypassCooldown=true — once-a-day digest must always send, even if a previous
+  // alert with the same class fired within 24h.
+  const result = await notifyAdminThrottled("cron_daily_summary", "system", msg, {
+    source: "cron:daily-summary",
+    bypassCooldown: true,
+  })
 
-  return NextResponse.json({ sent: true, summary: msg })
+  return NextResponse.json({ sent: result.sent, reason: result.reason, summary: msg })
 }

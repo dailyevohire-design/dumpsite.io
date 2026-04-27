@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 import twilio from "twilio"
 
 
@@ -14,8 +15,6 @@ import twilio from "twilio"
 // If ANY check fails, admin gets an immediate SMS alert.
 // ─────────────────────────────────────────────────────────
 
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
-const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const HEALTHCHECK_PHONE = "0000000000" // Synthetic phone, never a real customer
 
 export async function GET(req: NextRequest) {
@@ -183,16 +182,13 @@ export async function GET(req: NextRequest) {
     const msg = `SMS SYSTEM HEALTHCHECK FAILED:\n${failures.map((f, i) => `${i + 1}. ${f}`).join("\n")}\n\nCustomer SMS may not be working. Check immediately.`
     console.error("[HEALTHCHECK]", msg)
 
-    // Alert admin via SMS
+    // Alert admin via throttled wrapper — 240min cooldown (this is the noisiest cron;
+    // failure conditions usually persist across multiple 15min runs).
     try {
-      const adminFrom = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-      if (adminFrom && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
-        const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
-        await client.messages.create({ body: msg.slice(0, 1500), from: adminFrom, to: `+1${ADMIN_PHONE}` })
-        if (ADMIN_PHONE_2) {
-          try { await client.messages.create({ body: msg.slice(0, 1500), from: adminFrom, to: `+1${ADMIN_PHONE_2}` }) } catch {}
-        }
-      }
+      await notifyAdminThrottled("cron_sms_healthcheck", "system", msg.slice(0, 1500), {
+        source: "cron:sms-healthcheck",
+        cooldownMinutes: 240,
+      })
     } catch (alertErr) {
       console.error("[HEALTHCHECK] Could not even send admin alert:", alertErr)
     }

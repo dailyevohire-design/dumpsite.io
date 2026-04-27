@@ -11,18 +11,17 @@ import {
 } from "./approval.service"
 import twilio from "twilio"
 import crypto from "crypto"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 
 const anthropic = new Anthropic()
 const _ADMIN_PHONE_RAW = (process.env.ADMIN_PHONE || "").replace(/\D/g, "")
 if (_ADMIN_PHONE_RAW.length < 10) {
   throw new Error("ADMIN_PHONE env var missing or invalid (must normalize to 10+ digits)")
 }
+// Used at lines below to detect inbound from admin (admin commands), not for sending.
 const ADMIN_PHONE = _ADMIN_PHONE_RAW
-const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 // Per-phone in-process lock — serializes concurrent inbound from same driver
 const _phoneLocks = new Map<string, Promise<string>>()
-// sendAdminAlert dedup — hash(body+to) → expiry timestamp
-const _adminAlertDedup = new Map<string, number>()
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"
 const LARGE_JOB_YARDS = 500
 const DFW_CITIES = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale","Venus","Ponder","Justin","Boyd","Blum","Gainesville","Hutchins","Everman","Hillsboro","Matador","Elizabeth"]
@@ -304,20 +303,36 @@ async function sendSMS(toPhone: string, body: string) {
     await client.messages.create({ body, from: from!, to: e164(toPhone) })
   } catch (e: any) { console.error("[sendSMS]", e?.message) }
 }
+// Thin wrapper around notifyAdminThrottled. Preserves the legacy
+// sendAdminAlert(msg) signature so the 19 call sites in this file don't need
+// to be touched — alert_class is derived from the leading uppercase marker
+// (or known lowercase keywords like "complete"/"cancelled"), and any embedded
+// driver/customer phone is extracted. 60-min cooldown per (alert_class, phone)
+// is enforced DB-side; the in-memory 60-second map is removed (DB cooldown is
+// strictly stricter and is shared across cold starts and regions).
 async function sendAdminAlert(msg: string) {
-  if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Driver admin: ${msg.slice(0, 80)}`); return }
-  // Dedup: skip if same body sent in last 60s
-  const key = crypto.createHash("sha1").update(`${ADMIN_PHONE}:${msg}`).digest("hex")
-  const now = Date.now()
-  // GC stale entries
-  for (const [k, exp] of _adminAlertDedup) { if (exp < now) _adminAlertDedup.delete(k) }
-  if (_adminAlertDedup.has(key)) {
-    console.log(`[adminAlert dedup] skipping duplicate within 60s: ${msg.slice(0, 60)}`)
-    return
+  const alertClass = deriveJesseAlertClass(msg)
+  const phone = derivePhoneFromAlertMsg(msg)
+  await notifyAdminThrottled(alertClass, phone, msg, { source: "jesse" })
+}
+
+function deriveJesseAlertClass(msg: string): string {
+  // Strip leading emoji / non-alphanum so the regex sees the marker.
+  const stripped = msg.replace(/^[^A-Za-z0-9]+/, "")
+  const upperMatch = stripped.match(/^([A-Z][A-Z\s]{2,}?)(?=[:\-(]|[a-z]|$)/)
+  if (upperMatch) {
+    return upperMatch[1].trim().toLowerCase().replace(/\s+/g, "_").slice(0, 60)
   }
-  _adminAlertDedup.set(key, now + 60_000)
-  await sendSMS(ADMIN_PHONE, msg)
-  if (ADMIN_PHONE_2) { try { await sendSMS(ADMIN_PHONE_2, msg) } catch {} }
+  // Lowercase fallbacks for "${jobNum} complete" / "${jobNum} cancelled" patterns.
+  if (/\bcomplete[d]?\b/i.test(msg)) return "job_complete"
+  if (/\bcancell?ed\b/i.test(msg)) return "job_cancelled"
+  return "jesse_unclassified"
+}
+
+function derivePhoneFromAlertMsg(msg: string): string {
+  const m = msg.match(/(\+?1?\s*\(?(\d{3})\)?[\s\-.]?(\d{3})[\s\-.]?(\d{4}))/)
+  if (m) return `+1${m[2]}${m[3]}${m[4]}`
+  return "system"
 }
 async function getActiveJob(conv: any) {
   if (!conv?.active_order_id) return null
@@ -2212,7 +2227,7 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
     if (tpl.action === "COLLECT_PAYMENT") {
       const method = enriched.job_state || conv?.job_state || "zelle"
       await savePaymentInfo(phone, method, body.trim())
-      await sendSMS(ADMIN_PHONE, `PAYMENT: ${phone} — ${method} — ${body.trim()}${enriched.pending_pay_dollars ? " — $"+enriched.pending_pay_dollars : ""}`)
+      await sendAdminAlert(`PAYMENT: ${phone} — ${method} — ${body.trim()}${enriched.pending_pay_dollars ? " — $"+enriched.pending_pay_dollars : ""}`)
     }
 
     // Handle payment re-ask with escalating human-like messages

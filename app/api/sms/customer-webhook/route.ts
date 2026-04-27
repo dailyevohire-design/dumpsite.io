@@ -5,8 +5,8 @@ import { createAdminSupabase } from "@/lib/supabase"
 import { sanitizeOutbound } from "@/lib/sms"
 import { withFailClosed } from "@/lib/sms/fail-closed"
 import crypto from "crypto"
-import twilio from "twilio"
 import { classifyTwilioError, shouldFallBackToDefault, type ClassifiedError } from "@/lib/services/twilio-errors"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 
 const twimlEmpty = () =>
   new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } })
@@ -15,9 +15,6 @@ const twimlFailClosed = () =>
     '<Response><Message>Got your message — I\'ll have someone follow up with you shortly.</Message></Response>',
     { status: 200, headers: { "Content-Type": "text/xml" } },
   )
-
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
-const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 
 function validateTwilioSignature(url: string, params: Record<string, string>, signature: string): boolean {
   const authToken = process.env.TWILIO_AUTH_TOKEN
@@ -42,19 +39,16 @@ function getTwilioAuth(): { sid: string; key: string; secret: string } {
 }
 
 async function alertAdmin(msg: string) {
-  if (process.env.PAUSE_ADMIN_SMS === "true") return
-  const adminFrom = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-  if (!adminFrom) return
-  const client = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
-  try { await client.messages.create({ body: msg, from: adminFrom, to: `+1${ADMIN_PHONE}` }) } catch (e) {
-    console.error("[alertAdmin] FAILED to alert primary admin:", (e as any)?.message)
-    // Log to DB as last resort so we have a record
+  // Per-customer-phone dedupe — same customer's repeated webhook errors
+  // collapse, but errors across different customers each surface.
+  const phoneMatch = msg.match(/(\+?1?\s*\(?(\d{3})\)?[\s\-.]?(\d{3})[\s\-.]?(\d{4}))/)
+  const phone = phoneMatch ? `+1${phoneMatch[2]}${phoneMatch[3]}${phoneMatch[4]}` : "system"
+  const result = await notifyAdminThrottled("customer_webhook_failure", phone, msg, {
+    source: "webhook:customer",
+  })
+  if (!result.sent && result.reason === "send_failed") {
+    // Last-resort DB log so the failure is recorded somewhere
     try { await createAdminSupabase().from("customer_sms_logs").insert({ phone: "system", body: `ADMIN ALERT FAILED: ${msg.slice(0, 300)}`, direction: "error", message_sid: `alert_fail_${Date.now()}` }) } catch {}
-  }
-  if (ADMIN_PHONE_2) {
-    try { await client.messages.create({ body: msg, from: adminFrom, to: `+1${ADMIN_PHONE_2}` }) } catch (e) {
-      console.error("[alertAdmin] FAILED to alert secondary admin:", (e as any)?.message)
-    }
   }
 }
 

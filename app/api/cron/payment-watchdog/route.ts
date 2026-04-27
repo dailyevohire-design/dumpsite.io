@@ -1,27 +1,28 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
 import { insertSmsLog } from "@/lib/sms"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 import twilio from "twilio"
 
 
 const tw = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER || ""
-const ADMIN_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-const ADMIN = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
-const ADMIN_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
+
+// Phone is extracted from msg when present, else "system" sentinel — collapses
+// dedupe to per-class for cron-style alerts that don't have a customer phone.
+function phoneFromMsg(msg: string): string {
+  const m = msg.match(/(\+?1?\s*\(?(\d{3})\)?[\s\-.]?(\d{3})[\s\-.]?(\d{4}))/)
+  return m ? `+1${m[2]}${m[3]}${m[4]}` : "system"
+}
 
 async function alertAdmin(msg: string, sb?: ReturnType<typeof createAdminSupabase>) {
-  if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Payment alert: ${msg.slice(0, 80)}`); return }
-  try {
-    await tw.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN}` })
-  } catch (e) {
-    console.error("[pw-alert]", e)
-    // Persist to retry queue so cron can re-attempt next run
-    if (sb) {
-      try { await sb.from("failed_admin_alerts").insert({ body: msg, attempts: 1, last_attempted_at: new Date().toISOString() }) } catch {}
-    }
+  const result = await notifyAdminThrottled("cron_payment_watchdog", phoneFromMsg(msg), msg, {
+    source: "cron:payment-watchdog",
+  })
+  if (!result.sent && result.reason === "send_failed" && sb) {
+    // Persist for retry on next cron run.
+    try { await sb.from("failed_admin_alerts").insert({ body: msg, attempts: 1, last_attempted_at: new Date().toISOString() }) } catch {}
   }
-  if (ADMIN_2) { try { await tw.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_2}` }) } catch (e) { console.error("[pw-alert admin2]", e) } }
 }
 
 export async function GET(request: NextRequest) {
@@ -38,10 +39,14 @@ export async function GET(request: NextRequest) {
   try {
     const { data: failed } = await sb.from("failed_admin_alerts").select("id, body, attempts").order("created_at", { ascending: true }).limit(20)
     for (const f of failed || []) {
-      try {
-        await tw.messages.create({ body: f.body, from: ADMIN_FROM, to: `+1${ADMIN}` })
+      // bypassCooldown=true on retry — these are previously-failed sends, not new alerts.
+      const r = await notifyAdminThrottled("cron_payment_watchdog_retry", phoneFromMsg(f.body), f.body, {
+        source: "cron:payment-watchdog:retry",
+        bypassCooldown: true,
+      })
+      if (r.sent) {
         await sb.from("failed_admin_alerts").delete().eq("id", f.id)
-      } catch (e) {
+      } else {
         await sb.from("failed_admin_alerts").update({
           attempts: (f.attempts || 0) + 1,
           last_attempted_at: new Date().toISOString(),

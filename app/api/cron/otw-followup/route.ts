@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { createAdminSupabase } from "@/lib/supabase"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 
 
 function getTwilioAuth(): { sid: string; key: string; secret: string } {
@@ -35,7 +36,6 @@ export async function GET(request: Request) {
     return new Response("Unauthorized", { status: 401 })
   }
   const sb = createAdminSupabase()
-  const adminPhone = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
   let notified = 0, escalated = 0
 
   // FIX #6: Driver goes dark — check ACTIVE jobs with no update
@@ -68,7 +68,7 @@ export async function GET(request: Request) {
       await sb.from("sms_logs").insert({ phone: d.phone, body: "hey you still coming? if not lmk so I can find someone else", direction: "outbound" })
 
       // Alert admin
-      await sendSMS(adminPhone, `STALE JOB: ${name} (${d.phone}) no response in 2+ hours. Order: ${d.active_order_id || "unknown"}`)
+      await notifyAdminThrottled("cron_otw_stale_job", `+1${d.phone.replace(/\D/g,"").slice(-10)}`, `STALE JOB: ${name} (${d.phone}) no response in 2+ hours. Order: ${d.active_order_id || "unknown"}`, { source: "cron:otw-followup" })
 
       // Notify site owner if we have the order
       if (d.active_order_id) {
@@ -108,7 +108,7 @@ export async function GET(request: Request) {
     // 15 min — alert admin
     if (minutes >= 15 && minutes < 20) {
       const { data: profile } = await sb.from("driver_profiles").select("first_name").eq("phone", c.phone).maybeSingle()
-      await sendSMS(adminPhone, `APPROVAL TIMEOUT: Customer not responding for ${Math.round(minutes)}min. Driver: ${profile?.first_name || c.phone}. Order: ${c.pending_approval_order_id}`)
+      await notifyAdminThrottled("cron_otw_approval_timeout", `+1${c.phone.replace(/\D/g,"").slice(-10)}`, `APPROVAL TIMEOUT: Customer not responding for ${Math.round(minutes)}min. Driver: ${profile?.first_name || c.phone}. Order: ${c.pending_approval_order_id}`, { source: "cron:otw-followup" })
 
       // Tell driver we're still working on it
       await sendSMS(c.phone, "still waiting on them, give me a few more minutes")

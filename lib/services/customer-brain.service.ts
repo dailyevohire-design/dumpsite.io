@@ -7,12 +7,11 @@ import twilio from "twilio"
 import { extractCustomerName } from "./customer-name"
 import { notifyRepDashboard } from "@/lib/analytics-notify"
 import { geocode } from "../geo/geocode"
+import { notifyAdminThrottled } from "@/lib/alerts/notify-admin-throttled"
 
 const anthropic = new Anthropic()
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!)
 const CUSTOMER_FROM = process.env.CUSTOMER_TWILIO_NUMBER || process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || "7134439223").replace(/\D/g, "")
-const ADMIN_PHONE_2 = (process.env.ADMIN_PHONE_2 || "").replace(/\D/g, "")
 const LARGE_ORDER = 500
 // Sentinel "Main" sales agent for conversations without a resolved agent
 // (matches the sentinel row inserted by the agent_isolation migration)
@@ -870,8 +869,6 @@ export async function resolveReusableDispatchOrderId(
   return null
 }
 
-const ADMIN_FROM = process.env.TWILIO_FROM_NUMBER_2 || process.env.TWILIO_FROM_NUMBER || ""
-
 // Pending-action types — keep in sync with the command center's stuck panel.
 // Each one represents a stuck path the brain handed off to a human.
 type PendingActionType =
@@ -901,24 +898,37 @@ async function flagPendingAction(phone: string, type: PendingActionType, message
   }
 }
 
+// Thin wrapper around notifyAdminThrottled. Preserves the legacy
+// notifyAdmin(msg, sid) signature so the 22 call sites in this file
+// don't need to be touched — sid is parsed to derive alert_class and the
+// embedded customer phone is extracted from the message body where present.
+// 60-min cooldown per (alert_class, phone) is enforced DB-side.
 async function notifyAdmin(msg: string, sid: string) {
-  if (process.env.PAUSE_ADMIN_SMS === "true") { console.log(`[SMS PAUSED] Admin: ${msg.slice(0, 80)}`); return }
-  // Use driver number for admin alerts so replies don't hit customer webhook
-  try {
-    await twilioClient.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_PHONE}` })
-    await logMsg(ADMIN_PHONE, msg, "outbound", `adm_${sid}`)
-  } catch (e) {
-    console.error("[notifyAdmin] FAILED to send to primary:", (e as any)?.message)
-    // DB fallback — at least log it somewhere
-    try { await createAdminSupabase().from("customer_sms_logs").insert({ phone: "system", body: `ADMIN ALERT UNSENT: ${msg.slice(0, 400)}`, direction: "error", message_sid: `admin_fail_${sid}` }) } catch {}
+  const alertClass = deriveAlertClassFromSid(sid, msg)
+  const phone = derivePhoneFromMsg(msg)
+  await notifyAdminThrottled(alertClass, phone, msg, { source: "sarah" })
+}
+
+// sid prefix → alert_class. Two patterns coexist in callers:
+//   1. "<class>_<Date.now()>"  → class = snake_case prefix
+//   2. raw Twilio SID (SM... / MM...) → derive from message header (CAPS:)
+function deriveAlertClassFromSid(sid: string, msg: string): string {
+  if (!sid.startsWith("SM") && !sid.startsWith("MM")) {
+    const tsMatch = sid.match(/^(.+)_\d{10,}$/)
+    if (tsMatch) return tsMatch[1]
   }
-  if (ADMIN_PHONE_2) {
-    try {
-      await twilioClient.messages.create({ body: msg, from: ADMIN_FROM, to: `+1${ADMIN_PHONE_2}` })
-    } catch (e) {
-      console.error("[notifyAdmin] FAILED to send to secondary:", (e as any)?.message)
-    }
-  }
+  const headerMatch = msg.match(/^([A-Z][A-Z\s]{2,})[:\-]/)
+  if (headerMatch) return headerMatch[1].trim().toLowerCase().replace(/\s+/g, "_")
+  return "sarah_unclassified"
+}
+
+// Extract a customer phone from a free-form admin alert message.
+// Returns "system" sentinel when no phone is embedded — this collapses
+// dedupe to per-class for non-conversation alerts.
+function derivePhoneFromMsg(msg: string): string {
+  const m = msg.match(/(\+?1?\s*\(?(\d{3})\)?[\s\-.]?(\d{3})[\s\-.]?(\d{4}))/)
+  if (m) return `+1${m[2]}${m[3]}${m[4]}`
+  return "system"
 }
 
 async function createDispatchOrder(conv: any, phone: string): Promise<string | null> {

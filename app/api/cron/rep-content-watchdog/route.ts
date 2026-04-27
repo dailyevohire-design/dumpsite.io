@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { notifyAdminThrottled } from '@/lib/alerts/notify-admin-throttled';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -8,10 +9,6 @@ const INTERNAL_TOKEN = process.env.INTERNAL_SERVICE_TOKEN!;
 const FDNM_URL = process.env.FDNM_URL ?? 'https://www.filldirtnearme.net';
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID!;
-const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN!;
-const TWILIO_FROM = process.env.TWILIO_FROM_NUMBER_2!;
-const ADMIN_PHONE = '+17134439223';
 
 export async function GET(req: NextRequest) {
   if (req.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -58,14 +55,6 @@ export async function GET(req: NextRequest) {
 
 async function pageAdmin(body: string) {
   try {
-    const auth = Buffer.from(`${TWILIO_SID}:${TWILIO_TOKEN}`).toString('base64');
-    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${auth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ From: TWILIO_FROM, To: ADMIN_PHONE, Body: body.slice(0, 1500) }),
-    });
+    await notifyAdminThrottled('cron_rep_content', 'system', body, { source: 'cron:rep-content-watchdog' });
   } catch { /* swallow — alert path must never throw */ }
 }
