@@ -22,6 +22,9 @@ if (_ADMIN_PHONE_RAW.length < 10) {
 const ADMIN_PHONE = _ADMIN_PHONE_RAW
 // Per-phone in-process lock — serializes concurrent inbound from same driver
 const _phoneLocks = new Map<string, Promise<string>>()
+// GETTING_COMPANY parse-failure retry counter — phone → consecutive failures.
+// Module-scope (resets on deploy). Two failures and we accept NULL and advance.
+const _companyRetryCount = new Map<string, number>()
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://dumpsite.io"
 const LARGE_JOB_YARDS = 500
 const DFW_CITIES = ["Dallas","Fort Worth","Arlington","Plano","Frisco","McKinney","Allen","Garland","Irving","Mesquite","Carrollton","Richardson","Lewisville","Denton","Mansfield","Grand Prairie","Euless","Bedford","Hurst","Grapevine","Southlake","Keller","Colleyville","Flower Mound","Little Elm","Celina","Prosper","Anna","Blue Ridge","Rockwall","Rowlett","Sachse","Wylie","Waxahachie","Midlothian","Cleburne","Burleson","Joshua","Cedar Hill","DeSoto","Lancaster","Duncanville","Ferris","Red Oak","Forney","Kaufman","Terrell","Royse City","Fate","Heath","Sunnyvale","Coppell","Addison","Farmers Branch","North Richland Hills","Richland Hills","Watauga","Haltom City","Saginaw","Azle","Weatherford","Granbury","Sherman","Denison","Gordonville","Corsicana","Ennis","Crowley","Glenn Heights","Kennedale","Venus","Ponder","Justin","Boyd","Blum","Gainesville","Hutchins","Everman","Hillsboro","Matador","Elizabeth"]
@@ -546,6 +549,95 @@ function validateBeforeSend(response: string, driverAddr: string|null, state: st
 // These handle the predictable 80% of messages
 // ─────────────────────────────────────────────────────────────
 function pick(arr: string[]): string { return arr[Math.floor(Math.random() * arr.length)] }
+
+// ─────────────────────────────────────────────────────────────
+// GETTING_COMPANY — capture driver's company name (optional)
+// Inserted between GETTING_NAME and DISCOVERY in the onboarding flow.
+// Asks once. Accepts skip ("no", "just me", "independent", "yo" in Spanish).
+// Two unparseable answers and we accept NULL and advance — never blocks.
+// ─────────────────────────────────────────────────────────────
+export function parseCompanyResponse(body: string): { kind: "skip" | "name" | "gibberish"; value: string | null } {
+  const raw = (body || "").trim().replace(/\s+/g, " ")
+  if (!raw) return { kind: "gibberish", value: null }
+  const capped = raw.length > 100 ? raw.slice(0, 100).trim() : raw
+  // Exact whole-string skip patterns. English + Spanish refusals.
+  const skipExact = /^(no|none|n\/a|na|nothing|just me|me|myself|independent|solo|owner[- ]?op(erator)?|self|nope|skip|n|yo|ninguna|ninguno|nadie|por mi cuenta|por mi mismo)$/i
+  if (skipExact.test(capped)) return { kind: "skip", value: null }
+  // 1-3 word answers containing unambiguous skip keywords. Multi-char only,
+  // to avoid false positives on real company names ("Inc", "Co", etc.).
+  const wordCount = capped.split(/\s+/).length
+  if (wordCount <= 3) {
+    const skipKeywords = /\b(independent|owner[- ]?op|just me|myself|solo|por mi cuenta|por mi mismo|nothing|skip)\b/i
+    if (skipKeywords.test(capped)) return { kind: "skip", value: null }
+  }
+  if (capped.length < 2) return { kind: "gibberish", value: null }
+  if (/^[\d\s\-_.,!?]+$/.test(capped)) return { kind: "gibberish", value: null }
+  return { kind: "name", value: capped }
+}
+
+function buildPostNameGreeting(
+  first: string, yds: number | null, city: string | null, isAfterHours: boolean, lang: "en"|"es",
+): string {
+  if (yds || city) {
+    const detail = [yds ? `${yds} yds` : null, city ? `in ${city}` : null].filter(Boolean).join(" ")
+    if (isAfterHours) {
+      return lang==="es"
+        ? `${first} te tengo con ${detail}. Estamos cerrados ahorita, te busco algo en la manana`
+        : `${first} got you with ${detail}. I'm off for the night, I'll line something up in the morning`
+    }
+    return lang==="es"
+      ? `${first} te tengo con ${detail}. dejame ver que tengo cerca`
+      : `${first} got you with ${detail}. lemme see what I got close by`
+  }
+  if (isAfterHours) {
+    return lang==="es"
+      ? `${first} te tengo. Estamos cerrados ahorita, mandame texto en la manana`
+      : `${first} got you. I'm off for the night, text me in the morning and I'll get you set up`
+  }
+  return lang==="es" ? `${first} te tengo. Tienes tierra hoy` : `${first} got you. You got dirt today`
+}
+
+export async function handleGettingCompany(
+  phone: string, body: string, conv: any, firstName: string, isAfterHours: boolean, lang: "en"|"es",
+): Promise<string> {
+  const parsed = parseCompanyResponse(body)
+  const advance = async (companyValue: string | null): Promise<string> => {
+    _companyRetryCount.delete(phone)
+    try {
+      await createAdminSupabase().rpc("update_driver_company", { p_phone: phone, p_company_name: companyValue })
+    } catch (e: any) {
+      console.error("[GETTING_COMPANY] update_driver_company RPC failed:", e?.message)
+    }
+    await saveConv(phone, { ...conv, state: "DISCOVERY" })
+    return buildPostNameGreeting(firstName, conv?.extracted_yards ?? null, conv?.extracted_city ?? null, isAfterHours, lang)
+  }
+  if (parsed.kind === "skip") return await advance(null)
+  if (parsed.kind === "name") return await advance(parsed.value)
+  // gibberish — re-ask once, then accept NULL on second miss
+  const retries = (_companyRetryCount.get(phone) ?? 0) + 1
+  _companyRetryCount.set(phone, retries)
+  if (retries >= 2) {
+    try {
+      await createAdminSupabase().from("brain_alerts").insert({
+        phone,
+        alert_class: "COMPANY_CAPTURE_FAILED",
+        error_message: `Two unparseable answers; advancing with NULL company. Last input: "${body.slice(0, 100)}"`,
+        source: "getting_company",
+      })
+    } catch (alertErr) {
+      console.error("[GETTING_COMPANY] alert insert failed:", alertErr)
+    }
+    return await advance(null)
+  }
+  return lang==="es"
+    ? "perdon, con qué empresa? (o di 'yo' si trabajas independiente)"
+    : "my bad — what company you with? (or just say 'me' if independent)"
+}
+
+export function _resetCompanyRetryForTesting(phone?: string): void {
+  if (phone) _companyRetryCount.delete(phone)
+  else _companyRetryCount.clear()
+}
 
 function tryTemplate(
   body: string, lower: string, hasPhoto: boolean,
@@ -1835,25 +1927,24 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
     const first = parts[0]
     const last = parts.slice(1).join(" ") || ""
     await createAdminSupabase().rpc("create_sms_driver", { p_phone: phone, p_first_name: first, p_last_name: last })
-    await saveConv(phone, { state: "DISCOVERY" })
+    // Advance to GETTING_COMPANY. The post-name greeting (with yds/city ack and
+    // after-hours variants) fires after the company step completes — see
+    // handleGettingCompany / buildPostNameGreeting. Keeps each driver to exactly
+    // one "got you" greeting in the onboarding sequence.
+    await saveConv(phone, { ...conv, state: "GETTING_COMPANY" })
     await logEvent("CONTACT_CREATED", { phone, firstName: first })
-    // If we already extracted load info during the previous turn, acknowledge and move forward
-    const yds = conv?.extracted_yards
-    const city = conv?.extracted_city
-    if (yds || city) {
-      const detail = [yds ? `${yds} yds` : null, city ? `in ${city}` : null].filter(Boolean).join(" ")
-      if (isAfterHours) {
-        return lang==="es" ? `${first} te tengo con ${detail}. Estamos cerrados ahorita, te busco algo en la manana` : `${first} got you with ${detail}. I'm off for the night, I'll line something up in the morning`
-      }
-      return lang==="es" ? `${first} te tengo con ${detail}. dejame ver que tengo cerca` : `${first} got you with ${detail}. lemme see what I got close by`
-    }
-    if (isAfterHours) {
-      return lang==="es" ? `${first} te tengo. Estamos cerrados ahorita, mandame texto en la manana` : `${first} got you. I'm off for the night, text me in the morning and I'll get you set up`
-    }
-    return lang==="es" ? `${first} te tengo. Tienes tierra hoy` : `${first} got you. You got dirt today`
+    return lang==="es"
+      ? "Con qué empresa? (o di 'yo' si trabajas independiente)"
+      : "What company you with? (or just say 'me' if independent)"
   }
 
   const firstName = profile.first_name || "Driver"
+
+  // ── GETTING_COMPANY — capture company name once, then advance to DISCOVERY ──
+  // Runs before the after-hours check so mid-flow drivers always get an answer.
+  if (convState === "GETTING_COMPANY") {
+    return await handleGettingCompany(phone, body, conv, firstName, isAfterHours, lang)
+  }
 
   // ── AFTER HOURS — don't start new flows or send customer approvals at night ──
   // Allow active jobs and payment flows to continue (driver may be finishing late)
@@ -1964,7 +2055,7 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
   if (isYes || isNo) {
     // Check if this phone has an active DRIVER conversation — if so, treat as driver, not customer
     const driverConv = conv
-    const hasActiveDriverFlow = driverConv && ["ACTIVE","OTW_PENDING","PHOTO_PENDING","APPROVAL_PENDING","JOB_PRESENTED","ASKING_TRUCK","ASKING_TRUCK_COUNT","ASKING_ADDRESS","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_PAYMENT_COLLECTION"].includes(driverConv.state)
+    const hasActiveDriverFlow = driverConv && ["ACTIVE","OTW_PENDING","PHOTO_PENDING","APPROVAL_PENDING","JOB_PRESENTED","GETTING_COMPANY","ASKING_TRUCK","ASKING_TRUCK_COUNT","ASKING_ADDRESS","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","AWAITING_PAYMENT_COLLECTION"].includes(driverConv.state)
 
     const sb = createAdminSupabase()
     const { data: clientOrder } = await sb.from("dispatch_orders").select("id, client_phone")
@@ -2373,7 +2464,7 @@ async function _handleConversationInner(sms: IncomingSMS): Promise<string> {
   brain.response = response
 
   // ── PERSIST (with state validation) ──────────────────────────
-  const VALID_STATES = new Set(["DISCOVERY","GETTING_NAME","ASKING_TRUCK","ASKING_TRUCK_COUNT","ASKING_ADDRESS","JOB_PRESENTED","PHOTO_PENDING","APPROVAL_PENDING","ACTIVE","OTW_PENDING","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","CLOSED"])
+  const VALID_STATES = new Set(["DISCOVERY","GETTING_NAME","GETTING_COMPANY","ASKING_TRUCK","ASKING_TRUCK_COUNT","ASKING_ADDRESS","JOB_PRESENTED","PHOTO_PENDING","APPROVAL_PENDING","ACTIVE","OTW_PENDING","PAYMENT_METHOD_PENDING","PAYMENT_ACCOUNT_PENDING","CLOSED"])
   const toSave: Record<string,any> = { ...enriched }
   // Only accept state from brain if it's valid AND the transition makes sense
   if (brain.updates.state && VALID_STATES.has(brain.updates.state)) {
