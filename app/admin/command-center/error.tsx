@@ -31,20 +31,18 @@ export default function CommandCenterError({
         <p style={{ marginTop: 12, color: "#9a9a9a", fontSize: 14 }}>
           The error has been captured in Sentry. You can retry, or refresh the page.
         </p>
-        <pre style={{
-          marginTop: 16,
-          padding: 12,
-          background: "#0a0a0a",
-          border: "1px solid #2a2a2a",
-          borderRadius: 4,
-          fontSize: 12,
-          color: "#c0c0c0",
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-        }}>
-          {error.message || "(no message)"}
-          {error.digest ? `\n\ndigest: ${error.digest}` : ""}
-        </pre>
+        <p className="text-sm text-gray-400">
+          An unexpected error occurred loading this view.
+        </p>
+        {error.digest ? (
+          <button
+            onClick={() => navigator.clipboard.writeText(error.digest!)}
+            className="mt-2 text-xs text-gray-500 hover:text-gray-300 underline"
+            aria-label="Copy error reference for support"
+          >
+            Reference: {error.digest} (click to copy)
+          </button>
+        ) : null}
         <button
           onClick={reset}
           style={{
@@ -59,6 +57,11 @@ export default function CommandCenterError({
         >
           Try again
         </button>
+        {process.env.NODE_ENV !== "production" && error.message ? (
+          <pre className="mt-4 text-xs text-red-400 whitespace-pre-wrap">
+            {error.message}
+          </pre>
+        ) : null}
       </div>
     </div>
   )

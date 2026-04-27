@@ -76,3 +76,9 @@ staging.
 a Postgres trigger → webhook to send a Slack/email/SMS alert when an unack'd
 `fail_closed_pause` row appears. Today operators only see them by checking
 the table.
+
+## P1 — repo-hygiene baseline captured 2026-04-26 at commit 6
+- Repair tests/unit/dispatch-flow.test.ts (17 failing cases on STATUS/DONE/CANCEL/free-text/unknown-driver)
+- Repair tests/unit/customer-name-extraction.test.ts (1 failing case)
+- Sweep no-explicit-any: 588 errors / 105 warnings repo-wide, primarily test files + route handlers
+- These failures pre-date this branch and were not introduced by P0 commits c4d0a00 → commit 6.
