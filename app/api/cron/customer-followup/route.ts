@@ -75,7 +75,7 @@ export async function GET(request: NextRequest) {
   let sent = 0
   let skipped = 0
   for (const c of followUps) {
-    await withFailClosed(c.phone, async () => {
+    await withFailClosed(c.phone, async (setSendCommitted) => {
       // Atomic shared cap+cooldown across rescue-stuck and customer-followup.
       // Returns false if cap reached, in 24h cooldown, or human owns conversation.
       const { data: claimed } = await sb.rpc("claim_followup_attempt", { p_phone: c.phone })
@@ -109,6 +109,9 @@ export async function GET(request: NextRequest) {
         console.error("[followup] send failed:", c.phone, sendResult.error)
         return
       }
+      // Customer just received the message. Failures past this point are
+      // post-send audit issues, not brain failures — don't pause the convo.
+      setSendCommitted()
 
       await sb.from("customer_sms_logs").insert({
         phone: c.phone, body: sendResult.sanitizedBody, direction: "outbound",

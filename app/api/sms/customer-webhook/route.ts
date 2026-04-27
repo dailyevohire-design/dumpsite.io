@@ -184,7 +184,7 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Step 5: brain inference, wrapped in withFailClosed ──
-  return withFailClosed(phone, async () => {
+  return withFailClosed(phone, async (setSendCommitted) => {
     const rawReply = await handleCustomerSMS({ from, body: body.trim(), messageSid, numMedia, mediaUrl, sourceNumber })
     if (!rawReply) return twimlEmpty()
     // Sanitize synchronously so a forbidden-marker reply triggers fail-closed
@@ -279,6 +279,12 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // Customer just received the message. Note: this runs inside after()
+        // which executes after withFailClosed has returned — the flag is kept
+        // for consistency and would matter if after() were ever wrapped in its
+        // own withFailClosed in the future.
+        setSendCommitted()
+
         // Success — remove the pending_send marker
         try {
           await createAdminSupabase().from("customer_sms_logs").delete().eq("message_sid", pendingSid)
@@ -295,6 +301,11 @@ export async function POST(req: NextRequest) {
       }
     })
 
+    // INVARIANT: no code between after() schedule and return twimlEmpty().
+    // Adding a throwable line here re-introduces the double-send class. The
+    // primary send is dispatched async; this body is the gate. If you need to
+    // do post-schedule work, do it inside after() so failures flow through
+    // setSendCommitted, not through the sync catch.
     return twimlEmpty()
   }, {
     source: "customer-webhook",

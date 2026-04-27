@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { withFailClosed } from "../fail-closed"
 
-// Track the side-effects withFailClosed performs.
 const updateMock = vi.fn().mockResolvedValue({ data: null, error: null })
 const insertMock = vi.fn().mockResolvedValue({ data: null, error: null })
 
@@ -51,7 +50,7 @@ describe("withFailClosed", () => {
     })
     expect(insertMock).toHaveBeenCalledWith("brain_alerts", expect.objectContaining({
       phone: "5551234567",
-      alert_class: "fail_closed_pause",
+      alert_class: "brain_error",
       source: "test-sanitizer",
     }))
   })
@@ -101,5 +100,66 @@ describe("withFailClosed", () => {
     ).rejects.toThrow("would be caught")
     expect(updateMock).not.toHaveBeenCalled()
     expect(insertMock).not.toHaveBeenCalled()
+  })
+
+  // ── 3 new cases for sendCommitted behavior ────────────────────────────────
+
+  it("pauses conversation when error occurs before send committed", async () => {
+    const result = await withFailClosed(
+      "5551234567",
+      async (_setSendCommitted) => {
+        // never call setSendCommitted; throw immediately
+        throw new Error("brain inference failed")
+      },
+      { onError, source: "pre-send" },
+    )
+    expect(result).toBe("fallback-response")
+    expect(updateMock).toHaveBeenCalledWith("customer_conversations", {
+      mode: "HUMAN_ACTIVE",
+      needs_human_review: true,
+    })
+    expect(insertMock).toHaveBeenCalledWith("brain_alerts", expect.objectContaining({
+      alert_class: "brain_error",
+    }))
+  })
+
+  it("does NOT pause conversation when error occurs after send committed", async () => {
+    const result = await withFailClosed(
+      "5551234567",
+      async (setSendCommitted) => {
+        // simulate: send succeeds, audit log throws
+        setSendCommitted()
+        throw new Error("post-send audit log insert failed")
+      },
+      { onError, source: "post-send-audit" },
+    )
+    expect(result).toBe("fallback-response")
+    // NO conversation pause — customer already got their message
+    expect(updateMock).not.toHaveBeenCalledWith("customer_conversations", expect.any(Object))
+    // alert still recorded but with the post-send class
+    expect(insertMock).toHaveBeenCalledWith("brain_alerts", expect.objectContaining({
+      alert_class: "post_send_audit_failure",
+      source: "post-send-audit",
+    }))
+  })
+
+  it("does not double-send if error occurs after primary send", async () => {
+    const sendFn = vi.fn().mockResolvedValue(undefined)
+
+    const result = await withFailClosed(
+      "5551234567",
+      async (setSendCommitted) => {
+        await sendFn()           // primary send (mocked)
+        setSendCommitted()       // mark committed
+        throw new Error("post-send DB write failed")
+      },
+      { onError, source: "no-double-send" },
+    )
+
+    expect(result).toBe("fallback-response")
+    expect(sendFn).toHaveBeenCalledTimes(1) // wrapper does NOT add a second send
+    expect(insertMock).toHaveBeenCalledWith("brain_alerts", expect.objectContaining({
+      alert_class: "post_send_audit_failure",
+    }))
   })
 })

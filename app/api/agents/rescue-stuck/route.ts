@@ -459,7 +459,7 @@ export async function GET(request: NextRequest) {
     .limit(20)
 
   for (const conv of stuckSarah || []) {
-    await withFailClosed(conv.phone, async () => {
+    await withFailClosed(conv.phone, async (setSendCommitted) => {
       // Atomic shared cap+cooldown across rescue + customer-followup crons.
       // Predicate (in RPC): mode=AI_ACTIVE, !opted_out, !human_review, !paused,
       // follow_up_count<3, no inbound/outbound/followup in last 24h. Updates
@@ -545,6 +545,9 @@ export async function GET(request: NextRequest) {
         results.failed++
         return
       }
+      // Customer just received the message. Failures past this point are
+      // post-send audit issues, not brain failures — don't pause the convo.
+      setSendCommitted()
 
       await insertSmsLog(sb, "customer_sms_logs", {
         phone: conv.phone,

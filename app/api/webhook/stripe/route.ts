@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Stripe from 'stripe'
 import { createAdminSupabase } from '@/lib/supabase'
 import { sendOutboundSMS } from '@/lib/sms'
+import { withFailClosed } from '@/lib/sms/fail-closed'
 import twilio from 'twilio'
 
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '7134439223').replace(/\D/g, '')
@@ -162,12 +163,16 @@ export async function POST(req: NextRequest) {
 
     // SMS customer — payment confirmed, delivery scheduled
     const totalDollars = ((conv.priority_total_cents || 0) / 100).toLocaleString('en-US', { maximumFractionDigits: 0 })
-    try {
+    await withFailClosed(normalizedPhone, async (setSendCommitted) => {
       await sendCustomerSMS(normalizedPhone,
         `Payment received, you're all set. Your ${conv.yards_needed || 10} yards of ${material} is confirmed for ${guaranteedDate}. You'll get a text when your driver is heading your way.`)
-    } catch (err) {
-      console.error('[stripe webhook] Customer SMS failed:', err)
-    }
+      // Customer just received the confirmation. Failures past this point are
+      // post-send audit issues (audit_logs insert, admin SMS) — don't pause.
+      setSendCommitted()
+    }, {
+      source: 'stripe-customer-confirmation',
+      onError: async () => null,
+    })
 
     // SMS admin
     await sendAdminSMS(
