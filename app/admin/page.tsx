@@ -247,14 +247,18 @@ export default function AdminDashboard() {
                   <div style={{display:'flex',gap:'8px'}}>
                     <button onClick={async()=>{
                       if(!confirm('Mark complete? Removes from map and available jobs.')) return
-                      const {createBrowserSupabase} = await import('@/lib/supabase')
-                      await createBrowserSupabase().from('dispatch_orders').update({status:'completed'}).eq('id',order.id)
+                      const res = await fetch(`/api/admin/dispatch-orders/${order.id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ status: 'completed' }),
+                      })
+                      if (!res.ok) { alert('Failed to mark complete'); return }
                       fetchActiveOrders()
                     }} style={{background:'rgba(39,174,96,0.1)',border:'1px solid rgba(39,174,96,0.3)',color:'#27AE60',padding:'8px 16px',borderRadius:'6px',cursor:'pointer',fontSize:'12px',fontWeight:'800'}}>Mark Complete</button>
                     <button onClick={async()=>{
                       if(!confirm('Delete permanently?')) return
-                      const {createBrowserSupabase} = await import('@/lib/supabase')
-                      await createBrowserSupabase().from('dispatch_orders').delete().eq('id',order.id)
+                      const res = await fetch(`/api/admin/dispatch-orders/${order.id}`, { method: 'DELETE' })
+                      if (!res.ok) { alert('Failed to delete'); return }
                       fetchActiveOrders()
                     }} style={{background:'rgba(231,76,60,0.1)',border:'1px solid rgba(231,76,60,0.3)',color:'#E74C3C',padding:'8px 16px',borderRadius:'6px',cursor:'pointer',fontSize:'12px',fontWeight:'800'}}>Delete</button>
                   </div>
